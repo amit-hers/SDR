@@ -1,6 +1,6 @@
 # SDR Data Link
 
-A software-defined radio toolkit built around the [ADALM-PlutoSDR](https://wiki.analog.com/university/tools/pluto) (Zynq-7010 + AD9363). Provides an FM receiver, a bidirectional encrypted digital data link, a SOL8-compatible mesh daemon, an FPGA DSP core, and a browser-based management UI.
+A software-defined radio toolkit built around the [ADALM-PlutoSDR](https://wiki.analog.com/university/tools/pluto) (Zynq-7010 + AD9363). Provides an FM receiver, a bidirectional encrypted digital data link, a Datalink mesh daemon, an FPGA DSP core, and a browser-based management UI.
 
 ---
 
@@ -43,8 +43,8 @@ make link-install
 ├── link_tx.cpp         Data link transmitter (multi-threaded)
 ├── link_rx.cpp         Data link receiver  (multi-threaded)
 ├── link_test.cpp       Software DSP loopback (no hardware)
-├── sol8.cpp            SOL8-compatible mesh/bridge daemon
-├── sol8_test.cpp       Unit tests for sol8 (no hardware)
+├── datalink.cpp       Datalink mesh/bridge daemon
+├── datalink_test.cpp   Unit tests for datalink (no hardware)
 ├── pluto_eth_bridge.c  Ethernet bridge helper
 ├── config.json         Persistent link / radio configuration
 ├── Makefile
@@ -100,7 +100,7 @@ Options accepted by both `link_tx` and `link_rx`:
 make link-webui            # opens http://localhost:8080
 ```
 
-The dashboard lets you start/stop TX, RX, or full-duplex, tune frequency and attenuation live (no restart), run loopback tests, and manage SOL8 modes.
+The dashboard lets you start/stop TX, RX, or full-duplex, tune frequency and attenuation live (no restart), run loopback tests, and manage Datalink modes.
 
 ---
 
@@ -127,9 +127,9 @@ make link-stop             # stop both
 
 ---
 
-## SOL8 Daemon
+## Datalink Daemon
 
-`sol8` implements the core feature set of the DTC/Codan SOL8SDR2x1W radio:
+`datalink` supports the following operating modes:
 
 | Mode | Description |
 |------|-------------|
@@ -137,7 +137,7 @@ make link-stop             # stop both
 | `l2bridge` | Transparent Layer-2 bridge via TAP interface |
 | `p2p-tx` | Unidirectional transmitter |
 | `p2p-rx` | Unidirectional receiver |
-| `scan` | Channel scan → `/tmp/sol8_scan.json` |
+| `scan` | Channel scan → `/tmp/datalink_scan.json` |
 | `ranging` | RSSI-based distance estimation |
 
 **Adaptive modulation** — automatically switches based on SNR:
@@ -150,14 +150,14 @@ make link-stop             # stop both
 | ≥ 22 dB | 64QAM | 6 bps/sym |
 
 ```bash
-make sol8-test             # unit tests — no hardware needed
-make sol8-mesh             # start FDD mesh (TX 434 MHz / RX 439 MHz)
-make sol8-l2bridge         # transparent L2 bridge
-make sol8-scan             # sweep 430–450 MHz in 1 MHz steps
-make sol8-ranging          # print RSSI distance every second
+make datalink-test             # unit tests — no hardware needed
+make datalink-mesh             # start FDD mesh (TX 434 MHz / RX 439 MHz)
+make datalink-l2bridge         # transparent L2 bridge
+make datalink-scan             # sweep 430–450 MHz in 1 MHz steps
+make datalink-ranging          # print RSSI distance every second
 ```
 
-SOL8 frame format (v2, 22-byte overhead):
+Datalink frame format (v2, 22-byte overhead):
 ```
 [SYNC 4B 0xC0FFEE77] [VER 1B] [FLAGS 1B] [MOD 1B] [BW 1B]
 [NODE_ID 4B] [SEQ 4B] [LEN 2B] [PAYLOAD N] [CRC32 4B]
@@ -193,7 +193,7 @@ make link-fpga             # requires Vivado HLS 2019.1+
   "radio":    { "freq_mhz": 434.0, "rate_msps": 20, "mod": "QPSK", "tx_atten_db": 10 },
   "link":     { "pluto_ip": "192.168.2.1", "source": "stdin", "sink": "stdout" },
   "security": { "encrypt": false, "key_hex": "0000...0000" },
-  "sol8":     { "freq_tx": 434, "freq_rx": 439, "bw_mhz": 10, "mod": "AUTO" }
+  "datalink":  { "freq_tx": 434, "freq_rx": 439, "bw_mhz": 10, "mod": "AUTO" }
 }
 ```
 
@@ -223,7 +223,7 @@ make link-arm       Cross-compile for Zynq ARM
 make link-deploy    Build + copy ARM binaries to PlutoSDR
 make link-webui     Start web UI at http://localhost:8080
 make link-fpga      Synthesize FPGA QPSK IP (Vivado HLS)
-make sol8           Build SOL8 daemon
-make sol8-test      Run SOL8 unit tests (no hardware)
+make datalink          Build Datalink daemon
+make datalink-test      Run Datalink unit tests (no hardware)
 make clean          Remove all build artifacts
 ```

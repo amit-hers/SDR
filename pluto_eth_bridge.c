@@ -2,9 +2,9 @@
  * pluto_eth_bridge.c — Runs on PlutoSDR Zynq ARM
  *
  * Bridges the physical Ethernet (eth0 / RJ45) to a UDP tunnel
- * that connects to the host PC running sol8.
+ * that connects to the host PC running the datalink daemon.
  *
- * Host PC (sol8 L2bridge TAP) <──UDP 5900/5901──> Zynq (this daemon) <──raw socket──> eth0 (RJ45)
+ * Host PC (datalink l2bridge TAP) <──UDP 5900/5901──> Zynq (this daemon) <──raw socket──> eth0 (RJ45)
  *
  * Build (on host with cross-compiler):
  *   arm-linux-gnueabihf-gcc -O2 -static -o pluto_eth_bridge pluto_eth_bridge.c

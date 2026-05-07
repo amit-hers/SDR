@@ -23,7 +23,7 @@
     "log_level": "info",
     "stats_interval_s": 2
   },
-  "sol8": {
+  "datalink": {
     "freq_tx": 434,
     "freq_rx": 434,
     "bw_mhz": 10,

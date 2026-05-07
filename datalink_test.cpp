@@ -1,5 +1,5 @@
 /*
- * sol8_test.cpp  —  SOL8-compatible SDR comprehensive test suite
+ * datalink_test.cpp  —  SDR link comprehensive test suite
  *
  * Tests (all software, no hardware required):
  *   Test 1: Frame encode/decode — all flag combinations
@@ -10,12 +10,12 @@
  *   Test 6: Full end-to-end loopback — all modulations, extended headers
  *
  * Build:
- *   g++ -O2 -std=c++17 sol8_test.cpp -o sol8_test -lliquid -lssl -lcrypto -lm
+ *   g++ -O2 -std=c++17 datalink_test.cpp -o datalink_test -lliquid -lssl -lcrypto -lm
  *
  * Usage:
- *   ./sol8_test          (all tests)
- *   ./sol8_test 2        (run only Test 2)
- *   ./sol8_test ber      (alias for Test 2)
+ *   ./datalink_test          (all tests)
+ *   ./datalink_test 2        (run only Test 2)
+ *   ./datalink_test ber      (alias for Test 2)
  */
 
 #include <liquid/liquid.h>
@@ -28,9 +28,9 @@
 #include <time.h>
 #include <assert.h>
 
-/* ── replicate the essential constants from sol8.cpp ───────── */
-#define SOL8_SYNC    0xC0FFEE77U
-#define SOL8_VER     0x02
+/* ── replicate the essential constants from datalink.cpp ───────── */
+#define DATALINK_SYNC    0xC0FFEE77U
+#define DATALINK_VER     0x02
 #define MAX_PAYLOAD  1400
 #define SPS          4
 #define ROLLOFF      0.35f
@@ -86,9 +86,9 @@ static int build_frame(const uint8_t*pl,int plen,
     uint8_t enc_buf[MAX_PAYLOAD];
     if(enc){aes_ctr(key,ctr,pl,enc_buf,plen);pl=enc_buf;}
     int p=0;
-    out[p++]=(SOL8_SYNC>>24)&0xFF; out[p++]=(SOL8_SYNC>>16)&0xFF;
-    out[p++]=(SOL8_SYNC>> 8)&0xFF; out[p++]= SOL8_SYNC     &0xFF;
-    out[p++]=SOL8_VER;
+    out[p++]=(DATALINK_SYNC>>24)&0xFF; out[p++]=(DATALINK_SYNC>>16)&0xFF;
+    out[p++]=(DATALINK_SYNC>> 8)&0xFF; out[p++]= DATALINK_SYNC     &0xFF;
+    out[p++]=DATALINK_VER;
     out[p++]=flags|(enc?FL_ENCRYPT:0);
     out[p++]=mod; out[p++]=bw;
     uint32_t nid=g_node_id;
@@ -116,9 +116,9 @@ struct Decoder {
         switch(state){
         case S::HUNT:
             shift=(shift<<8)|b;
-            if(shift==SOL8_SYNC){
-                buf[0]=(SOL8_SYNC>>24)&0xFF;buf[1]=(SOL8_SYNC>>16)&0xFF;
-                buf[2]=(SOL8_SYNC>> 8)&0xFF;buf[3]= SOL8_SYNC     &0xFF;
+            if(shift==DATALINK_SYNC){
+                buf[0]=(DATALINK_SYNC>>24)&0xFF;buf[1]=(DATALINK_SYNC>>16)&0xFF;
+                buf[2]=(DATALINK_SYNC>> 8)&0xFF;buf[3]= DATALINK_SYNC     &0xFF;
                 pos=4;state=S::HDR;expect=14;
             }
             break;
@@ -498,14 +498,14 @@ static void test5_bw_scaling(){
     }
     CHECK(scaling_ok,"throughput scales with BW (1.25→10 MHz)");
 
-    /* SOL8 target: 5 MB/s = 40 Mbps at 20 MHz BW */
+    /* target: 5 MB/s = 40 Mbps at 20 MHz BW */
     float sym_rate=20000000.0f/SPS;
     float qpsk_20mhz=sym_rate*2;
     CHECK(qpsk_20mhz>=10e6f,"20MHz QPSK ≥ 10 Mbps");
     float qam64_20mhz=sym_rate*6;
     CHECK(qam64_20mhz>=30e6f,"20MHz 64QAM ≥ 30 Mbps");
 
-    printf("  SOL8 target 5MB/s = 40Mbps: our 20MHz QPSK=%.0f Mbps, 64QAM=%.0f Mbps\n",
+    printf("  target 5MB/s = 40Mbps: our 20MHz QPSK=%.0f Mbps, 64QAM=%.0f Mbps\n",
            qpsk_20mhz/1e6f, qam64_20mhz/1e6f);
 }
 
@@ -615,7 +615,7 @@ int main(int argc,char*argv[]){
         else run_only=atoi(argv[1]);
     }
 
-    printf("=== SOL8 SDR Test Suite ===\n");
+    printf("=== Datalink SDR Test Suite ===\n");
 
     if(run_only<0||run_only==1) test1_frame_codec();
     if(run_only<0||run_only==2) test2_ber_curves();

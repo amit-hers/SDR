@@ -13,12 +13,12 @@ app = Flask(__name__)
 BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_FILE     = os.path.join(BASE, "config.json")
 STATS_FILE   = "/tmp/sdr_link_stats.json"
-SOL8_STATS   = "/tmp/sol8_stats.json"
-SOL8_SCAN    = "/tmp/sol8_scan.json"
-SOL8_CTRL    = "/tmp/sol8_ctrl"
+DATALINK_STATS   = "/tmp/datalink_stats.json"
+DATALINK_SCAN    = "/tmp/datalink_scan.json"
+DATALINK_CTRL    = "/tmp/datalink_ctrl"
 
 # Running link processes (tx/rx can run simultaneously for full-duplex)
-procs = {"tx": None, "rx": None, "sol8": None}
+procs = {"tx": None, "rx": None, "datalink": None}
 proc_lock = threading.Lock()
 
 # ── Config helpers ─────────────────────────────────────────────────────────
@@ -272,13 +272,13 @@ def api_loopback():
         return jsonify({"ok": False, "msg": str(e)})
 
 
-# ── SOL8 process management ────────────────────────────────────────────────
+# ── Datalink process management ────────────────────────────────────────────────
 
-def build_sol8_args(cfg, mode, extra=None):
-    """Build sol8 CLI args from config + mode."""
-    s8 = cfg.get("sol8", {})
+def build_datalink_args(cfg, mode, extra=None):
+    """Build datalink CLI args from config + mode."""
+    s8 = cfg.get("datalink", {})
     r  = cfg.get("radio", {})
-    exe = os.path.join(BASE, "sol8")
+    exe = os.path.join(BASE, "datalink")
     args = [exe, "--mode", mode]
 
     # Frequencies
@@ -317,61 +317,61 @@ def build_sol8_args(cfg, mode, extra=None):
     return args
 
 
-@app.route("/api/sol8/start", methods=["POST"])
-def api_sol8_start():
+@app.route("/api/datalink/start", methods=["POST"])
+def api_datalink_start():
     d    = request.get_json(force=True) or {}
     mode = d.get("mode", "p2p-rx")
     cfg  = load_config()
-    # Merge any extra sol8 config from the request
-    if "sol8" in d:
-        cfg.setdefault("sol8", {}).update(d["sol8"])
+    # Merge any extra datalink config from the request
+    if "datalink" in d:
+        cfg.setdefault("datalink", {}).update(d["datalink"])
         save_config(cfg)
-    args = build_sol8_args(cfg, mode)
-    ok, msg = start_proc("sol8", args)
+    args = build_datalink_args(cfg, mode)
+    ok, msg = start_proc("datalink", args)
     return jsonify({"ok": ok, "msg": msg, "mode": mode, "args": args})
 
 
-@app.route("/api/sol8/stop", methods=["POST"])
-def api_sol8_stop():
-    ok, msg = stop_proc("sol8")
+@app.route("/api/datalink/stop", methods=["POST"])
+def api_datalink_stop():
+    ok, msg = stop_proc("datalink")
     return jsonify({"ok": ok, "msg": msg})
 
 
-@app.route("/api/sol8/status")
-def api_sol8_status():
+@app.route("/api/datalink/status")
+def api_datalink_status():
     stats = {}
     try:
-        with open(SOL8_STATS) as f:
+        with open(DATALINK_STATS) as f:
             stats = json.load(f)
     except Exception:
         pass
     return jsonify({
-        "running": proc_status("sol8") == "running",
+        "running": proc_status("datalink") == "running",
         "stats": stats,
     })
 
 
-@app.route("/api/sol8/scan")
-def api_sol8_scan():
-    """Return last channel scan results from sol8."""
+@app.route("/api/datalink/scan")
+def api_datalink_scan():
+    """Return last channel scan results from datalink."""
     try:
-        with open(SOL8_SCAN) as f:
+        with open(DATALINK_SCAN) as f:
             return jsonify({"ok": True, "scan": json.load(f)})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e), "scan": []})
 
 
-@app.route("/api/sol8/ctrl", methods=["POST"])
-def api_sol8_ctrl():
-    """Send runtime control to running sol8 (atten, freq_tx, freq_rx, mod)."""
+@app.route("/api/datalink/ctrl", methods=["POST"])
+def api_datalink_ctrl():
+    """Send runtime control to running datalink (atten, freq_tx, freq_rx, mod)."""
     d     = request.get_json(force=True) or {}
     atten = d.get("atten_db", -1)
     ftx   = d.get("freq_tx", -1.0)
     frx   = d.get("freq_rx", -1.0)
     mod   = d.get("mod_code", -1)
-    with open(SOL8_CTRL, "w") as f:
+    with open(DATALINK_CTRL, "w") as f:
         f.write(f"{int(atten)} {float(ftx):.6f} {float(frx):.6f} {int(mod)}\n")
-    p = procs.get("sol8")
+    p = procs.get("datalink")
     if p and p.poll() is None:
         try:
             os.kill(p.pid, 10)   # SIGUSR1
@@ -379,10 +379,10 @@ def api_sol8_ctrl():
         except Exception as e:
             msg = f"signal failed: {e}"
     else:
-        msg = "saved (sol8 not running)"
+        msg = "saved (datalink not running)"
     cfg = load_config()
     r   = cfg.setdefault("radio", {})
-    s8  = cfg.setdefault("sol8",  {})
+    s8  = cfg.setdefault("datalink",  {})
     if atten >= 0:   r["tx_atten_db"] = atten
     if ftx   > 0:    s8["freq_tx"]    = ftx
     if frx   > 0:    s8["freq_rx"]    = frx
@@ -390,12 +390,12 @@ def api_sol8_ctrl():
     return jsonify({"ok": True, "msg": msg})
 
 
-@app.route("/api/sol8/test", methods=["POST"])
-def api_sol8_test():
-    """Run sol8_test suite (no hardware)."""
-    exe = os.path.join(BASE, "sol8_test")
+@app.route("/api/datalink/test", methods=["POST"])
+def api_datalink_test():
+    """Run datalink_test suite (no hardware)."""
+    exe = os.path.join(BASE, "datalink_test")
     if not os.path.exists(exe):
-        return jsonify({"ok": False, "msg": "sol8_test not built — run: make sol8-test"})
+        return jsonify({"ok": False, "msg": "datalink_test not built — run: make datalink-test"})
     try:
         r = subprocess.run([exe], capture_output=True, text=True, timeout=120)
         return jsonify({"ok": r.returncode == 0, "output": r.stdout + r.stderr})
@@ -403,19 +403,19 @@ def api_sol8_test():
         return jsonify({"ok": False, "msg": str(e)})
 
 
-# ── Extend SSE to include sol8 stats ──────────────────────────────────────
+# ── Extend SSE to include datalink stats ──────────────────────────────────────
 
 def _merge_stats():
     payload = {"tx": proc_status("tx"), "rx": proc_status("rx"),
-               "sol8": proc_status("sol8"), "stats": {}, "sol8_stats": {}}
+               "datalink": proc_status("datalink"), "stats": {}, "datalink_stats": {}}
     try:
         with open(STATS_FILE) as f:
             payload["stats"] = json.load(f)
     except Exception:
         pass
     try:
-        with open(SOL8_STATS) as f:
-            payload["sol8_stats"] = json.load(f)
+        with open(DATALINK_STATS) as f:
+            payload["datalink_stats"] = json.load(f)
     except Exception:
         pass
     return payload

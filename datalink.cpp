@@ -1,18 +1,17 @@
 /*
- * sol8.cpp  —  SOL8-compatible SDR link daemon
+ * datalink.cpp  —  SDR link daemon
  *
- * Implements the core feature set of the DTC/Codan SOL8SDR2x1W:
- *   SDRAPP-MESH     IP MANET mesh via TUN interface (FDD full-duplex)
- *   SDRAPP-TX       Unidirectional COFDM transmitter (P2P-TX)
- *   SDRAPP-RX       Unidirectional COFDM receiver    (P2P-RX)
- *   SDRAPP-L2BRIDGE Transparent Layer-2 bridge via TAP interface
- *   SDRAPP-P2MP     Point-to-multipoint (broadcast TX to N receivers)
- *   Ranging         RSSI-based distance estimation
- *   IAS             Interference avoidance / channel scan
+ * Modes:
+ *   mesh      IP MANET mesh via TUN interface (FDD full-duplex)
+ *   p2p-tx    Unidirectional COFDM transmitter
+ *   p2p-rx    Unidirectional COFDM receiver
+ *   l2bridge  Transparent Layer-2 bridge via TAP interface
+ *   ranging   RSSI-based distance estimation
+ *   scan      Interference avoidance / channel scan
  *   Adaptive mod    Auto BPSK/QPSK/16QAM/64QAM by SNR
  *   AES-256-CTR     Per-frame encryption (FIPS 140-2)
  *
- * Frame format (SOL8 v2, sync=0xC0FFEE77, 22 bytes overhead):
+ * Frame format (v2, sync=0xC0FFEE77, 22 bytes overhead):
  *   [SYNC  4B BE] [VER 1B=0x02] [FLAGS 1B] [MOD 1B] [BW 1B]
  *   [NODEID 4B BE] [SEQ 4B BE] [LEN 2B BE] [PAYLOAD N] [CRC32 4B LE]
  *
@@ -27,15 +26,15 @@
  *   10 MHz  → 20 MSPS    |  20 MHz  → 20 MSPS (PlutoSDR USB ceiling)
  *
  * Build:
- *   g++ -O2 -std=c++17 -pthread sol8.cpp -o sol8 \
+ *   g++ -O2 -std=c++17 -pthread datalink.cpp -o datalink \
  *       -liio -lliquid -lssl -lcrypto -lm -lpthread
  *
  * Usage:
- *   sudo ./sol8 --mode mesh    --freq-tx 434.0 --freq-rx 439.0 --bw 10
- *        ./sol8 --mode p2p-tx  --freq 434.0 --bw 20 --mod QPSK
- *        ./sol8 --mode p2p-rx  --freq 434.0 --bw 20 --mod AUTO
- *        ./sol8 --mode scan    --freq 430.0 --scan-step 1.0 --scan-n 20
- *        ./sol8 --mode ranging --freq 434.0 --tx-power 0 --tx-gain 10
+ *   sudo ./datalink --mode mesh    --freq-tx 434.0 --freq-rx 439.0 --bw 10
+ *        ./datalink --mode p2p-tx  --freq 434.0 --bw 20 --mod QPSK
+ *        ./datalink --mode p2p-rx  --freq 434.0 --bw 20 --mod AUTO
+ *        ./datalink --mode scan    --freq 430.0 --scan-step 1.0 --scan-n 20
+ *        ./datalink --mode ranging --freq 434.0 --tx-power 0 --tx-gain 10
  */
 
 #include <iio.h>
@@ -73,8 +72,8 @@
 #include <algorithm>
 
 /* ── Frame constants ────────────────────────────────────────── */
-#define SOL8_SYNC    0xC0FFEE77U   /* distinguishes from P2P 0xDEADBEEF */
-#define SOL8_VER     0x02
+#define DATALINK_SYNC    0xC0FFEE77U   /* distinguishes from P2P 0xDEADBEEF */
+#define DATALINK_VER     0x02
 #define MAX_PAYLOAD  1400          /* IPv4 MTU */
 #define SPS          4
 #define ROLLOFF      0.35f
@@ -124,7 +123,7 @@ struct Config {
     double      scan_step   = 1.0;     /* MHz */
     int         scan_n      = 10;
     /* TUN/TAP */
-    const char* iface       = "sol8";
+    const char* iface       = "datalink";
 };
 
 /* ── Globals ─────────────────────────────────────────────────── */
@@ -138,7 +137,7 @@ static iio_channel*       g_lo_tx = nullptr;
 
 static void on_sig(int)  { g_stop.store(true); }
 static void on_usr1(int) {
-    FILE* f = fopen("/tmp/sol8_ctrl", "r");
+    FILE* f = fopen("/tmp/datalink_ctrl", "r");
     if (!f) return;
     int a=-1; float fr=-1.0f;
     int _r = fscanf(f, "%d %f", &a, &fr); (void)_r;
@@ -184,9 +183,9 @@ static void aes_ctr(const uint8_t* key, uint64_t ctr,
 static uint32_t g_node_id = 0;   /* set in main() from hostname hash */
 static uint32_t g_tx_seq  = 0;
 
-/* build_sol8_frame: returns total frame bytes.
+/* build_datalink_frame: returns total frame bytes.
  * out must be at least plen + 22 bytes. */
-static int build_sol8_frame(const uint8_t* pl, int plen,
+static int build_datalink_frame(const uint8_t* pl, int plen,
                              uint8_t flags, uint8_t mod, uint8_t bw,
                              bool enc, const uint8_t* key, uint64_t ctr,
                              uint8_t* out) {
@@ -195,9 +194,9 @@ static int build_sol8_frame(const uint8_t* pl, int plen,
 
     int p = 0;
     /* SYNC big-endian */
-    out[p++]=(SOL8_SYNC>>24)&0xFF; out[p++]=(SOL8_SYNC>>16)&0xFF;
-    out[p++]=(SOL8_SYNC>> 8)&0xFF; out[p++]= SOL8_SYNC     &0xFF;
-    out[p++] = SOL8_VER;
+    out[p++]=(DATALINK_SYNC>>24)&0xFF; out[p++]=(DATALINK_SYNC>>16)&0xFF;
+    out[p++]=(DATALINK_SYNC>> 8)&0xFF; out[p++]= DATALINK_SYNC     &0xFF;
+    out[p++] = DATALINK_VER;
     out[p++] = flags | (enc ? FL_ENCRYPT : 0);
     out[p++] = mod;
     out[p++] = bw;
@@ -219,8 +218,8 @@ static int build_sol8_frame(const uint8_t* pl, int plen,
     return p;
 }
 
-/* SOL8 frame decoder state machine */
-struct Sol8Decoder {
+/* DATALINK frame decoder state machine */
+struct DatalinkDecoder {
     enum class S { HUNT, HDR, PAYLOAD } state = S::HUNT;
     uint32_t shift   = 0;
     uint8_t  buf[MAX_PAYLOAD + 32] = {};
@@ -240,9 +239,9 @@ struct Sol8Decoder {
         switch (state) {
         case S::HUNT:
             shift = (shift << 8) | b;
-            if (shift == SOL8_SYNC) {
-                buf[0]=(SOL8_SYNC>>24)&0xFF; buf[1]=(SOL8_SYNC>>16)&0xFF;
-                buf[2]=(SOL8_SYNC>> 8)&0xFF; buf[3]= SOL8_SYNC     &0xFF;
+            if (shift == DATALINK_SYNC) {
+                buf[0]=(DATALINK_SYNC>>24)&0xFF; buf[1]=(DATALINK_SYNC>>16)&0xFF;
+                buf[2]=(DATALINK_SYNC>> 8)&0xFF; buf[3]= DATALINK_SYNC     &0xFF;
                 pos=4; state=S::HDR; expect=14; /* VER..LEN = 14 bytes */
             }
             break;
@@ -365,12 +364,12 @@ static float bw_mhz(int bw_code) {
 #ifdef __linux__
 static int tuntap_open(const char* ifname, bool tap) {
     int fd = open("/dev/net/tun", O_RDWR);
-    if (fd < 0) { perror("[sol8] /dev/net/tun"); return -1; }
+    if (fd < 0) { perror("[datalink] /dev/net/tun"); return -1; }
     struct ifreq ifr = {};
     ifr.ifr_flags = (tap ? IFF_TAP : IFF_TUN) | IFF_NO_PI;
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ-1);
     if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
-        perror("[sol8] TUNSETIFF"); close(fd); return -1;
+        perror("[datalink] TUNSETIFF"); close(fd); return -1;
     }
     /* Bring interface up */
     int s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -380,14 +379,14 @@ static int tuntap_open(const char* ifname, bool tap) {
     ifr2.ifr_flags |= IFF_UP | IFF_RUNNING;
     ioctl(s, SIOCSIFFLAGS, &ifr2);
     close(s);
-    fprintf(stderr, "[sol8] %s interface '%s' up — set IP with:\n"
+    fprintf(stderr, "[datalink] %s interface '%s' up — set IP with:\n"
                     "       sudo ip addr add 10.0.8.1/24 dev %s\n",
             tap ? "TAP" : "TUN", ifname, ifname);
     return fd;
 }
 #else
 static int tuntap_open(const char*, bool) {
-    fprintf(stderr, "[sol8] TUN/TAP only supported on Linux\n");
+    fprintf(stderr, "[datalink] TUN/TAP only supported on Linux\n");
     return -1;
 }
 #endif
@@ -447,7 +446,7 @@ public:
 /* ═══════════════════════════════════════════════════════════════
  * Stats
  * ═══════════════════════════════════════════════════════════════ */
-struct Sol8Stats {
+struct DatalinkStats {
     std::atomic<uint64_t> frames_tx{0};
     std::atomic<uint64_t> frames_rx_good{0};
     std::atomic<uint64_t> frames_rx_bad{0};
@@ -459,7 +458,7 @@ struct Sol8Stats {
     int   cur_mod   = MOD_QPSK;
 };
 
-static void write_stats(const Config& c, const Sol8Stats& s,
+static void write_stats(const Config& c, const DatalinkStats& s,
                         double uptime, float tx_kbps, float rx_kbps) {
     /* Ranging: RSSI-based distance model
      * FSPL(d,f) = 20log10(d_km) + 20log10(f_MHz) + 20log10(4π/c * 1e9) */
@@ -471,7 +470,7 @@ static void write_stats(const Config& c, const Sol8Stats& s,
         dist_km = powf(10.0f, (path_db - fspl_ref) / 20.0f);
     }
 
-    FILE* f = fopen("/tmp/sol8_stats.json", "w");
+    FILE* f = fopen("/tmp/datalink_stats.json", "w");
     if (!f) return;
     fprintf(f,
         "{\"mode\":\"%s\","
@@ -522,13 +521,13 @@ struct IIOCtx {
 
 static bool iio_setup(IIOCtx& io, const Config& c, bool need_tx, bool need_rx) {
     io.ctx = iio_create_network_context(c.pluto_ip);
-    if (!io.ctx) { fprintf(stderr,"[sol8] Cannot connect to %s\n",c.pluto_ip); return false; }
+    if (!io.ctx) { fprintf(stderr,"[datalink] Cannot connect to %s\n",c.pluto_ip); return false; }
 
     io.phy    = iio_context_find_device(io.ctx, "ad9361-phy");
     io.tx_dev = iio_context_find_device(io.ctx, "cf-ad9361-dds-core-lpc");
     io.rx_dev = iio_context_find_device(io.ctx, "cf-ad9361-lpc");
     if (!io.phy||!io.tx_dev||!io.rx_dev) {
-        fprintf(stderr,"[sol8] Devices not found\n"); return false;
+        fprintf(stderr,"[datalink] Devices not found\n"); return false;
     }
 
     long long rate = bw_to_rate(c.bw_code);
@@ -567,7 +566,7 @@ static bool iio_setup(IIOCtx& io, const Config& c, bool need_tx, bool need_rx) {
  * TX path: frame bytes → IQ → IIO
  * ═══════════════════════════════════════════════════════════════ */
 static void tx_frames(IIOCtx& io, FrameRing<64>& ring,
-                      const Config& c, Sol8Stats& stats,
+                      const Config& c, DatalinkStats& stats,
                       std::atomic<int>& cur_mod_code) {
     int code    = cur_mod_code.load();
     modulation_scheme scheme = AdaptMod::code_to_scheme(code);
@@ -586,25 +585,25 @@ static void tx_frames(IIOCtx& io, FrameRing<64>& ring,
         if (new_code != code) {
             code   = new_code; scheme = AdaptMod::code_to_scheme(code);
             modemcf_destroy(mod); mod = modemcf_create(scheme);
-            fprintf(stderr,"\n[sol8-tx] Modulation → %s\n", AdaptMod::name(code));
+            fprintf(stderr,"\n[datalink-tx] Modulation → %s\n", AdaptMod::name(code));
         }
         /* Check for hardware updates */
         int na = g_new_atten.exchange(-1);
         if (na>=0 && io.txch) {
             iio_channel_attr_write_longlong(io.txch,"hardwaregain",-na);
-            fprintf(stderr,"\n[sol8-tx] Atten=%d dB\n",na);
+            fprintf(stderr,"\n[datalink-tx] Atten=%d dB\n",na);
         }
         float nf = g_new_freq.exchange(-1.0f);
         if (nf>0.0f && io.lo_tx) {
             iio_channel_attr_write_longlong(io.lo_tx,"frequency",(long long)(nf*1e6));
-            fprintf(stderr,"\n[sol8-tx] Freq=%.3f MHz\n",nf);
+            fprintf(stderr,"\n[datalink-tx] Freq=%.3f MHz\n",nf);
         }
 
         auto* slot = ring.peek();
         if (!slot) { std::this_thread::yield(); continue; }
 
         int bps  = AdaptMod::bps(code);
-        int flen = build_sol8_frame(slot->data, slot->len,
+        int flen = build_datalink_frame(slot->data, slot->len,
                                     0, (uint8_t)code, (uint8_t)c.bw_code,
                                     c.encrypt, c.aes_key, frame_ctr++,
                                     frame_buf);
@@ -647,7 +646,7 @@ static void tx_frames(IIOCtx& io, FrameRing<64>& ring,
  * RX path: IIO → IQ → frames
  * Returns decoded payload via callback
  * ═══════════════════════════════════════════════════════════════ */
-static void rx_frames(IIOCtx& io, const Config& c, Sol8Stats& stats,
+static void rx_frames(IIOCtx& io, const Config& c, DatalinkStats& stats,
                       std::atomic<int>& cur_mod_code,
                       std::function<void(const uint8_t*,int,uint8_t)> on_frame) {
     int code = cur_mod_code.load();
@@ -663,7 +662,7 @@ static void rx_frames(IIOCtx& io, const Config& c, Sol8Stats& stats,
     nco_crcf      nco   = nco_crcf_create(LIQUID_VCO);
     nco_crcf_pll_set_bandwidth(nco, 0.04f);
     modemcf       demod = modemcf_create(scheme);
-    Sol8Decoder   dec;
+    DatalinkDecoder   dec;
 
     liquid_float_complex decim_in[SPS]; int didx=0;
     uint8_t  cur_byte=0; int bit_cursor=0;
@@ -768,7 +767,7 @@ static void run_scan(const Config& c) {
     iio_channel_enable(iio_device_find_channel(rx_dev,"voltage1",false));
     iio_buffer* buf = iio_device_create_buffer(rx_dev, 4096, false);
 
-    FILE* out = fopen("/tmp/sol8_scan.json","w");
+    FILE* out = fopen("/tmp/datalink_scan.json","w");
     if (out) fprintf(out, "{\"channels\":[");
 
     printf("%-12s  %s\n", "Freq (MHz)", "Power (dBm)");
@@ -812,7 +811,7 @@ static void run_p2p_tx(const Config& c) {
     if (!iio_setup(io, c, true, false)) return;
 
     FrameRing<64> ring;
-    Sol8Stats     stats;
+    DatalinkStats     stats;
     stats.cur_mod = c.mod_code;
     std::atomic<int> cur_mod{c.mod_code};
     auto t0 = std::chrono::steady_clock::now();
@@ -841,7 +840,7 @@ static void run_p2p_tx(const Config& c) {
             }
             stats.cur_mod = cur_mod.load();
             write_stats(c, stats, up, kbps, 0.0f);
-            fprintf(stderr,"\r[sol8-tx] sent=%-7llu drop=%-4llu %.1f kbps  %s   ",
+            fprintf(stderr,"\r[datalink-tx] sent=%-7llu drop=%-4llu %.1f kbps  %s   ",
                     (unsigned long long)stats.frames_tx.load(),
                     (unsigned long long)stats.dropped.load(),
                     kbps, AdaptMod::name(cur_mod.load()));
@@ -861,7 +860,7 @@ static void run_p2p_rx(const Config& c) {
     IIOCtx io;
     if (!iio_setup(io, c, false, true)) return;
 
-    Sol8Stats     stats;
+    DatalinkStats     stats;
     stats.cur_mod = c.mod_code;
     std::atomic<int> cur_mod{c.mod_code};
     auto t0 = std::chrono::steady_clock::now();
@@ -885,7 +884,7 @@ static void run_p2p_rx(const Config& c) {
             stats.cur_mod = cur_mod.load();
             write_stats(c, stats, up, 0.0f, kbps);
             fprintf(stderr,
-                "\r[sol8-rx] good=%-7llu bad=%-5llu RSSI=%+.1fdB SNR=%.1fdB %.1f kbps  %s   ",
+                "\r[datalink-rx] good=%-7llu bad=%-5llu RSSI=%+.1fdB SNR=%.1fdB %.1f kbps  %s   ",
                 (unsigned long long)stats.frames_rx_good.load(),
                 (unsigned long long)stats.frames_rx_bad.load(),
                 stats.rssi_db, stats.snr_db, kbps,
@@ -908,7 +907,7 @@ static void run_mesh(const Config& c, bool l2bridge) {
     bool tap = l2bridge;
     int tun_fd = tuntap_open(c.iface, tap);
     if (tun_fd < 0) {
-        fprintf(stderr,"[sol8] Cannot open %s — try running as root\n",
+        fprintf(stderr,"[datalink] Cannot open %s — try running as root\n",
                 tap?"TAP":"TUN");
         return;
     }
@@ -916,7 +915,7 @@ static void run_mesh(const Config& c, bool l2bridge) {
     IIOCtx io;
     if (!iio_setup(io, c, true, true)) { close(tun_fd); return; }
 
-    Sol8Stats     stats;
+    DatalinkStats     stats;
     stats.cur_mod = c.mod_code;
     std::atomic<int> cur_mod{c.mod_code};
     FrameRing<64> tx_ring;
@@ -937,7 +936,7 @@ static void run_mesh(const Config& c, bool l2bridge) {
 
     /* Main: read TUN/TAP → tx_ring (with select timeout) */
     uint8_t pkt[MAX_PAYLOAD];
-    fprintf(stderr,"[sol8] %s mesh running | TX %.3f MHz | RX %.3f MHz | BW %.2f MHz\n",
+    fprintf(stderr,"[datalink] %s mesh running | TX %.3f MHz | RX %.3f MHz | BW %.2f MHz\n",
             tap?"L2Bridge":"IP-Mesh", c.freq_tx, c.freq_rx, bw_mhz(c.bw_code));
 
     while (!g_stop.load()) {
@@ -963,7 +962,7 @@ static void run_mesh(const Config& c, bool l2bridge) {
             }
             stats.cur_mod = cur_mod.load();
             write_stats(c, stats, up, txk, rxk);
-            fprintf(stderr,"\r[sol8] TX %.1f kbps | RX %.1f kbps | RSSI %.1f dBm | SNR %.1f dB | %s   ",
+            fprintf(stderr,"\r[datalink] TX %.1f kbps | RX %.1f kbps | RSSI %.1f dBm | SNR %.1f dB | %s   ",
                     txk, rxk, stats.rssi_db, stats.snr_db,
                     AdaptMod::name(cur_mod.load()));
             t_stats = now;
@@ -1076,7 +1075,7 @@ int main(int argc, char** argv) {
     c.tx_power_dbm = 0.0f - (float)c.tx_atten;
 
     fprintf(stderr,
-            "[sol8] mode=%-10s  freq_tx=%.3f freq_rx=%.3f MHz  bw=%.2f MHz  "
+            "[datalink] mode=%-10s  freq_tx=%.3f freq_rx=%.3f MHz  bw=%.2f MHz  "
             "mod=%s%s  node=%08X\n",
             (c.mode==Mode::MESH?"mesh":c.mode==Mode::L2BRIDGE?"l2bridge":
              c.mode==Mode::P2P_TX?"p2p-tx":c.mode==Mode::P2P_RX?"p2p-rx":
@@ -1096,7 +1095,7 @@ int main(int argc, char** argv) {
         /* Ranging: just run RX, print RSSI → distance every second */
         {
             IIOCtx io; iio_setup(io, c, false, true);
-            Sol8Stats stats; stats.cur_mod=c.mod_code;
+            DatalinkStats stats; stats.cur_mod=c.mod_code;
             std::atomic<int> cur_mod{c.mod_code};
             auto on_frame=[](const uint8_t*,int,uint8_t){};
             std::thread rx_thr(rx_frames,std::ref(io),std::cref(c),
@@ -1115,6 +1114,6 @@ int main(int argc, char** argv) {
         }
         break;
     }
-    fprintf(stderr,"\n[sol8] Done.\n");
+    fprintf(stderr,"\n[datalink] Done.\n");
     return 0;
 }

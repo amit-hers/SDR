@@ -7,6 +7,8 @@
 ##   make link-webui        Start web management UI at http://localhost:8080
 ##   make link-test         Software DSP loopback (no hardware needed)
 ##   make link-fpga         Synthesize FPGA QPSK IP (requires Vivado HLS)
+##   make datalink          Build Datalink daemon
+##   make datalink-test     Run Datalink unit tests (no hardware needed)
 ##
 ## ── Performance levels ──────────────────────────────────────────────
 ##   Host mode (default):   DSP on PC, raw IQ over Ethernet  (80 MB/s)
@@ -34,8 +36,8 @@ ARM_LIBS  = -liio -lliquid -lssl -lcrypto -lm -lpthread
         link-arm link-arm-tx link-arm-rx \
         link-deploy link-webui link-install \
         link-tx-run link-rx-run link-fpga \
-        sol8 sol8-test sol8-mesh sol8-l2bridge \
-        sol8-p2p-tx sol8-p2p-rx sol8-scan sol8-ranging \
+        datalink datalink-test datalink-mesh datalink-l2bridge \
+        datalink-p2p-tx datalink-p2p-rx datalink-scan datalink-ranging \
         clean
 
 # ── rx_example (C, basic IQ test) ────────────────────────────────────
@@ -172,72 +174,71 @@ link-fpga:
 	@echo "✓ FPGA IP at fpga/qpsk_modem/solution1/impl/ip/"
 	@echo "  Add to Vivado IP catalog, wire to cf-ad9361-lpc M_AXIS_0"
 
-# ── SOL8-compatible daemon ────────────────────────────────────────────
+# ── Datalink daemon ──────────────────────────────────────────────────
 ##
-## Implements all SOL8SDR2x1W-P features:
-##   Adaptive mod (BPSK/QPSK/16QAM/64QAM), AES-256-CTR, RSSI ranging,
-##   IP mesh (TUN), L2 bridge (TAP), channel scan, P2P TX/RX, FDD
+## Adaptive mod (BPSK/QPSK/16QAM/64QAM), AES-256-CTR, RSSI ranging,
+## IP mesh (TUN), L2 bridge (TAP), channel scan, P2P TX/RX, FDD
 ##
 ## Build:
-sol8: sol8.cpp
-	g++ $(CXXFLAGS) sol8.cpp -o sol8 $(LINK_LIBS) && echo "✓ sol8 OK"
+datalink: datalink.cpp
+	g++ $(CXXFLAGS) datalink.cpp -o datalink $(LINK_LIBS) && echo "✓ datalink OK"
 
 ## Run all unit tests (no hardware needed):
-sol8-test: sol8_test.cpp
-	g++ $(CXXFLAGS) sol8_test.cpp -o sol8_test -lliquid -lssl -lcrypto -lm \
-	    && echo "✓ sol8_test built" && ./sol8_test
+datalink-test: datalink_test.cpp
+	g++ $(CXXFLAGS) datalink_test.cpp -o datalink_test -lliquid -lssl -lcrypto -lm \
+	    && echo "✓ datalink_test built" && ./datalink_test
 
-## Run specific test by number (e.g. make sol8-test-2):
-sol8-test-%: sol8_test.cpp
-	g++ $(CXXFLAGS) sol8_test.cpp -o sol8_test -lliquid -lssl -lcrypto -lm \
-	    && ./sol8_test $*
+## Run specific test by number (e.g. make datalink-test-2):
+datalink-test-%: datalink_test.cpp
+	g++ $(CXXFLAGS) datalink_test.cpp -o datalink_test -lliquid -lssl -lcrypto -lm \
+	    && ./datalink_test $*
 
 ## IP MANET mesh (FDD: TX on FREQ_TX MHz, RX on FREQ_RX MHz):
-FREQ_TX   = 434.0
-FREQ_RX   = 439.0
-SOL8_BW   = 10
-SOL8_NODE = 0x00000001
+FREQ_TX       = 434.0
+FREQ_RX       = 439.0
+DATALINK_BW   = 10
+DATALINK_NODE = 0x00000001
 
-sol8-mesh: sol8
-	sudo ./sol8 --mode mesh \
+datalink-mesh: datalink
+	sudo ./datalink --mode mesh \
 	    --freq-tx $(FREQ_TX) --freq-rx $(FREQ_RX) \
-	    --bw $(SOL8_BW) --node-id $(SOL8_NODE) \
+	    --bw $(DATALINK_BW) --node-id $(DATALINK_NODE) \
 	    --pluto-ip $(PLUTO_IP)
 
 ## L2 Transparent Bridge (TAP device, FDD):
-sol8-l2bridge: sol8
-	sudo ./sol8 --mode l2bridge \
+datalink-l2bridge: datalink
+	sudo ./datalink --mode l2bridge \
 	    --freq-tx $(FREQ_TX) --freq-rx $(FREQ_RX) \
-	    --bw $(SOL8_BW) --node-id $(SOL8_NODE) \
+	    --bw $(DATALINK_BW) --node-id $(DATALINK_NODE) \
 	    --pluto-ip $(PLUTO_IP)
 
 ## Unidirectional transmitter (P2P-TX):
-sol8-p2p-tx: sol8
-	sudo ./sol8 --mode p2p-tx \
-	    --freq $(LINK_FREQ) --bw $(SOL8_BW) --mod AUTO \
+datalink-p2p-tx: datalink
+	sudo ./datalink --mode p2p-tx \
+	    --freq $(LINK_FREQ) --bw $(DATALINK_BW) --mod AUTO \
 	    --pluto-ip $(PLUTO_IP)
 
 ## Unidirectional receiver (P2P-RX):
-sol8-p2p-rx: sol8
-	sudo ./sol8 --mode p2p-rx \
-	    --freq $(LINK_FREQ) --bw $(SOL8_BW) --mod AUTO \
+datalink-p2p-rx: datalink
+	sudo ./datalink --mode p2p-rx \
+	    --freq $(LINK_FREQ) --bw $(DATALINK_BW) --mod AUTO \
 	    --pluto-ip $(PLUTO_IP)
 
-## Channel scan — sweep from FREQ MHz in 1 MHz steps, write /tmp/sol8_scan.json:
+## Channel scan — sweep from FREQ MHz in 1 MHz steps, write /tmp/datalink_scan.json:
 SCAN_FREQ = 430.0
 SCAN_STEP = 1.0
 SCAN_N    = 20
 
-sol8-scan: sol8
-	sudo ./sol8 --mode scan \
+datalink-scan: datalink
+	sudo ./datalink --mode scan \
 	    --freq $(SCAN_FREQ) --scan-step $(SCAN_STEP) --scan-n $(SCAN_N) \
 	    --pluto-ip $(PLUTO_IP)
-	@echo "Scan results: /tmp/sol8_scan.json"
+	@echo "Scan results: /tmp/datalink_scan.json"
 
 ## RSSI-based ranging — print distance every second:
-sol8-ranging: sol8
-	sudo ./sol8 --mode ranging \
-	    --freq $(LINK_FREQ) --bw $(SOL8_BW) \
+datalink-ranging: datalink
+	sudo ./datalink --mode ranging \
+	    --freq $(LINK_FREQ) --bw $(DATALINK_BW) \
 	    --tx-power 30 --tx-gain 10 \
 	    --pluto-ip $(PLUTO_IP)
 
@@ -246,4 +247,4 @@ clean:
 	rm -f rx_example fm_radio fm_scan \
 	      link_tx link_rx link_test \
 	      link_tx_arm link_rx_arm \
-	      sol8 sol8_test
+	      datalink datalink_test
