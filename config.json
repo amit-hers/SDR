@@ -1,0 +1,33 @@
+{
+  "radio": {
+    "freq_mhz": 2400.0,
+    "rate_msps": 20,
+    "mod": "QPSK",
+    "tx_atten_db": 0,
+    "rf_bw_mhz": 18
+  },
+  "link": {
+    "mode": "tx",
+    "pluto_ip": "192.168.2.1",
+    "source": "stdin",
+    "sink": "stdout",
+    "udp_source_port": 5005,
+    "udp_sink_ip": "127.0.0.1",
+    "udp_sink_port": 5006
+  },
+  "security": {
+    "encrypt": false,
+    "key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "system": {
+    "log_level": "info",
+    "stats_interval_s": 2
+  },
+  "sol8": {
+    "freq_tx": 434,
+    "freq_rx": 434,
+    "bw_mhz": 10,
+    "mod": "AUTO",
+    "node_id": "0x00000001"
+  }
+}

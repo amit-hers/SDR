@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SDR Data Link — Control Panel</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',Arial,sans-serif;font-size:14px}
+header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;display:flex;align-items:center;gap:16px}
+header h1{font-size:18px;font-weight:600;color:#58a6ff;letter-spacing:.5px}
+.badge{padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:.5px}
+.badge-tx{background:#0d4f8c;color:#58a6ff}
+.badge-rx{background:#0d4f40;color:#3fb950}
+.badge-off{background:#2d2d2d;color:#8b949e}
+
+nav{background:#161b22;border-bottom:1px solid #30363d;display:flex;gap:0;padding:0 24px}
+nav button{background:none;border:none;color:#8b949e;padding:12px 18px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent;transition:.15s}
+nav button:hover{color:#c9d1d9}
+nav button.active{color:#58a6ff;border-bottom-color:#58a6ff}
+
+main{max-width:1100px;margin:0 auto;padding:24px}
+.tab{display:none}
+.tab.active{display:block}
+
+/* ── Cards ── */
+.row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;flex:1;min-width:220px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#8b949e;margin-bottom:14px}
+
+/* ── Meters ── */
+.meter-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.meter-label{width:90px;font-size:12px;color:#8b949e}
+.meter-bar{flex:1;height:8px;background:#21262d;border-radius:4px;overflow:hidden}
+.meter-fill{height:100%;border-radius:4px;transition:width .5s}
+.fill-rssi{background:linear-gradient(90deg,#388bfd,#58a6ff)}
+.fill-snr{background:linear-gradient(90deg,#2ea043,#3fb950)}
+.fill-tput{background:linear-gradient(90deg,#d29922,#e3b341)}
+.meter-value{width:70px;text-align:right;font-family:monospace;font-size:13px;color:#c9d1d9}
+
+/* ── Status indicators ── */
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat-box{background:#0d1117;border-radius:6px;padding:12px}
+.stat-box .val{font-size:22px;font-weight:700;color:#e6edf3;font-family:monospace}
+.stat-box .lbl{font-size:11px;color:#6e7681;margin-top:2px}
+.stat-box.good .val{color:#3fb950}
+.stat-box.bad  .val{color:#f85149}
+
+/* ── LED ── */
+.led{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.led-green{background:#3fb950;box-shadow:0 0 6px #3fb950}
+.led-red  {background:#f85149;box-shadow:0 0 6px #f85149}
+.led-gray {background:#484f58}
+.led-pulse{animation:pulse 1s infinite}
+@keyframes pulse{0%{opacity:1}50%{opacity:.4}100%{opacity:1}}
+
+/* ── Forms ── */
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:12px;color:#8b949e;margin-bottom:5px}
+.form-group input,.form-group select{
+  width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;
+  padding:8px 10px;border-radius:6px;font-size:13px;outline:none;transition:.15s}
+.form-group input:focus,.form-group select:focus{border-color:#388bfd}
+.form-group .hint{font-size:11px;color:#6e7681;margin-top:3px}
+.form-row{display:flex;gap:12px}
+.form-row .form-group{flex:1}
+
+/* ── Buttons ── */
+.btn{padding:9px 18px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:.15s}
+.btn-primary{background:#238636;color:#fff}
+.btn-primary:hover{background:#2ea043}
+.btn-danger {background:#b62324;color:#fff}
+.btn-danger:hover{background:#da3633}
+.btn-secondary{background:#21262d;color:#c9d1d9;border:1px solid #30363d}
+.btn-secondary:hover{background:#30363d}
+.btn-blue{background:#1f6feb;color:#fff}
+.btn-blue:hover{background:#388bfd}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+
+/* ── Log ── */
+#log{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:12px;
+     height:180px;overflow-y:auto;font-family:monospace;font-size:12px;color:#8b949e}
+#log .entry{margin-bottom:3px}
+#log .entry.ok{color:#3fb950}
+#log .entry.err{color:#f85149}
+#log .entry.info{color:#58a6ff}
+
+/* ── Toggle ── */
+.toggle-group{display:flex;gap:0;border:1px solid #30363d;border-radius:6px;overflow:hidden;width:fit-content}
+.toggle-group button{background:#0d1117;color:#8b949e;border:none;padding:7px 16px;cursor:pointer;font-size:12px;transition:.15s}
+.toggle-group button.active{background:#1f6feb;color:#fff}
+
+/* ── Section divider ── */
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#6e7681;margin:20px 0 10px}
+hr{border:none;border-top:1px solid #21262d;margin:16px 0}
+
+/* ── Encryption key ── */
+.key-input{font-family:monospace;font-size:11px;letter-spacing:.5px}
+
+/* ── Charts ── */
+.chart-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px}
+@media(max-width:900px){.chart-grid{grid-template-columns:1fr}}
+.chart-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
+.chart-card h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#8b949e;margin-bottom:8px;display:flex;justify-content:space-between}
+.chart-card h2 span{font-family:monospace;font-size:13px;color:#e6edf3;text-transform:none;letter-spacing:0}
+.chart-wrap{position:relative;height:160px}
+.pwr-mw{font-size:11px;color:#6e7681;margin-top:2px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ SDR Data Link</h1>
+  <span id="hdr-tx-badge" class="badge badge-off">TX OFF</span>
+  <span id="hdr-rx-badge" class="badge badge-off">RX OFF</span>
+  <span style="margin-left:auto;font-size:12px;color:#6e7681" id="hdr-freq">— MHz</span>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('status',this)">Dashboard</button>
+  <button onclick="showTab('sol8',this)">SOL8</button>
+  <button onclick="showTab('radio',this)">Radio</button>
+  <button onclick="showTab('link',this)">Link</button>
+  <button onclick="showTab('security',this)">Security</button>
+  <button onclick="showTab('system',this)">System</button>
+</nav>
+
+<main>
+
+<!-- ═══════════ DASHBOARD TAB ═══════════ -->
+<div id="tab-status" class="tab active">
+  <div class="row">
+    <div class="card" style="min-width:320px">
+      <h2>Signal Quality</h2>
+      <div class="meter-row">
+        <span class="meter-label">RX Signal</span>
+        <div class="meter-bar"><div class="meter-fill fill-rssi" id="bar-rssi" style="width:0%"></div></div>
+        <span class="meter-value" id="val-rssi">— dBm</span>
+      </div>
+      <div class="pwr-mw" style="margin-left:100px;margin-top:-8px;margin-bottom:8px">
+        <span id="val-rx-mw" style="color:#58a6ff">— µW</span>
+        &nbsp;·&nbsp; TX: <span id="val-tx-dbm" style="color:#e3b341">— dBm</span>
+        &nbsp;<span id="val-tx-mw" style="color:#e3b341">— mW</span>
+      </div>
+      <div class="meter-row">
+        <span class="meter-label">SNR</span>
+        <div class="meter-bar"><div class="meter-fill fill-snr" id="bar-snr" style="width:0%"></div></div>
+        <span class="meter-value" id="val-snr">— dB</span>
+      </div>
+      <div class="meter-row">
+        <span class="meter-label">Throughput</span>
+        <div class="meter-bar"><div class="meter-fill fill-tput" id="bar-tput" style="width:0%"></div></div>
+        <span class="meter-value" id="val-tput">— kbps</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Frame Statistics</h2>
+      <div class="stat-grid">
+        <div class="stat-box good">
+          <div class="val" id="stat-good">—</div>
+          <div class="lbl">Frames OK</div>
+        </div>
+        <div class="stat-box bad">
+          <div class="val" id="stat-bad">—</div>
+          <div class="lbl">CRC Errors</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" id="stat-mode">—</div>
+          <div class="lbl">Mode</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" id="stat-uptime">—</div>
+          <div class="lbl">Uptime</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="min-width:180px;max-width:220px">
+      <h2>Process Status</h2>
+      <div style="margin-bottom:10px">
+        <span class="led led-gray" id="led-tx"></span>
+        <span id="status-tx" style="font-size:13px">TX: stopped</span>
+      </div>
+      <div style="margin-bottom:18px">
+        <span class="led led-gray" id="led-rx"></span>
+        <span id="status-rx" style="font-size:13px">RX: stopped</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="startMode('tx')">Start TX</button>
+        <button class="btn btn-primary" onclick="startMode('rx')">Start RX</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-blue" onclick="startMode('duplex')">Full Duplex</button>
+        <button class="btn btn-danger" onclick="stopAll()">Stop All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Power & Frequency Control ─────────────── -->
+  <div class="row">
+    <div class="card" style="min-width:320px;max-width:480px">
+      <h2>TX Power Control</h2>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+        <span style="font-size:12px;color:#8b949e;width:80px">Attenuation</span>
+        <input type="range" id="pwr-slider" min="0" max="89" value="10"
+               style="flex:1;accent-color:#388bfd" oninput="onPwrSlide()">
+        <input type="number" id="pwr-atten" min="0" max="89" value="10"
+               style="width:58px;background:#0d1117;border:1px solid #30363d;
+                      color:#c9d1d9;padding:5px 8px;border-radius:6px;font-size:13px"
+               oninput="onPwrInput()">
+        <span style="color:#8b949e;font-size:12px">dB</span>
+      </div>
+      <div style="margin-bottom:14px;padding:10px;background:#0d1117;border-radius:6px;
+                  display:flex;gap:24px;align-items:center">
+        <div>
+          <div id="pwr-dbm" style="font-size:22px;font-weight:700;font-family:monospace;
+                                   color:#e3b341">−10.0 dBm</div>
+          <div style="font-size:11px;color:#6e7681">TX Output Power</div>
+        </div>
+        <div>
+          <div id="pwr-mw-big" style="font-size:22px;font-weight:700;font-family:monospace;
+                                      color:#58a6ff">0.100 mW</div>
+          <div style="font-size:11px;color:#6e7681">in milliwatts</div>
+        </div>
+      </div>
+      <div style="font-size:11px;color:#6e7681;margin-bottom:12px">
+        PlutoSDR max output ≈ 0 dBm (1 mW) at SMA port without PA.
+        Range: 0 dB (1 mW) → 89 dB (0.001 nW). Use external 1W PA for 10 km.
+      </div>
+      <button class="btn btn-primary" onclick="applyPower()">Apply TX Power</button>
+      <span id="pwr-status" style="font-size:12px;color:#3fb950;margin-left:12px"></span>
+    </div>
+
+    <div class="card" style="min-width:280px;max-width:380px">
+      <h2>Live Frequency Tune</h2>
+      <div class="form-row" style="margin-bottom:12px">
+        <div class="form-group" style="flex:1">
+          <label>TX Frequency (MHz)</label>
+          <input type="number" id="tune-tx-freq" step="0.001" value="434.000"
+                 style="font-family:monospace">
+          <div class="hint">70 – 6000 MHz</div>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>RX Frequency (MHz)</label>
+          <input type="number" id="tune-rx-freq" step="0.001" value="434.000"
+                 style="font-family:monospace">
+          <div class="hint">Same as TX for loopback</div>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-blue" onclick="applyFreq('tx')">Tune TX</button>
+        <button class="btn btn-blue" onclick="applyFreq('rx')">Tune RX</button>
+        <button class="btn btn-secondary" onclick="applyFreq('both')">Tune Both</button>
+      </div>
+      <span id="freq-status" style="font-size:12px;color:#3fb950;margin-top:8px;display:block"></span>
+    </div>
+  </div>
+
+  <!-- ── Live Charts ─────────────────────────── -->
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h2>RX Signal Power (dBm) <span id="chart-rssi-val">—</span></h2>
+      <div class="chart-wrap"><canvas id="chart-rssi"></canvas></div>
+      <div class="pwr-mw">In milliwatts: <span id="chart-rssi-mw">—</span></div>
+    </div>
+    <div class="chart-card">
+      <h2>SNR (dB) <span id="chart-snr-val">—</span></h2>
+      <div class="chart-wrap"><canvas id="chart-snr"></canvas></div>
+      <div class="pwr-mw">TX power: <span id="chart-tx-dbm">—</span> → <span id="chart-tx-mw">—</span></div>
+    </div>
+    <div class="chart-card">
+      <h2>Throughput <span id="chart-tput-val">—</span></h2>
+      <div class="chart-wrap"><canvas id="chart-tput"></canvas></div>
+      <div class="pwr-mw">Peak: <span id="chart-tput-peak">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Event Log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<!-- ═══════════ SOL8 TAB ═══════════ -->
+<div id="tab-sol8" class="tab">
+
+  <!-- Top row: mode control + live stats -->
+  <div class="row">
+    <div class="card" style="min-width:340px;max-width:460px">
+      <h2>SOL8 Mode</h2>
+      <div class="form-group">
+        <label>Operation Mode</label>
+        <select id="s8-mode">
+          <option value="mesh">IP MANET Mesh (FDD TUN)</option>
+          <option value="l2bridge">L2 Bridge (FDD TAP)</option>
+          <option value="p2p-tx">P2P Transmitter</option>
+          <option value="p2p-rx" selected>P2P Receiver</option>
+          <option value="scan">Channel Scanner (IAS)</option>
+          <option value="ranging">RSSI Ranging</option>
+        </select>
+      </div>
+
+      <div id="s8-fdd-row" class="form-row" style="display:none">
+        <div class="form-group">
+          <label>TX Frequency (MHz)</label>
+          <input type="number" id="s8-freq-tx" step="0.001" value="434.000" style="font-family:monospace">
+        </div>
+        <div class="form-group">
+          <label>RX Frequency (MHz)</label>
+          <input type="number" id="s8-freq-rx" step="0.001" value="439.000" style="font-family:monospace">
+        </div>
+      </div>
+      <div id="s8-single-row" class="form-group">
+        <label>Frequency (MHz)</label>
+        <input type="number" id="s8-freq" step="0.001" value="434.000" style="font-family:monospace">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Channel BW (MHz)</label>
+          <select id="s8-bw">
+            <option value="1.25">1.25 MHz — 0.6 Mbps BPSK</option>
+            <option value="2.5">2.5 MHz — 1.25 Mbps BPSK</option>
+            <option value="5">5 MHz — 2.5 Mbps BPSK</option>
+            <option value="10" selected>10 MHz — 5 Mbps BPSK</option>
+            <option value="20">20 MHz — 10 Mbps BPSK</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Modulation</label>
+          <select id="s8-mod">
+            <option value="AUTO" selected>AUTO (adaptive)</option>
+            <option value="BPSK">BPSK</option>
+            <option value="QPSK">QPSK</option>
+            <option value="QAM16">16-QAM</option>
+            <option value="QAM64">64-QAM</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Node ID (hex)</label>
+        <input type="text" id="s8-node-id" value="0x00000001" style="font-family:monospace">
+        <div class="hint">Unique 32-bit node identifier for mesh routing</div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="sol8Start()">Start SOL8</button>
+        <button class="btn btn-danger"  onclick="sol8Stop()">Stop SOL8</button>
+      </div>
+      <span id="s8-proc-status" style="font-size:12px;color:#6e7681;margin-top:8px;display:block">● stopped</span>
+    </div>
+
+    <div class="card" style="min-width:280px">
+      <h2>Live SOL8 Stats</h2>
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="val" id="s8-stat-mod">—</div>
+          <div class="lbl">Modulation</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" id="s8-stat-bw">—</div>
+          <div class="lbl">BW (MHz)</div>
+        </div>
+        <div class="stat-box good">
+          <div class="val" id="s8-stat-rx-kbps">—</div>
+          <div class="lbl">RX kbps</div>
+        </div>
+        <div class="stat-box good">
+          <div class="val" id="s8-stat-tx-kbps">—</div>
+          <div class="lbl">TX kbps</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" id="s8-stat-rssi">—</div>
+          <div class="lbl">RSSI (dBm)</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" id="s8-stat-snr">—</div>
+          <div class="lbl">SNR (dB)</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px">
+        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">RSSI Ranging Estimate</div>
+        <div id="s8-stat-dist" style="font-size:24px;font-weight:700;font-family:monospace;color:#e3b341">— km</div>
+        <div style="font-size:11px;color:#6e7681">Node: <span id="s8-stat-node" style="font-family:monospace;color:#58a6ff">—</span></div>
+      </div>
+    </div>
+
+    <!-- Runtime tuning -->
+    <div class="card" style="max-width:260px">
+      <h2>Runtime Tune</h2>
+      <div class="form-group">
+        <label>TX Atten (dB)</label>
+        <input type="number" id="s8-ctrl-atten" min="0" max="89" value="10">
+      </div>
+      <div class="form-group">
+        <label>TX Freq (MHz)</label>
+        <input type="number" id="s8-ctrl-ftx" step="0.001" value="434.000" style="font-family:monospace">
+      </div>
+      <div class="form-group">
+        <label>RX Freq (MHz)</label>
+        <input type="number" id="s8-ctrl-frx" step="0.001" value="439.000" style="font-family:monospace">
+      </div>
+      <button class="btn btn-blue" onclick="sol8Ctrl()" style="width:100%">Apply Live</button>
+      <span id="s8-ctrl-msg" style="font-size:11px;color:#3fb950;margin-top:6px;display:block"></span>
+    </div>
+  </div>
+
+  <!-- Mesh node table -->
+  <div class="card" style="margin-bottom:16px" id="s8-node-card">
+    <h2>Mesh Node Table</h2>
+    <table id="s8-node-table" style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="color:#6e7681;border-bottom:1px solid #30363d">
+          <th style="text-align:left;padding:6px 8px">Node ID</th>
+          <th style="text-align:right;padding:6px 8px">RSSI (dBm)</th>
+          <th style="text-align:right;padding:6px 8px">SNR (dB)</th>
+          <th style="text-align:right;padding:6px 8px">Mod</th>
+          <th style="text-align:right;padding:6px 8px">Dist (km)</th>
+          <th style="text-align:right;padding:6px 8px">RX kbps</th>
+          <th style="text-align:right;padding:6px 8px">Last seen</th>
+        </tr>
+      </thead>
+      <tbody id="s8-node-tbody">
+        <tr><td colspan="7" style="color:#6e7681;padding:10px 8px">No nodes seen yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Channel scan -->
+  <div class="card" style="margin-bottom:16px">
+    <h2 style="display:flex;align-items:center;gap:12px">
+      Channel Scanner (IAS)
+      <button class="btn btn-secondary" style="padding:5px 12px;font-size:11px" onclick="sol8StartScan()">Run Scan</button>
+      <button class="btn btn-secondary" style="padding:5px 12px;font-size:11px" onclick="loadScanResults()">Refresh Results</button>
+    </h2>
+    <div class="chart-wrap" style="height:180px;margin-top:8px"><canvas id="chart-scan"></canvas></div>
+    <div id="s8-scan-info" style="font-size:11px;color:#6e7681;margin-top:6px">No scan data. Click Run Scan to start.</div>
+  </div>
+
+  <!-- SOL8 test runner -->
+  <div class="card">
+    <h2>SOL8 Self-Test (no hardware)</h2>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:10px">
+      Runs all 6 tests: frame codec, BER curves, adaptive mod, ranging, BW scaling, e2e loopback.
+    </div>
+    <button class="btn btn-secondary" onclick="runSol8Test()">Run sol8_test</button>
+    <pre id="s8-test-out" style="margin-top:12px;background:#0d1117;border:1px solid #30363d;
+         border-radius:6px;padding:10px;font-size:11px;color:#8b949e;
+         max-height:300px;overflow-y:auto;white-space:pre-wrap"></pre>
+  </div>
+</div>
+
+<!-- ═══════════ RADIO TAB ═══════════ -->
+<div id="tab-radio" class="tab">
+  <div class="row">
+    <div class="card" style="max-width:480px">
+      <h2>RF Configuration</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Center Frequency (MHz)</label>
+          <input type="number" id="r-freq" step="0.001" value="434.000">
+          <div class="hint">70 – 6000 MHz (AD9363 range)</div>
+        </div>
+        <div class="form-group">
+          <label>Sample Rate (MSPS)</label>
+          <input type="number" id="r-rate" step="1" min="1" max="20" value="20">
+          <div class="hint">1 – 20 MSPS</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Modulation</label>
+          <select id="r-mod">
+            <option value="BPSK">BPSK — 1 bit/sym (most robust)</option>
+            <option value="QPSK" selected>QPSK — 2 bit/sym (recommended)</option>
+            <option value="QAM16">16-QAM — 4 bit/sym (high rate)</option>
+            <option value="QAM64">64-QAM — 6 bit/sym (max rate, needs strong signal)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>TX Attenuation (dB)</label>
+          <input type="number" id="r-atten" step="1" min="0" max="89" value="10">
+          <div class="hint">0 = max TX power. Use with external PA.</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>RF Bandwidth (MHz)</label>
+        <input type="number" id="r-bw" step="1" min="1" max="20" value="18">
+      </div>
+
+      <div class="section-title">Throughput estimate</div>
+      <div id="tput-estimate" style="font-size:13px;color:#8b949e;margin-bottom:16px">—</div>
+
+      <button class="btn btn-primary" onclick="saveRadio()">Apply Radio Config</button>
+    </div>
+
+    <div class="card">
+      <h2>Link Budget (434 MHz)</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr><td style="padding:5px 0;color:#8b949e">TX power (with 1W PA)</td><td style="text-align:right;font-family:monospace">+30 dBm</td></tr>
+        <tr><td style="padding:5px 0;color:#8b949e">TX Yagi gain (10-elem)</td><td style="text-align:right;font-family:monospace">+10 dBi</td></tr>
+        <tr><td style="padding:5px 0;color:#8b949e">Free-space loss (10 km)</td><td style="text-align:right;font-family:monospace">−105 dB</td></tr>
+        <tr><td style="padding:5px 0;color:#8b949e">RX Yagi gain (10-elem)</td><td style="text-align:right;font-family:monospace">+10 dBi</td></tr>
+        <tr><td style="padding:5px 0;color:#8b949e">Cable/connector loss</td><td style="text-align:right;font-family:monospace">−3 dB</td></tr>
+        <tr style="border-top:1px solid #30363d"><td style="padding:8px 0;font-weight:700">Received signal</td><td style="text-align:right;font-family:monospace;color:#3fb950;font-weight:700">−58 dBm</td></tr>
+        <tr><td style="padding:5px 0;color:#8b949e">Noise floor (20 MHz)</td><td style="text-align:right;font-family:monospace">−91 dBm</td></tr>
+        <tr style="border-top:1px solid #30363d"><td style="padding:8px 0;font-weight:700">Available SNR</td><td style="text-align:right;font-family:monospace;color:#3fb950;font-weight:700">33 dB</td></tr>
+      </table>
+      <div style="margin-top:12px;font-size:11px;color:#6e7681">
+        ⚠ Stock PlutoSDR TX ≈ 0 dBm — external 1W PA required for 10 km.<br>
+        HAM license needed for 1W at 434 MHz (70-cm band).
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ LINK TAB ═══════════ -->
+<div id="tab-link" class="tab">
+  <div class="row">
+    <div class="card" style="max-width:480px">
+      <h2>Link Configuration</h2>
+
+      <div class="form-group">
+        <label>PlutoSDR IP Address</label>
+        <input type="text" id="l-pluto" value="192.168.2.1">
+        <div class="hint">Default: 192.168.2.1 (USB) or your Ethernet IP</div>
+      </div>
+
+      <div class="form-group">
+        <label>Operation Mode</label>
+        <select id="l-mode">
+          <option value="tx">Transmit only (TX)</option>
+          <option value="rx">Receive only (RX)</option>
+          <option value="duplex">Full Duplex (TX + RX simultaneously)</option>
+        </select>
+      </div>
+
+      <hr>
+      <div class="section-title">Data Source (TX side)</div>
+      <div class="form-group">
+        <label>Source</label>
+        <div class="toggle-group">
+          <button id="src-stdin" class="active" onclick="setSrc('stdin')">stdin</button>
+          <button id="src-udp" onclick="setSrc('udp')">UDP</button>
+        </div>
+      </div>
+      <div class="form-group" id="udp-src-group" style="display:none">
+        <label>UDP Listen Port</label>
+        <input type="number" id="l-src-port" value="5005">
+        <div class="hint">TX will receive datagrams on this port and transmit over RF</div>
+      </div>
+
+      <hr>
+      <div class="section-title">Data Sink (RX side)</div>
+      <div class="form-group">
+        <label>Sink</label>
+        <div class="toggle-group">
+          <button id="sink-stdout" class="active" onclick="setSink('stdout')">stdout</button>
+          <button id="sink-udp" onclick="setSink('udp')">UDP</button>
+        </div>
+      </div>
+      <div class="form-group" id="udp-sink-group" style="display:none">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Destination IP</label>
+            <input type="text" id="l-sink-ip" value="127.0.0.1">
+          </div>
+          <div class="form-group">
+            <label>Destination Port</label>
+            <input type="number" id="l-sink-port" value="5006">
+          </div>
+        </div>
+        <div class="hint">RX will forward decoded frames as UDP datagrams</div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="saveLink()">Save Link Config</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Usage Examples</h2>
+      <div style="font-size:12px;color:#8b949e;line-height:1.8">
+        <div class="section-title">Send a file over RF:</div>
+        <code style="color:#79c0ff">cat data.bin | ./link_tx --freq 434.0 --mod QPSK</code>
+        <code style="color:#79c0ff" style="display:block;margin-top:4px">./link_rx --freq 434.0 --mod QPSK > received.bin</code>
+
+        <div class="section-title">Measure throughput:</div>
+        <code style="color:#79c0ff">dd if=/dev/urandom bs=1k | ./link_tx --freq 434.0</code>
+        <code style="color:#79c0ff">./link_rx --freq 434.0 | pv > /dev/null</code>
+
+        <div class="section-title">UDP tunnel (wireless bridge):</div>
+        <code style="color:#79c0ff">./link_tx --source udp --port 5005</code>
+        <code style="color:#79c0ff">./link_rx --sink udp --sink-ip 10.0.0.1 --port 5006</code>
+        <code style="color:#79c0ff">nc -u 127.0.0.1 5005 &lt; payload.bin</code>
+
+        <div class="section-title">Full duplex (separate TX/RX freqs):</div>
+        <code style="color:#79c0ff">Device A: --freq 434.0 (TX)  --freq 439.0 (RX)</code>
+        <code style="color:#79c0ff">Device B: --freq 439.0 (TX)  --freq 434.0 (RX)</code>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ SECURITY TAB ═══════════ -->
+<div id="tab-security" class="tab">
+  <div class="row">
+    <div class="card" style="max-width:520px">
+      <h2>AES-256-CTR Frame Encryption</h2>
+      <div style="font-size:13px;color:#8b949e;margin-bottom:16px;line-height:1.6">
+        Each frame payload is encrypted with AES-256-CTR before transmission.
+        The frame counter is used as the IV, preventing replay attacks.
+        Both TX and RX must use the same key.
+      </div>
+
+      <div class="form-group">
+        <label>Encryption</label>
+        <div class="toggle-group">
+          <button id="enc-off" class="active" onclick="setEnc(false)">Disabled</button>
+          <button id="enc-on" onclick="setEnc(true)">AES-256 Enabled</button>
+        </div>
+      </div>
+
+      <div id="key-group">
+        <div class="form-group">
+          <label>AES-256 Key (64 hex characters = 32 bytes)</label>
+          <input type="text" id="s-key" class="key-input"
+                 maxlength="64" placeholder="0000000000000000000000000000000000000000000000000000000000000000"
+                 value="0000000000000000000000000000000000000000000000000000000000000000">
+          <div class="hint">Must match on TX and RX. Never use the all-zero default in production.</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="genKey()">Generate Random Key</button>
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-top:20px">
+        <button class="btn btn-primary" onclick="saveSecurity()">Save Security Config</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Security Notes</h2>
+      <div style="font-size:13px;color:#8b949e;line-height:1.7">
+        <b style="color:#e3b341">⚠ Key management:</b> Share the key securely before deployment.
+        Never transmit the key over RF.<br><br>
+        <b style="color:#3fb950">✓ AES-256-CTR</b> provides strong confidentiality for payload data.
+        Frame headers (sync word, length) are unencrypted for synchronization.<br><br>
+        <b style="color:#58a6ff">CRC-32</b> is calculated over the encrypted payload,
+        detecting transmission errors before decryption.<br><br>
+        <b style="color:#8b949e">Frame counter</b> as IV prevents replay attacks within a session.
+        Counter resets on restart — for long-term security, rotate keys periodically.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ SYSTEM TAB ═══════════ -->
+<div id="tab-system" class="tab">
+  <div class="row">
+    <div class="card" style="max-width:420px">
+      <h2>Process Control</h2>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="startMode('tx')">▶ Start TX</button>
+        <button class="btn btn-primary" onclick="startMode('rx')">▶ Start RX</button>
+        <button class="btn btn-blue"   onclick="startMode('duplex')">▶ Full Duplex</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-danger" onclick="stopAll()">■ Stop All</button>
+        <button class="btn btn-secondary" onclick="stopMode('tx')">■ Stop TX</button>
+        <button class="btn btn-secondary" onclick="stopMode('rx')">■ Stop RX</button>
+      </div>
+
+      <hr>
+      <h2 style="margin-top:4px">DSP Loopback Test</h2>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:10px">
+        Runs 200 QPSK frames through the modulator → AWGN channel → demodulator in software.
+        No hardware required. Verifies the DSP chain.
+      </div>
+      <button class="btn btn-secondary" onclick="runLoopback()">Run Loopback Test</button>
+      <pre id="loopback-out" style="margin-top:12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;font-size:12px;color:#8b949e;max-height:120px;overflow-y:auto;white-space:pre-wrap"></pre>
+    </div>
+
+    <div class="card" style="max-width:380px">
+      <h2>Configuration</h2>
+      <div class="btn-row">
+        <a href="/api/config/export" class="btn btn-secondary" download>⬇ Export Config JSON</a>
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label>Import Config JSON</label>
+        <input type="file" id="import-file" accept=".json" style="color:#8b949e">
+      </div>
+      <button class="btn btn-secondary" onclick="importConfig()">⬆ Import Config</button>
+
+      <hr>
+      <h2 style="margin-top:4px">Build Info</h2>
+      <div style="font-size:12px;color:#6e7681;line-height:1.8">
+        Firmware: PlutoSDR (AD9363)<br>
+        DSP: liquid-dsp 1.6<br>
+        Crypto: OpenSSL AES-256-CTR<br>
+        Transport: libiio / UDP<br>
+        Web UI: Flask SSE
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ── Tab navigation ─────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ── Config state ───────────────────────────────────────────
+let cfg = {};
+
+async function loadCfg() {
+  const r = await fetch('/api/config');
+  cfg = await r.json();
+  applyConfigToForm(cfg);
+}
+
+function applyConfigToForm(c) {
+  const r = c.radio || {}, l = c.link || {}, s = c.security || {};
+  if (r.freq_mhz) {
+    document.getElementById('r-freq').value       = r.freq_mhz;
+    document.getElementById('tune-tx-freq').value = r.freq_mhz;
+    document.getElementById('tune-rx-freq').value = r.freq_mhz;
+  }
+  if (r.rate_msps)   document.getElementById('r-rate').value   = r.rate_msps;
+  if (r.mod)         document.getElementById('r-mod').value    = r.mod;
+  if (r.tx_atten_db !== undefined) {
+    document.getElementById('r-atten').value   = r.tx_atten_db;
+    document.getElementById('pwr-atten').value = r.tx_atten_db;
+    document.getElementById('pwr-slider').value= r.tx_atten_db;
+    updatePwrDisplay(r.tx_atten_db);
+  }
+  if (r.rf_bw_mhz)   document.getElementById('r-bw').value    = r.rf_bw_mhz;
+
+  if (l.pluto_ip)    document.getElementById('l-pluto').value  = l.pluto_ip;
+  if (l.mode)        document.getElementById('l-mode').value   = l.mode;
+  if (l.udp_source_port) document.getElementById('l-src-port').value = l.udp_source_port;
+  if (l.udp_sink_ip)     document.getElementById('l-sink-ip').value  = l.udp_sink_ip;
+  if (l.udp_sink_port)   document.getElementById('l-sink-port').value= l.udp_sink_port;
+  setSrc(l.source || 'stdin');
+  setSink(l.sink || 'stdout');
+
+  if (s.key_hex)     document.getElementById('s-key').value    = s.key_hex;
+  setEnc(!!s.encrypt);
+
+  updateTputEstimate();
+  document.getElementById('hdr-freq').textContent = (r.freq_mhz || '—') + ' MHz';
+}
+
+// ── Form helpers ───────────────────────────────────────────
+let srcMode = 'stdin', sinkMode = 'stdout', encEnabled = false;
+
+function setSrc(m) {
+  srcMode = m;
+  document.getElementById('src-stdin').classList.toggle('active', m === 'stdin');
+  document.getElementById('src-udp').classList.toggle('active',   m === 'udp');
+  document.getElementById('udp-src-group').style.display = m === 'udp' ? '' : 'none';
+}
+function setSink(m) {
+  sinkMode = m;
+  document.getElementById('sink-stdout').classList.toggle('active', m === 'stdout');
+  document.getElementById('sink-udp').classList.toggle('active',    m === 'udp');
+  document.getElementById('udp-sink-group').style.display = m === 'udp' ? '' : 'none';
+}
+function setEnc(e) {
+  encEnabled = e;
+  document.getElementById('enc-off').classList.toggle('active', !e);
+  document.getElementById('enc-on').classList.toggle('active',   e);
+}
+
+function updateTputEstimate() {
+  const rate = parseFloat(document.getElementById('r-rate').value) || 20;
+  const mod  = document.getElementById('r-mod').value;
+  const bps  = {BPSK:1, QPSK:2, QAM16:4, QAM64:6}[mod] || 2;
+  const mbps = (rate * bps).toFixed(1);
+  const mBps = (rate * bps / 8).toFixed(2);
+  document.getElementById('tput-estimate').textContent =
+    `${rate} MSPS × ${bps} bits/sym = ${mbps} Mbps ≈ ${mBps} MB/s (no FEC overhead)`;
+}
+document.getElementById('r-rate').addEventListener('input', updateTputEstimate);
+document.getElementById('r-mod').addEventListener('change', updateTputEstimate);
+
+// ── Save config sections ───────────────────────────────────
+async function saveRadio() {
+  cfg.radio = {
+    freq_mhz:   parseFloat(document.getElementById('r-freq').value),
+    rate_msps:  parseInt(document.getElementById('r-rate').value),
+    mod:        document.getElementById('r-mod').value,
+    tx_atten_db:parseInt(document.getElementById('r-atten').value),
+    rf_bw_mhz:  parseInt(document.getElementById('r-bw').value),
+  };
+  await postConfig();
+  document.getElementById('hdr-freq').textContent = cfg.radio.freq_mhz + ' MHz';
+  log('Radio config saved', 'ok');
+}
+
+async function saveLink() {
+  cfg.link = {
+    mode:             document.getElementById('l-mode').value,
+    pluto_ip:         document.getElementById('l-pluto').value,
+    source:           srcMode,
+    sink:             sinkMode,
+    udp_source_port:  parseInt(document.getElementById('l-src-port').value),
+    udp_sink_ip:      document.getElementById('l-sink-ip').value,
+    udp_sink_port:    parseInt(document.getElementById('l-sink-port').value),
+  };
+  await postConfig();
+  log('Link config saved', 'ok');
+}
+
+async function saveSecurity() {
+  const key = document.getElementById('s-key').value.trim();
+  if (encEnabled && key.length !== 64) {
+    log('Key must be 64 hex characters', 'err'); return;
+  }
+  cfg.security = { encrypt: encEnabled, key_hex: key };
+  await postConfig();
+  log('Security config saved' + (encEnabled ? ' — AES-256 enabled' : ' — encryption off'), 'ok');
+}
+
+async function postConfig() {
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(cfg),
+  });
+}
+
+// ── Process control ────────────────────────────────────────
+async function startMode(mode) {
+  log(`Starting ${mode}...`, 'info');
+  const r = await fetch(`/api/start/${mode}`, {method:'POST'});
+  const d = await r.json();
+  log(`${mode}: ${JSON.stringify(d.results)}`, d.ok ? 'ok' : 'err');
+}
+
+async function stopMode(mode) {
+  const r = await fetch(`/api/stop/${mode}`, {method:'POST'});
+  const d = await r.json();
+  log(`Stopped ${mode}: ${JSON.stringify(d.results)}`, 'ok');
+}
+
+async function stopAll() {
+  const r = await fetch('/api/stop/all', {method:'POST'});
+  const d = await r.json();
+  log('Stopped all processes', 'ok');
+}
+
+// ── Random key generation ──────────────────────────────────
+function genKey() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  document.getElementById('s-key').value =
+    Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join('');
+  log('New random AES-256 key generated', 'info');
+}
+
+// ── Loopback test ──────────────────────────────────────────
+async function runLoopback() {
+  document.getElementById('loopback-out').textContent = 'Running...';
+  const r = await fetch('/api/loopback', {method:'POST'});
+  const d = await r.json();
+  document.getElementById('loopback-out').textContent = d.output || d.msg;
+  log('Loopback test ' + (d.ok ? 'PASSED' : 'FAILED'), d.ok ? 'ok' : 'err');
+}
+
+// ── Config import ──────────────────────────────────────────
+async function importConfig() {
+  const file = document.getElementById('import-file').files[0];
+  if (!file) { log('Select a JSON file first', 'err'); return; }
+  const text = await file.text();
+  try {
+    const data = JSON.parse(text);
+    await fetch('/api/config/import', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: text
+    });
+    cfg = data;
+    applyConfigToForm(cfg);
+    log('Config imported from ' + file.name, 'ok');
+  } catch(e) {
+    log('Import failed: ' + e.message, 'err');
+  }
+}
+
+// ── Log ────────────────────────────────────────────────────
+function log(msg, type='info') {
+  const el = document.getElementById('log');
+  const t  = new Date().toTimeString().slice(0,8);
+  el.innerHTML += `<div class="entry ${type}">[${t}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── SSE stats stream ───────────────────────────────────────
+const es = new EventSource('/api/events');
+es.onmessage = e => {
+  const data = JSON.parse(e.data);
+  const s = data.stats || {};
+
+  // Process status LEDs
+  function setLed(id, status) {
+    const el = document.getElementById(id);
+    el.className = 'led ' + (status === 'running' ? 'led-green led-pulse' : 'led-gray');
+  }
+  setLed('led-tx', data.tx);
+  setLed('led-rx', data.rx);
+  document.getElementById('status-tx').textContent = 'TX: ' + data.tx;
+  document.getElementById('status-rx').textContent = 'RX: ' + data.rx;
+
+  // Header badges
+  const txBadge = document.getElementById('hdr-tx-badge');
+  const rxBadge = document.getElementById('hdr-rx-badge');
+  txBadge.className = 'badge ' + (data.tx === 'running' ? 'badge-tx' : 'badge-off');
+  txBadge.textContent = data.tx === 'running' ? 'TX ON' : 'TX OFF';
+  rxBadge.className = 'badge ' + (data.rx === 'running' ? 'badge-rx' : 'badge-off');
+  rxBadge.textContent = data.rx === 'running' ? 'RX ON' : 'RX OFF';
+
+  if (!s.status) return;
+
+  // RSSI meter (range -120 to -20 dBm → 0-100%)
+  const rssi = s.rssi_db || 0;
+  const rssiPct = Math.max(0, Math.min(100, (rssi + 120) / 100 * 100));
+  document.getElementById('bar-rssi').style.width = rssiPct + '%';
+  document.getElementById('val-rssi').textContent = rssi.toFixed(1) + ' dBm';
+
+  // SNR meter (0–40 dB → 0–100%)
+  const snr = s.snr_db || 0;
+  document.getElementById('bar-snr').style.width = Math.min(100, snr / 40 * 100) + '%';
+  document.getElementById('val-snr').textContent = snr.toFixed(1) + ' dB';
+
+  // Throughput meter (0–50000 kbps → 0–100%)
+  const tput = s.throughput_kbps || 0;
+  document.getElementById('bar-tput').style.width = Math.min(100, tput / 50000 * 100) + '%';
+  document.getElementById('val-tput').textContent = tput >= 1000
+    ? (tput / 1000).toFixed(2) + ' Mbps'
+    : tput.toFixed(0) + ' kbps';
+
+  // Stats
+  document.getElementById('stat-good').textContent = (s.frames_good || 0).toLocaleString();
+  document.getElementById('stat-bad').textContent  = (s.frames_bad  || 0).toLocaleString();
+  document.getElementById('stat-mode').textContent = (s.mode || '—').toUpperCase();
+
+  const up = s.uptime_s || 0;
+  const h = Math.floor(up/3600), m = Math.floor((up%3600)/60), sec = Math.floor(up%60);
+  document.getElementById('stat-uptime').textContent =
+    String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+};
+es.onerror = () => log('SSE connection lost', 'err');
+
+// ── TX Power slider ────────────────────────────────────────
+function calcPwr(atten) {
+  const dbm = 0 - atten;
+  const mw  = Math.pow(10, dbm / 10);
+  return { dbm, mw };
+}
+function updatePwrDisplay(atten) {
+  const { dbm, mw } = calcPwr(atten);
+  document.getElementById('pwr-dbm').textContent    = dbm.toFixed(1) + ' dBm';
+  document.getElementById('pwr-mw-big').textContent = fmtMw(mw);
+}
+function onPwrSlide() {
+  const v = parseInt(document.getElementById('pwr-slider').value);
+  document.getElementById('pwr-atten').value = v;
+  updatePwrDisplay(v);
+}
+function onPwrInput() {
+  let v = parseInt(document.getElementById('pwr-atten').value) || 0;
+  v = Math.max(0, Math.min(89, v));
+  document.getElementById('pwr-slider').value = v;
+  updatePwrDisplay(v);
+}
+async function applyPower() {
+  const atten = parseInt(document.getElementById('pwr-atten').value);
+  const freq  = parseFloat(document.getElementById('tune-tx-freq').value);
+  const r = await fetch('/api/power/tx', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ atten_db: atten, freq_mhz: freq })
+  });
+  const d = await r.json();
+  const st = document.getElementById('pwr-status');
+  st.textContent = d.ok ? '✓ ' + d.msg : '✗ ' + d.msg;
+  st.style.color = d.ok ? '#3fb950' : '#f85149';
+  log(`TX power: atten=${atten} dB (${(0-atten).toFixed(1)} dBm) — ${d.msg}`, d.ok?'ok':'err');
+  if (d.ok) { cfg.radio = cfg.radio || {}; cfg.radio.tx_atten_db = atten; }
+}
+
+// ── Frequency tune ─────────────────────────────────────────
+async function applyFreq(side) {
+  const txF = parseFloat(document.getElementById('tune-tx-freq').value);
+  const rxF = parseFloat(document.getElementById('tune-rx-freq').value);
+  const st  = document.getElementById('freq-status');
+  const results = [];
+  if (side === 'tx' || side === 'both') {
+    const r = await fetch('/api/power/tx', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ freq_mhz: txF,
+                             atten_db: parseInt(document.getElementById('pwr-atten').value) })
+    });
+    const d = await r.json();
+    results.push('TX ' + txF + ' MHz: ' + d.msg);
+    document.getElementById('hdr-freq').textContent = txF + ' MHz';
+  }
+  if (side === 'rx' || side === 'both') {
+    const r = await fetch('/api/freq/rx', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ freq_mhz: rxF })
+    });
+    const d = await r.json();
+    results.push('RX ' + rxF + ' MHz: ' + d.msg);
+  }
+  st.textContent = '✓ ' + results.join(' | ');
+  log(results.join(' | '), 'ok');
+}
+
+// ── Power unit formatter ───────────────────────────────────
+function fmtMw(mw) {
+  if (mw <= 0) return '—';
+  if (mw < 0.001)  return (mw * 1e6).toFixed(1) + ' nW';
+  if (mw < 1)      return (mw * 1000).toFixed(2) + ' µW';
+  if (mw < 1000)   return mw.toFixed(3) + ' mW';
+  return (mw / 1000).toFixed(3) + ' W';
+}
+
+// ── Chart.js setup ─────────────────────────────────────────
+const MAX_PTS = 60;  // 60 seconds of history
+
+function mkChart(id, label, color, yMin, yMax, unit) {
+  const ctx = document.getElementById(id).getContext('2d');
+  const data = { labels: [], datasets: [{ label, data: [],
+    borderColor: color, backgroundColor: color + '22',
+    borderWidth: 2, pointRadius: 0, fill: true, tension: 0.3 }] };
+  return new Chart(ctx, {
+    type: 'line', data,
+    options: {
+      animation: false,
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+                 tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(2) + ' ' + unit } } },
+      scales: {
+        x: { ticks: { color: '#6e7681', maxTicksLimit: 6, maxRotation: 0 },
+             grid: { color: '#21262d' } },
+        y: { min: yMin, max: yMax,
+             ticks: { color: '#6e7681' },
+             grid: { color: '#21262d' } }
+      }
+    }
+  });
+}
+
+const charts = {
+  rssi: mkChart('chart-rssi', 'RX dBm',    '#388bfd', -120, 0,   'dBm'),
+  snr:  mkChart('chart-snr',  'SNR',       '#3fb950',    0, 50,  'dB'),
+  tput: mkChart('chart-tput', 'Throughput','#e3b341',    0, null,'kbps'),
+};
+let tputPeak = 0;
+
+function pushChart(chart, value) {
+  const now = new Date().toTimeString().slice(0,8);
+  chart.data.labels.push(now);
+  chart.data.datasets[0].data.push(value);
+  if (chart.data.labels.length > MAX_PTS) {
+    chart.data.labels.shift();
+    chart.data.datasets[0].data.shift();
+  }
+  chart.update('none');
+}
+
+// ── Extend SSE handler to feed charts ─────────────────────
+const _origOnMsg = es.onmessage;
+es.onmessage = e => {
+  _origOnMsg(e);   // run existing handler first
+  const data = JSON.parse(e.data);
+  const s = data.stats || {};
+  if (!s.status) return;
+
+  const rssi = s.rssi_db || 0;
+  const snr  = s.snr_db  || 0;
+  const tput = s.throughput_kbps || 0;
+  const rxMw = s.rx_power_mw || 0;
+  const txDbm = s.tx_power_dbm || 0;
+  const txMw  = s.tx_power_mw  || 0;
+
+  // mW readouts in Signal Quality card
+  document.getElementById('val-rx-mw').textContent  = fmtMw(rxMw);
+  document.getElementById('val-tx-dbm').textContent = txDbm.toFixed(1) + ' dBm';
+  document.getElementById('val-tx-mw').textContent  = fmtMw(txMw);
+
+  // Chart live values header
+  document.getElementById('chart-rssi-val').textContent = rssi.toFixed(1) + ' dBm';
+  document.getElementById('chart-snr-val').textContent  = snr.toFixed(1) + ' dB';
+  document.getElementById('chart-tput-val').textContent = tput >= 1000
+    ? (tput/1000).toFixed(2)+' Mbps' : tput.toFixed(0)+' kbps';
+
+  // mW sub-labels in charts
+  document.getElementById('chart-rssi-mw').textContent  = fmtMw(rxMw);
+  document.getElementById('chart-tx-dbm').textContent   = txDbm.toFixed(1) + ' dBm';
+  document.getElementById('chart-tx-mw').textContent    = fmtMw(txMw);
+
+  if (tput > tputPeak) {
+    tputPeak = tput;
+    document.getElementById('chart-tput-peak').textContent = tput >= 1000
+      ? (tput/1000).toFixed(2)+' Mbps' : tput.toFixed(0)+' kbps';
+  }
+
+  // Push data into charts
+  pushChart(charts.rssi, rssi);
+  pushChart(charts.snr,  snr);
+  pushChart(charts.tput, tput);
+};
+
+// ── SOL8 mode UI wiring ────────────────────────────────────
+document.getElementById('s8-mode').addEventListener('change', function() {
+  const fdd = ['mesh','l2bridge'].includes(this.value);
+  document.getElementById('s8-fdd-row').style.display    = fdd ? '' : 'none';
+  document.getElementById('s8-single-row').style.display = fdd ? 'none' : '';
+});
+// trigger once to set initial state
+document.getElementById('s8-mode').dispatchEvent(new Event('change'));
+
+async function sol8Start() {
+  const mode   = document.getElementById('s8-mode').value;
+  const fdd    = ['mesh','l2bridge'].includes(mode);
+  const ftx    = parseFloat(document.getElementById(fdd ? 's8-freq-tx' : 's8-freq').value);
+  const frx    = fdd ? parseFloat(document.getElementById('s8-freq-rx').value) : ftx;
+  const bw     = parseFloat(document.getElementById('s8-bw').value);
+  const mod    = document.getElementById('s8-mod').value;
+  const nodeid = document.getElementById('s8-node-id').value;
+  log(`Starting SOL8 ${mode}…`, 'info');
+  const r = await fetch('/api/sol8/start', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ mode, sol8: { freq_tx: ftx, freq_rx: frx, bw_mhz: bw,
+                                         mod, node_id: nodeid } })
+  });
+  const d = await r.json();
+  log(`SOL8 ${mode}: ${d.msg}`, d.ok ? 'ok' : 'err');
+}
+
+async function sol8Stop() {
+  const r = await fetch('/api/sol8/stop', {method:'POST'});
+  const d = await r.json();
+  log('SOL8 stopped: ' + d.msg, 'ok');
+}
+
+async function sol8Ctrl() {
+  const atten = parseInt(document.getElementById('s8-ctrl-atten').value);
+  const ftx   = parseFloat(document.getElementById('s8-ctrl-ftx').value);
+  const frx   = parseFloat(document.getElementById('s8-ctrl-frx').value);
+  const r = await fetch('/api/sol8/ctrl', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ atten_db: atten, freq_tx: ftx, freq_rx: frx })
+  });
+  const d = await r.json();
+  const st = document.getElementById('s8-ctrl-msg');
+  st.textContent = d.ok ? '✓ ' + d.msg : '✗ ' + d.msg;
+  st.style.color = d.ok ? '#3fb950' : '#f85149';
+  log(`SOL8 ctrl: atten=${atten} ftx=${ftx} frx=${frx} — ${d.msg}`, d.ok?'ok':'err');
+}
+
+async function sol8StartScan() {
+  log('Starting channel scan…','info');
+  const r = await fetch('/api/sol8/start', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ mode:'scan' })
+  });
+  const d = await r.json();
+  log(`Scan: ${d.msg}`, d.ok?'ok':'err');
+}
+
+// ── SOL8 scan chart ────────────────────────────────────────
+const scanCtx = document.getElementById('chart-scan').getContext('2d');
+const scanChart = new Chart(scanCtx, {
+  type: 'bar',
+  data: { labels: [], datasets: [{ label: 'Power (dBm)', data: [],
+    backgroundColor: '#388bfd55', borderColor: '#388bfd', borderWidth: 1 }] },
+  options: {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#6e7681', maxRotation: 45 }, grid: { color: '#21262d' } },
+      y: { ticks: { color: '#6e7681' }, grid: { color: '#21262d' },
+           title: { display: true, text: 'dBm', color: '#6e7681' } }
+    }
+  }
+});
+
+async function loadScanResults() {
+  const r = await fetch('/api/sol8/scan');
+  const d = await r.json();
+  if (!d.ok || !d.scan || d.scan.length === 0) {
+    document.getElementById('s8-scan-info').textContent = d.msg || 'No scan data available.';
+    return;
+  }
+  const labels = d.scan.map(p => p.freq_mhz.toFixed(2) + ' MHz');
+  const vals   = d.scan.map(p => p.power_dbm);
+  scanChart.data.labels = labels;
+  scanChart.data.datasets[0].data = vals;
+  scanChart.update('none');
+  const best = d.scan.reduce((a,b) => b.power_dbm > a.power_dbm ? b : a);
+  document.getElementById('s8-scan-info').textContent =
+    `${d.scan.length} channels scanned. Strongest: ${best.freq_mhz.toFixed(2)} MHz at ${best.power_dbm.toFixed(1)} dBm`;
+  log(`Scan loaded: ${d.scan.length} points`, 'ok');
+}
+
+// ── SOL8 node table update ─────────────────────────────────
+const s8Nodes = {};  // node_id → last stats snapshot
+
+function updateNodeTable() {
+  const tbody = document.getElementById('s8-node-tbody');
+  const ids   = Object.keys(s8Nodes);
+  if (ids.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="color:#6e7681;padding:10px 8px">No nodes seen yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = ids.map(id => {
+    const n = s8Nodes[id];
+    const mod_names = ['?','BPSK','QPSK','16QAM','64QAM'];
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;font-family:monospace;color:#58a6ff">${id}</td>
+      <td style="text-align:right;padding:6px 8px">${(n.rssi_db||0).toFixed(1)}</td>
+      <td style="text-align:right;padding:6px 8px">${(n.snr_db||0).toFixed(1)}</td>
+      <td style="text-align:right;padding:6px 8px">${mod_names[n.cur_mod||1]||'?'}</td>
+      <td style="text-align:right;padding:6px 8px;color:#e3b341">${(n.dist_km||0).toFixed(2)}</td>
+      <td style="text-align:right;padding:6px 8px;color:#3fb950">${Math.round(n.kbps_rx||0)}</td>
+      <td style="text-align:right;padding:6px 8px;color:#6e7681">${n.last_seen||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── SOL8 test runner ───────────────────────────────────────
+async function runSol8Test() {
+  document.getElementById('s8-test-out').textContent = 'Running sol8_test…';
+  const r = await fetch('/api/sol8/test', {method:'POST'});
+  const d = await r.json();
+  document.getElementById('s8-test-out').textContent = d.output || d.msg;
+  log('sol8_test: ' + (d.ok ? 'ALL PASS' : 'FAILED'), d.ok ? 'ok' : 'err');
+}
+
+// ── Extend SSE to update SOL8 panel ───────────────────────
+const _origOnMsg2 = es.onmessage;
+es.onmessage = e => {
+  _origOnMsg2(e);
+  const data = JSON.parse(e.data);
+
+  // SOL8 process LED in header
+  const s8run = data.sol8 === 'running';
+  const s8el  = document.getElementById('s8-proc-status');
+  if (s8el) {
+    s8el.textContent = s8run ? '● running' : '● stopped';
+    s8el.style.color = s8run ? '#3fb950' : '#6e7681';
+  }
+
+  // SOL8 live stats
+  const s8 = data.sol8_stats || {};
+  if (s8.node_id) {
+    const mod_names = ['?','BPSK','QPSK','16QAM','64QAM'];
+    document.getElementById('s8-stat-mod').textContent  = mod_names[s8.cur_mod||1]||'—';
+    document.getElementById('s8-stat-bw').textContent   = (s8.bw_mhz||0).toFixed(2);
+    document.getElementById('s8-stat-rx-kbps').textContent = Math.round(s8.kbps_rx||0);
+    document.getElementById('s8-stat-tx-kbps').textContent = Math.round(s8.kbps_tx||0);
+    document.getElementById('s8-stat-rssi').textContent = (s8.rssi_db||0).toFixed(1);
+    document.getElementById('s8-stat-snr').textContent  = (s8.snr_db||0).toFixed(1);
+    document.getElementById('s8-stat-dist').textContent = (s8.dist_km||0).toFixed(3) + ' km';
+    document.getElementById('s8-stat-node').textContent =
+      '0x' + (s8.node_id||0).toString(16).padStart(8,'0').toUpperCase();
+
+    // Update node table for mesh mode
+    const nid = '0x' + (s8.node_id||0).toString(16).padStart(8,'0').toUpperCase();
+    s8Nodes[nid] = { ...s8, last_seen: new Date().toTimeString().slice(0,8) };
+    updateNodeTable();
+  }
+};
+
+// ── Init ───────────────────────────────────────────────────
+loadCfg();
+log('SDR Data Link Control Panel ready', 'info');
+</script>
+
+</body>
+</html>
