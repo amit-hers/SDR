@@ -1,6 +1,6 @@
-# SDR Data Link
+# SDR Datalink
 
-A software-defined radio toolkit built around the [ADALM-PlutoSDR](https://wiki.analog.com/university/tools/pluto) (Zynq-7010 + AD9363). Provides an FM receiver, a bidirectional encrypted digital data link, a Datalink mesh daemon, an FPGA DSP core, and a browser-based management UI.
+A professional C++20 transparent wireless bridge built for the [ADALM-PlutoSDR](https://wiki.analog.com/university/tools/pluto) (Zynq-7010 + AD9363). Two PlutoSDR devices, one per PC, create a full-duplex RF link — any traffic (TCP, UDP, video, RTP, multicast) flows between the two PCs as if they were on the same LAN.
 
 ---
 
@@ -12,286 +12,292 @@ A software-defined radio toolkit built around the [ADALM-PlutoSDR](https://wiki.
 | FPGA | Zynq-7010 (Cortex-A9 + PL) |
 | RF chip | AD9363 |
 | Frequency range | 325 MHz – 3.8 GHz |
-| Max sample rate | 20 MSPS (USB ceiling) |
+| Max sample rate | 20 MSPS |
 
 ---
 
-## Dependencies
+## Network Topology (Bridge Mode)
 
-```bash
-make link-install
-# Installs: libliquid-dev libssl-dev python3-flask
-#           gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+```
+PC-A (192.168.1.10)                        PC-B (192.168.1.20)
+  eth0 ──┐                                    eth0 ──┐
+         br0  ◄── same subnet ──►                   br0
+  sdr0 ──┘  TX:434 MHz ───RF──► RX:434 MHz ──┘
+            RX:439 MHz ◄──RF─── TX:439 MHz
+
+PlutoSDR at 192.168.2.1                  PlutoSDR at 192.168.2.1
+  (PC-A's USB port)                        (PC-B's USB port)
 ```
 
-| Library | Purpose |
-|---------|---------|
-| `libiio` | IQ streaming to/from PlutoSDR |
-| `liquid-dsp` | Modulation, RRC filter, frame sync |
-| `openssl` | AES-256-CTR frame encryption |
-| `Flask` | Web management UI |
+Any traffic from PC-A to PC-B — TCP, UDP, RTP, RTSP, multicast — flows transparently over RF. No application changes needed.
+
+---
+
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+./scripts/install-deps.sh
+```
+
+Installs: `cmake`, `ninja`, `libiio-dev`, `libliquid-dev`, `libssl-dev`, `python3-pip`, `flask`, `flask-sock`.
+
+### 2. Build
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+### 3. Deploy to both PCs
+
+```bash
+# Basic deploy (Side A at 192.168.1.10, Side B at 192.168.1.20)
+./scripts/deploy.sh --side-a 192.168.1.10 --side-b 192.168.1.20
+
+# With FEC and AES-256 encryption
+./scripts/deploy.sh --side-a 192.168.1.10 --side-b 192.168.1.20 \
+    --fec --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+
+# Install as systemd services (auto-start on boot)
+./scripts/deploy.sh --side-a 192.168.1.10 --side-b 192.168.1.20 --service
+```
+
+The script builds, SCPs the binary and monitor server, writes per-side `config.json`, and (re)starts the daemon.
+
+### 4. Verify
+
+```bash
+ping 192.168.1.20           # round-trip over RF from PC-A
+iperf3 -s                   # on PC-B
+iperf3 -c 192.168.1.20      # on PC-A → ~25–90 Mbps depending on SNR
+```
+
+### 5. Monitor
+
+```bash
+# On either PC (or remotely):
+python3 src/monitor/server.py --port 8080
+# Open http://<PC-IP>:8080
+```
+
+---
+
+## Operating Modes
+
+| Mode | Description |
+|------|-------------|
+| `bridge` | **Default.** Transparent L2 bridge — TAP + Linux bridge joining TAP and LAN NIC |
+| `mesh` | IP routing via TUN interface — subnet mesh |
+| `p2p-tx` | Unidirectional transmitter over UDP |
+| `p2p-rx` | Unidirectional receiver over UDP |
+| `scan` | Channel scan → `/tmp/sdr_scan.json` |
+
+---
+
+## Configuration (`config.json`)
+
+```json
+{
+  "mode":             "bridge",
+  "pluto_ip":         "192.168.2.1",
+
+  "freq_tx_mhz":      434.0,
+  "freq_rx_mhz":      439.0,
+  "bw_mhz":           10,
+  "tx_atten_db":      10,
+  "gain_mode":        "fast_attack",
+  "modulation":       "AUTO",
+
+  "tap_iface":        "sdr0",
+  "bridge_iface":     "br0",
+  "lan_iface":        "eth0",
+  "tap_mtu":          1386,
+
+  "encrypt":          false,
+  "fec":              false,
+  "aes_key_hex":      "0000...0000",
+
+  "stats_interval_ms": 1000,
+  "monitor_port":     8080,
+  "node_id":          "0x00000001",
+
+  "scan_start_mhz":   430.0,
+  "scan_step_mhz":    1.0,
+  "scan_n":           20
+}
+```
+
+Live tuning (no restart): POST to `/api/ctrl` via the monitor, or send `SIGUSR2` to the daemon after writing `/tmp/sdr_reload.json`.
+
+---
+
+## Adaptive Modulation
+
+When `modulation` is `AUTO`, the daemon automatically switches based on measured SNR with 2 dB up / 1 dB down hysteresis:
+
+| SNR | Scheme | Spectral efficiency |
+|-----|--------|-------------------|
+| < 9 dB | BPSK | 1 bps/sym |
+| 9–15 dB | QPSK | 2 bps/sym |
+| 15–24 dB | 16QAM | 4 bps/sym |
+| ≥ 24 dB | 64QAM | 6 bps/sym |
+
+**Bandwidth budget at 10 MHz:**
+
+| Scheme | Usable throughput |
+|--------|------------------|
+| QPSK | ~25 Mbps |
+| 16QAM | ~50 Mbps |
+| 64QAM | ~75 Mbps |
+
+1080p H.264 requires ~8–15 Mbps — comfortable within QPSK. Use `bw_mhz: 20` to double all rates.
+
+---
+
+## Reed-Solomon FEC
+
+Set `"fec": true` to enable RS(255,223) per-frame error correction via liquid-dsp (`LIQUID_FEC_RS_M8`):
+
+- 14.3% overhead per frame
+- Corrects up to 16 byte errors per 255-byte block
+- Negligible CPU impact on the Cortex-A9
+
+---
+
+## Frame Format (v3)
+
+```
+[SYNC 4B 0xC0FFEE77] [VER 1B=0x03] [FLAGS 1B] [MOD 1B] [BW 1B]
+[NODE_ID 4B BE] [SEQ 4B BE] [LEN 2B BE]
+[PAYLOAD N bytes  (FEC-encoded if FL_FEC; AES-encrypted if FL_ENCRYPT)]
+[CRC32 4B LE]
+Total overhead: 22 bytes   MAX_PAYLOAD: 1400 bytes
+```
+
+Flags: `FL_ENCRYPT=0x01  FL_FEC=0x02  FL_ACK=0x04  FL_CTRL=0x08`
 
 ---
 
 ## Project Structure
 
 ```
-.
-├── fm_radio.c          FM receiver + ASCII spectrum display
-├── fm_scan.c           FM band scanner
-├── rx_example.c        Basic IQ capture example
-├── link_tx.cpp         Data link transmitter (multi-threaded)
-├── link_rx.cpp         Data link receiver  (multi-threaded)
-├── link_test.cpp       Software DSP loopback (no hardware)
-├── datalink.cpp       Datalink mesh/bridge daemon
-├── datalink_test.cpp   Unit tests for datalink (no hardware)
-├── pluto_eth_bridge.c  Ethernet bridge helper
-├── config.json         Persistent link / radio configuration
-├── Makefile
-├── fpga/
-│   ├── qpsk_demod_hls.cpp   Vivado HLS QPSK IP core
-│   └── hls_build.tcl        HLS synthesis script
-├── webui/
-│   ├── server.py            Flask management server
-│   └── templates/index.html Dashboard
-└── logs/                    Captured audio / IQ logs
+sdr-datalink/
+├── CMakeLists.txt
+├── cmake/
+│   ├── FindLiquidDSP.cmake
+│   └── FindLibIIO.cmake
+├── include/sdr/
+│   ├── hardware/PlutoSDR.hpp
+│   ├── modem/IModem.hpp  Modem.hpp  AdaptiveModem.hpp
+│   ├── framing/Frame.hpp  Framer.hpp  Deframer.hpp
+│   ├── dsp/RRCFilter.hpp  AGC.hpp  TimingSync.hpp  CostasLoop.hpp  FFTSpectrum.hpp
+│   ├── fec/ReedSolomon.hpp
+│   ├── crypto/AESCipher.hpp
+│   ├── transport/ITransport.hpp  TUNTAPDevice.hpp  UDPSocket.hpp  SPSCRing.hpp
+│   └── stats/LinkStats.hpp
+├── src/
+│   ├── core/              → libsdr_core.a
+│   ├── daemon/            → sdr-datalink executable
+│   │   └── modes/         BridgeMode  MeshMode  P2PMode  ScanMode
+│   └── monitor/           Python Flask monitor server + Chart.js dashboard
+├── fpga/                  Vivado HLS QPSK IP core (optional)
+├── scripts/
+│   ├── install-deps.sh
+│   ├── deploy.sh
+│   └── setup-service.sh
+├── tests/                 Unit tests (framing, FEC, modem, crypto, DSP)
+└── config.json
 ```
 
 ---
 
-## Quick Start
+## Monitor Dashboard
 
-### FM Radio
-
-```bash
-make fm FREQ=98.5          # build & play audio through speakers
-make fm-scan               # scan the FM band and show signal levels
-make fm-save FREQ=98.5     # record 30 s to logs/fm_*.wav
-```
-
-Audio is piped as raw 16-bit mono 48 kHz PCM to `aplay`.
-
-### Digital Data Link (host / x86)
+Start the web server on either PC:
 
 ```bash
-make link-all              # build link_tx, link_rx, link_test
-make link-test             # software loopback — no hardware needed
-make link-bench            # send 500 KB of random data over the air
-make link-tx-run           # continuous TX from stdin (piped data)
-make link-rx-run           # continuous RX to stdout (pipe to pv/file)
+python3 src/monitor/server.py --port 8080 --config config.json
 ```
 
-Options accepted by both `link_tx` and `link_rx`:
+Open `http://<PC-IP>:8080`. Features:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--freq` | `434.0` | Center frequency MHz |
-| `--rate` | `20` | Sample rate MSPS |
-| `--mod` | `QPSK` | `BPSK` / `QPSK` / `QAM16` / `QAM64` |
-| `--pluto` | `192.168.2.1` | PlutoSDR IP |
-| `--encrypt` | off | AES-256-CTR per-frame encryption |
-| `--key` | — | 32-byte key as 64 hex chars |
-| `--source` / `--sink` | `stdin` / `stdout` | or `udp` |
-| `--port` | `5005` / `5006` | UDP port |
+- **Signal panel** — RSSI + SNR rolling line charts (60 s window)
+- **Throughput panel** — TX/RX kbps live chart
+- **Spectrum panel** — 256-bin FFT (DC-centred, updates ~5 Hz)
+- **Constellation panel** — IQ scatter showing current modulation
+- **FEC panel** — corrected / uncorrectable counters + correction rate
+- **Channel scanner** — bar chart of scanned frequencies vs. power
+- **Control panel** — freq TX/RX, BW, mod, atten, encrypt toggle, Start/Stop
+- **Live-tune** — apply frequency/attenuation changes without restart
 
-### Web UI
-
-```bash
-make link-webui            # opens http://localhost:8080
-```
-
-The dashboard lets you start/stop TX, RX, or full-duplex, tune frequency and attenuation live (no restart), run loopback tests, and manage Datalink modes.
+WebSocket endpoint `/ws` pushes stats JSON every 200 ms.
 
 ---
 
-## Video Streaming Bridge
+## Video Streaming
 
-Use the datalink in **l2bridge** mode to create a transparent wireless Ethernet bridge. Both PCs appear on the same subnet — any video streaming app (VLC, FFmpeg, OBS, etc.) works without modification.
-
-```
-[Video PC A] ──eth──> [PlutoSDR A] ──RF──> [PlutoSDR B] ──eth──> [Video PC B]
-                       TX 434 MHz              TX 439 MHz
-                       RX 439 MHz              RX 434 MHz
-```
-
-**Step 1 — Build (both PCs):**
+Once the bridge is running, use any streaming tool without modification:
 
 ```bash
-make datalink
-```
+# FFmpeg RTP sender (PC-A)
+ffmpeg -re -i video.mp4 -f rtp rtp://192.168.1.20:5004
 
-**Step 2 — Start bridge on video sender PC (Side A):**
-
-```bash
-# Default: LAN interface eth0, PlutoSDR at 192.168.2.1
-sudo ./bridge-side-a.sh eth0 192.168.2.1
-# or via make:
-make bridge-a LAN=eth0
-```
-
-**Step 3 — Start bridge on video receiver PC (Side B):**
-
-```bash
-sudo ./bridge-side-b.sh eth0 192.168.2.1
-# or via make:
-make bridge-b LAN=eth0
-```
-
-Both scripts:
-- Start the `datalink --mode l2bridge` daemon
-- Wait for the `datalink` TAP interface to appear
-- Create a Linux software bridge (`br0`) joining the TAP and your physical NIC
-- Preserve your existing IP address on the bridge
-- Restore everything cleanly on Ctrl+C
-
-**Step 4 — Stream video:**
-
-Once both bridges are up, both PCs are on the same subnet. Stream normally:
-
-```bash
-# FFmpeg H.264 stream (sender)
-ffmpeg -re -i video.mp4 -vcodec copy -f rtp rtp://192.168.1.50:5004
-
-# VLC receive (receiver)
+# VLC receiver (PC-B)
 vlc rtp://@:5004
 
-# Or use any RTSP / UDP / multicast tool — the bridge is transparent
-```
-
-**Bandwidth budget at 10 MHz BW:**
-
-| Modulation | Raw bitrate | Usable after overhead |
-|------------|-------------|----------------------|
-| QPSK (AUTO default) | ~40 Mbps | ~30 Mbps |
-| 16QAM | ~80 Mbps | ~60 Mbps |
-| 64QAM (close range) | ~120 Mbps | ~90 Mbps |
-
-1080p H.264 at high quality requires ~8–15 Mbps — well within QPSK range. For 4K or multiple streams, use `--bw 20` (doubles all rates above).
-
-> **MTU note:** The bridge scripts set the TAP MTU to 1386 bytes. FFmpeg and VLC automatically respect this. If you use a custom sender, set UDP payload ≤ 1372 bytes (1386 − 14-byte Ethernet header) to avoid fragmentation.
-
----
-
-## ARM Deployment (DSP runs on Zynq)
-
-Running the link binaries **on the PlutoSDR** eliminates the IQ-over-Ethernet bottleneck (80 MB/s → 5 MB/s of decoded frames only).
-
-```bash
-# One-time: cross-compile liquid-dsp for ARM
-git clone https://github.com/jgaeddert/liquid-dsp
-cd liquid-dsp && ./bootstrap.sh
-./configure --host=arm-linux-gnueabihf --prefix=/opt/arm-sysroot
-make -j4 && make install
-
-# Build & deploy
-make link-arm              # cross-compile link_tx_arm, link_rx_arm
-make link-deploy           # scp binaries to PlutoSDR
-
-# Remote control via SSH
-make link-start-rx         # start RX on device, stream frames back via UDP
-make link-start-tx         # start TX on device, accept frames via UDP
-make link-stop             # stop both
+# iperf3 throughput test
+iperf3 -s                        # PC-B
+iperf3 -c 192.168.1.20 -t 30     # PC-A
 ```
 
 ---
 
-## Datalink Daemon
+## FPGA IP Core (Optional)
 
-`datalink` supports the following operating modes:
+Moves RRC filtering + QPSK demodulation into the Zynq PL fabric:
 
-| Mode | Description |
-|------|-------------|
-| `mesh` | IP MANET mesh via TUN interface (FDD) |
-| `l2bridge` | Transparent Layer-2 bridge via TAP interface |
-| `p2p-tx` | Unidirectional transmitter |
-| `p2p-rx` | Unidirectional receiver |
-| `scan` | Channel scan → `/tmp/datalink_scan.json` |
-| `ranging` | RSSI-based distance estimation |
+```
+[AD9363 LVDS] → [AXI AD9361 IP] → [QPSK DSP IP] → [AXI DMA] → DDR
+```
 
-**Adaptive modulation** — automatically switches based on SNR:
-
-| SNR | Modulation | Spectral efficiency |
-|-----|-----------|-------------------|
-| < 6 dB | BPSK | 1 bps/sym |
-| < 13 dB | QPSK | 2 bps/sym |
-| < 22 dB | 16QAM | 4 bps/sym |
-| ≥ 22 dB | 64QAM | 6 bps/sym |
+- Resources: ~800 LUTs, ~400 FFs, 2 DSP48
+- Throughput: 200 MSPS (10× margin)
 
 ```bash
-make datalink-test             # unit tests — no hardware needed
-make datalink-mesh             # start FDD mesh (TX 434 MHz / RX 439 MHz)
-make datalink-l2bridge         # transparent L2 bridge
-make datalink-scan             # sweep 430–450 MHz in 1 MHz steps
-make datalink-ranging          # print RSSI distance every second
-```
-
-Datalink frame format (v2, 22-byte overhead):
-```
-[SYNC 4B 0xC0FFEE77] [VER 1B] [FLAGS 1B] [MOD 1B] [BW 1B]
-[NODE_ID 4B] [SEQ 4B] [LEN 2B] [PAYLOAD N] [CRC32 4B]
-```
-
----
-
-## FPGA IP Core (optional)
-
-Moves the DSP (RRC filter + QPSK demodulation) into the FPGA fabric, freeing the ARM entirely for framing.
-
-```
-[AD9363 LVDS] → [ADI AXI AD9361 IP] → [THIS IP] → [AXI DMA] → DDR
-```
-
-- Resources: ~800 LUTs, ~400 FFs, 2 DSP48 (Zynq-7010 has 80 — plenty)
-- Throughput: 200 MSPS (10× margin over 20 MSPS requirement)
-
-```bash
-make link-fpga             # requires Vivado HLS 2019.1+
+# Requires Vivado HLS 2019.1+
 # Output IP at fpga/qpsk_modem/solution1/impl/ip/
-# Add to Vivado IP catalog and wire to cf-ad9361-lpc M_AXIS_0
 ```
 
 ---
 
-## Configuration
+## Build & Test Reference
 
-`config.json` is read by both the CLI tools and the web UI:
+```bash
+# Configure
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-```json
-{
-  "radio":    { "freq_mhz": 434.0, "rate_msps": 20, "mod": "QPSK", "tx_atten_db": 10 },
-  "link":     { "pluto_ip": "192.168.2.1", "source": "stdin", "sink": "stdout" },
-  "security": { "encrypt": false, "key_hex": "0000...0000" },
-  "datalink":  { "freq_tx": 434, "freq_rx": 439, "bw_mhz": 10, "mod": "AUTO" }
-}
+# Build
+cmake --build build -j$(nproc)
+
+# Unit tests (no hardware required)
+ctest --test-dir build --output-on-failure
+
+# Deploy
+./scripts/deploy.sh --side-a HOST_A --side-b HOST_B [--fec] [--key HEX] [--service]
+
+# Monitor
+python3 src/monitor/server.py --port 8080
 ```
-
-Live changes (no restart) are supported for TX attenuation, TX/RX frequency, and modulation via SIGUSR1 or through the web UI.
 
 ---
 
-## Performance Summary
+## Dependencies
 
-| Mode | Where DSP runs | Ethernet load |
-|------|---------------|--------------|
-| Host (default) | x86 PC | ~80 MB/s raw IQ |
-| ARM (`--arm`) | Zynq Cortex-A9 | ~5 MB/s decoded frames |
-| FPGA (future) | PL fabric | ARM framing only |
-
----
-
-## Make Targets Reference
-
-```
-make build          Build rx_example (basic IQ test)
-make fm             Build & run FM receiver
-make fm-scan        FM band scan
-make link-all       Build link_tx + link_rx + link_test (x86)
-make link-test      Software DSP loopback
-make link-arm       Cross-compile for Zynq ARM
-make link-deploy    Build + copy ARM binaries to PlutoSDR
-make link-webui     Start web UI at http://localhost:8080
-make link-fpga      Synthesize FPGA QPSK IP (Vivado HLS)
-make datalink          Build Datalink daemon
-make datalink-test      Run Datalink unit tests (no hardware)
-make clean          Remove all build artifacts
-```
+| Library | Purpose |
+|---------|---------|
+| `libiio` | IQ streaming to/from PlutoSDR over network context |
+| `liquid-dsp` | Modems (BPSK/QPSK/16QAM/64QAM), RRC filter, AGC, timing sync, RS FEC |
+| `openssl` | AES-256-CTR per-frame encryption |
+| `flask` + `flask-sock` | Monitor web server + WebSocket |
