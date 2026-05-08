@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SDR Datalink Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">&#128225; SDR Datalink</div>
+  <div id="status-badge" class="badge stopped">STOPPED</div>
+  <div class="header-right">
+    <span id="uptime">0s</span>
+    <span id="temp">--°C</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ── Control row ─────────────────────────────────────────────────── -->
+<section class="card ctrl-card">
+  <h2>Control</h2>
+  <div class="ctrl-grid">
+    <label>Mode
+      <select id="ctrl-mode">
+        <option value="bridge">bridge</option>
+        <option value="mesh">mesh</option>
+        <option value="p2p-tx">p2p-tx</option>
+        <option value="p2p-rx">p2p-rx</option>
+        <option value="scan">scan</option>
+      </select>
+    </label>
+    <label>TX MHz
+      <input type="number" id="ctrl-freq-tx" step="0.1" value="434.0">
+    </label>
+    <label>RX MHz
+      <input type="number" id="ctrl-freq-rx" step="0.1" value="439.0">
+    </label>
+    <label>BW MHz
+      <select id="ctrl-bw">
+        <option>1</option><option>2</option><option>5</option>
+        <option selected>10</option><option>20</option>
+      </select>
+    </label>
+    <label>Modulation
+      <select id="ctrl-mod">
+        <option value="AUTO">AUTO</option>
+        <option value="BPSK">BPSK</option>
+        <option value="QPSK">QPSK</option>
+        <option value="16QAM">16QAM</option>
+        <option value="64QAM">64QAM</option>
+      </select>
+    </label>
+    <label>TX Atten (dB)
+      <input type="range" id="ctrl-atten" min="0" max="89" value="10"
+             oninput="document.getElementById('ctrl-atten-val').textContent=this.value">
+      <span id="ctrl-atten-val">10</span>
+    </label>
+    <label class="encrypt-row">Encrypt
+      <input type="checkbox" id="ctrl-encrypt">
+    </label>
+    <label>AES Key (hex)
+      <input type="text" id="ctrl-aes" maxlength="64" placeholder="64 hex chars">
+    </label>
+  </div>
+  <div class="ctrl-btns">
+    <button class="btn-start" onclick="startDaemon()">&#9654; Start</button>
+    <button class="btn-stop"  onclick="stopDaemon()">&#9632; Stop</button>
+    <button class="btn-tune"  onclick="liveTune()">&#128295; Apply Live</button>
+    <button class="btn-save"  onclick="saveConfig()">&#128190; Save Config</button>
+  </div>
+</section>
+
+<!-- ── Stats row ──────────────────────────────────────────────────── -->
+<div class="stats-row">
+  <div class="stat-box"><div class="stat-val" id="s-rssi">--</div><div class="stat-lbl">RSSI dBm</div></div>
+  <div class="stat-box"><div class="stat-val" id="s-snr">--</div><div class="stat-lbl">SNR dB</div></div>
+  <div class="stat-box"><div class="stat-val" id="s-tx-kbps">--</div><div class="stat-lbl">TX kbps</div></div>
+  <div class="stat-box"><div class="stat-val" id="s-rx-kbps">--</div><div class="stat-lbl">RX kbps</div></div>
+  <div class="stat-box"><div class="stat-val" id="s-frames-tx">--</div><div class="stat-lbl">Frames TX</div></div>
+  <div class="stat-box"><div class="stat-val" id="s-frames-rx">--</div><div class="stat-lbl">Frames RX</div></div>
+  <div class="stat-box"><div class="stat-val" id="s-dropped">--</div><div class="stat-lbl">Dropped</div></div>
+  <div class="stat-box mod-box"><div class="stat-val" id="s-mod">--</div><div class="stat-lbl">Modulation</div></div>
+</div>
+
+<!-- ── Charts grid ────────────────────────────────────────────────── -->
+<div class="charts-grid">
+
+  <section class="card">
+    <h2>Signal (RSSI / SNR)</h2>
+    <canvas id="chart-signal"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>Throughput</h2>
+    <canvas id="chart-tput"></canvas>
+  </section>
+
+  <section class="card card-wide">
+    <h2>RF Spectrum (256-bin FFT)</h2>
+    <canvas id="chart-spectrum"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>IQ Constellation</h2>
+    <canvas id="chart-iq"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>FEC Statistics</h2>
+    <div class="fec-stats">
+      <div><span id="fec-corrected">0</span><small>corrected</small></div>
+      <div><span id="fec-uncorr">0</span><small>uncorrectable</small></div>
+      <div><span id="fec-rate">0%</span><small>correction rate</small></div>
+    </div>
+    <canvas id="chart-fec"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>Channel Scanner</h2>
+    <div class="scan-btns">
+      <button class="btn-tune" onclick="runScan()">&#128270; Scan</button>
+    </div>
+    <canvas id="chart-scan"></canvas>
+  </section>
+
+</div>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

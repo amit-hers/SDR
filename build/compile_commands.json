@@ -1,0 +1,176 @@
+[
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/hardware/PlutoSDR.cpp.o -c /home/parallels/Documents/SDR/src/core/hardware/PlutoSDR.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/hardware/PlutoSDR.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/hardware/PlutoSDR.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/modem/Modem.cpp.o -c /home/parallels/Documents/SDR/src/core/modem/Modem.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/modem/Modem.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/modem/Modem.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/modem/AdaptiveModem.cpp.o -c /home/parallels/Documents/SDR/src/core/modem/AdaptiveModem.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/modem/AdaptiveModem.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/modem/AdaptiveModem.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/framing/Framer.cpp.o -c /home/parallels/Documents/SDR/src/core/framing/Framer.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/framing/Framer.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/framing/Framer.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/framing/Deframer.cpp.o -c /home/parallels/Documents/SDR/src/core/framing/Deframer.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/framing/Deframer.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/framing/Deframer.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/dsp/RRCFilter.cpp.o -c /home/parallels/Documents/SDR/src/core/dsp/RRCFilter.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/dsp/RRCFilter.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/dsp/RRCFilter.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/dsp/AGC.cpp.o -c /home/parallels/Documents/SDR/src/core/dsp/AGC.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/dsp/AGC.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/dsp/AGC.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/dsp/TimingSync.cpp.o -c /home/parallels/Documents/SDR/src/core/dsp/TimingSync.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/dsp/TimingSync.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/dsp/TimingSync.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/dsp/CostasLoop.cpp.o -c /home/parallels/Documents/SDR/src/core/dsp/CostasLoop.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/dsp/CostasLoop.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/dsp/CostasLoop.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/dsp/FFTSpectrum.cpp.o -c /home/parallels/Documents/SDR/src/core/dsp/FFTSpectrum.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/dsp/FFTSpectrum.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/dsp/FFTSpectrum.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/fec/ReedSolomon.cpp.o -c /home/parallels/Documents/SDR/src/core/fec/ReedSolomon.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/fec/ReedSolomon.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/fec/ReedSolomon.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/crypto/AESCipher.cpp.o -c /home/parallels/Documents/SDR/src/core/crypto/AESCipher.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/crypto/AESCipher.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/crypto/AESCipher.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/transport/TUNTAPDevice.cpp.o -c /home/parallels/Documents/SDR/src/core/transport/TUNTAPDevice.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/transport/TUNTAPDevice.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/transport/TUNTAPDevice.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/transport/UDPSocket.cpp.o -c /home/parallels/Documents/SDR/src/core/transport/UDPSocket.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/transport/UDPSocket.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/transport/UDPSocket.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/core",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr_core.dir/stats/LinkStats.cpp.o -c /home/parallels/Documents/SDR/src/core/stats/LinkStats.cpp",
+  "file": "/home/parallels/Documents/SDR/src/core/stats/LinkStats.cpp",
+  "output": "src/core/CMakeFiles/sdr_core.dir/stats/LinkStats.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/main.cpp.o -c /home/parallels/Documents/SDR/src/daemon/main.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/main.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/main.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/Config.cpp.o -c /home/parallels/Documents/SDR/src/daemon/Config.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/Config.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/Config.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/Controller.cpp.o -c /home/parallels/Documents/SDR/src/daemon/Controller.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/Controller.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/Controller.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/StatsExporter.cpp.o -c /home/parallels/Documents/SDR/src/daemon/StatsExporter.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/StatsExporter.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/StatsExporter.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/modes/BridgeMode.cpp.o -c /home/parallels/Documents/SDR/src/daemon/modes/BridgeMode.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/modes/BridgeMode.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/modes/BridgeMode.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/modes/MeshMode.cpp.o -c /home/parallels/Documents/SDR/src/daemon/modes/MeshMode.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/modes/MeshMode.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/modes/MeshMode.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/modes/P2PMode.cpp.o -c /home/parallels/Documents/SDR/src/daemon/modes/P2PMode.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/modes/P2PMode.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/modes/P2PMode.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/src/daemon",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -I/home/parallels/Documents/SDR/src/daemon -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-datalink.dir/modes/ScanMode.cpp.o -c /home/parallels/Documents/SDR/src/daemon/modes/ScanMode.cpp",
+  "file": "/home/parallels/Documents/SDR/src/daemon/modes/ScanMode.cpp",
+  "output": "src/daemon/CMakeFiles/sdr-datalink.dir/modes/ScanMode.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/tests",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-tests.dir/main.cpp.o -c /home/parallels/Documents/SDR/tests/main.cpp",
+  "file": "/home/parallels/Documents/SDR/tests/main.cpp",
+  "output": "tests/CMakeFiles/sdr-tests.dir/main.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/tests",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-tests.dir/test_framing.cpp.o -c /home/parallels/Documents/SDR/tests/test_framing.cpp",
+  "file": "/home/parallels/Documents/SDR/tests/test_framing.cpp",
+  "output": "tests/CMakeFiles/sdr-tests.dir/test_framing.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/tests",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-tests.dir/test_fec.cpp.o -c /home/parallels/Documents/SDR/tests/test_fec.cpp",
+  "file": "/home/parallels/Documents/SDR/tests/test_fec.cpp",
+  "output": "tests/CMakeFiles/sdr-tests.dir/test_fec.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/tests",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-tests.dir/test_modem.cpp.o -c /home/parallels/Documents/SDR/tests/test_modem.cpp",
+  "file": "/home/parallels/Documents/SDR/tests/test_modem.cpp",
+  "output": "tests/CMakeFiles/sdr-tests.dir/test_modem.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/tests",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-tests.dir/test_crypto.cpp.o -c /home/parallels/Documents/SDR/tests/test_crypto.cpp",
+  "file": "/home/parallels/Documents/SDR/tests/test_crypto.cpp",
+  "output": "tests/CMakeFiles/sdr-tests.dir/test_crypto.cpp.o"
+},
+{
+  "directory": "/home/parallels/Documents/SDR/build/tests",
+  "command": "/usr/bin/c++  -I/home/parallels/Documents/SDR/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -O3 -o CMakeFiles/sdr-tests.dir/test_dsp.cpp.o -c /home/parallels/Documents/SDR/tests/test_dsp.cpp",
+  "file": "/home/parallels/Documents/SDR/tests/test_dsp.cpp",
+  "output": "tests/CMakeFiles/sdr-tests.dir/test_dsp.cpp.o"
+}
+]

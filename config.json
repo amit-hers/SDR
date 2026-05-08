@@ -1,33 +1,28 @@
 {
-  "radio": {
-    "freq_mhz": 2400.0,
-    "rate_msps": 20,
-    "mod": "QPSK",
-    "tx_atten_db": 0,
-    "rf_bw_mhz": 18
-  },
-  "link": {
-    "mode": "tx",
-    "pluto_ip": "192.168.2.1",
-    "source": "stdin",
-    "sink": "stdout",
-    "udp_source_port": 5005,
-    "udp_sink_ip": "127.0.0.1",
-    "udp_sink_port": 5006
-  },
-  "security": {
-    "encrypt": false,
-    "key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
-  },
-  "system": {
-    "log_level": "info",
-    "stats_interval_s": 2
-  },
-  "datalink": {
-    "freq_tx": 434,
-    "freq_rx": 434,
-    "bw_mhz": 10,
-    "mod": "AUTO",
-    "node_id": "0x00000001"
-  }
+  "mode":             "bridge",
+  "pluto_ip":         "192.168.2.1",
+
+  "freq_tx_mhz":      434.0,
+  "freq_rx_mhz":      439.0,
+  "bw_mhz":           10,
+  "tx_atten_db":      10,
+  "gain_mode":        "fast_attack",
+  "modulation":       "AUTO",
+
+  "tap_iface":        "sdr0",
+  "bridge_iface":     "br0",
+  "lan_iface":        "eth0",
+  "tap_mtu":          1386,
+
+  "encrypt":          false,
+  "fec":              false,
+  "aes_key_hex":      "0000000000000000000000000000000000000000000000000000000000000000",
+
+  "stats_interval_ms": 1000,
+  "monitor_port":     8080,
+  "node_id":          "0x00000001",
+
+  "scan_start_mhz":   430.0,
+  "scan_step_mhz":    1.0,
+  "scan_n":           20
 }

@@ -1,0 +1,113 @@
+Start testing: May 08 17:43 IDT
+----------------------------------------------------------
+1/5 Testing: framing
+1/5 Test: framing
+Command: "/home/parallels/Documents/SDR/build/tests/sdr-tests" "framing"
+Directory: /home/parallels/Documents/SDR/build/tests
+"framing" start time: May 08 17:43 IDT
+Output:
+----------------------------------------------------------
+[framing tests]
+  [framing] roundtrip: PASS
+  [framing] corrupt CRC rejected: PASS
+  [framing] max payload roundtrip: PASS
+  [framing] multi-frame stream: PASS
+[framing tests] ALL PASS
+
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"framing" end time: May 08 17:43 IDT
+"framing" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/5 Testing: fec
+2/5 Test: fec
+Command: "/home/parallels/Documents/SDR/build/tests/sdr-tests" "fec"
+Directory: /home/parallels/Documents/SDR/build/tests
+"fec" start time: May 08 17:43 IDT
+Output:
+----------------------------------------------------------
+[fec tests]
+  [fec] clean roundtrip: PASS
+  [fec] 15-error correction: PASS
+  [fec] full block (223B): PASS
+  [fec] multi-block (500B → 3 blocks): PASS
+[fec tests] ALL PASS
+
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"fec" end time: May 08 17:43 IDT
+"fec" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/5 Testing: modem
+3/5 Test: modem
+Command: "/home/parallels/Documents/SDR/build/tests/sdr-tests" "modem"
+Directory: /home/parallels/Documents/SDR/build/tests
+"modem" start time: May 08 17:43 IDT
+Output:
+----------------------------------------------------------
+[modem tests]
+  [modem] BPSK roundtrip: PASS
+  [modem] QPSK roundtrip: PASS
+  [modem] 16QAM roundtrip: PASS
+  [modem] 64QAM roundtrip: PASS
+  [modem] adaptive SNR thresholds + hysteresis: PASS
+[modem tests] ALL PASS
+
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"modem" end time: May 08 17:43 IDT
+"modem" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/5 Testing: crypto
+4/5 Test: crypto
+Command: "/home/parallels/Documents/SDR/build/tests/sdr-tests" "crypto"
+Directory: /home/parallels/Documents/SDR/build/tests
+"crypto" start time: May 08 17:43 IDT
+Output:
+----------------------------------------------------------
+[crypto tests]
+  [crypto] AES-256-CTR encrypt/decrypt: PASS
+  [crypto] different counters produce different ciphertext: PASS
+  [crypto] large payload (1400B): PASS
+[crypto tests] ALL PASS
+
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"crypto" end time: May 08 17:43 IDT
+"crypto" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/5 Testing: dsp
+5/5 Test: dsp
+Command: "/home/parallels/Documents/SDR/build/tests/sdr-tests" "dsp"
+Directory: /home/parallels/Documents/SDR/build/tests
+"dsp" start time: May 08 17:43 IDT
+Output:
+----------------------------------------------------------
+[dsp tests]
+  [dsp] RRC interp/decim size OK: PASS
+  [dsp] AGC converges (mag=20.4601): PASS
+  [dsp] FFT spectrum length + finite values: PASS
+  [dsp] FFT DC peak at center bin 128: PASS
+[dsp tests] ALL PASS
+
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"dsp" end time: May 08 17:43 IDT
+"dsp" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: May 08 17:43 IDT

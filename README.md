@@ -104,6 +104,74 @@ The dashboard lets you start/stop TX, RX, or full-duplex, tune frequency and att
 
 ---
 
+## Video Streaming Bridge
+
+Use the datalink in **l2bridge** mode to create a transparent wireless Ethernet bridge. Both PCs appear on the same subnet — any video streaming app (VLC, FFmpeg, OBS, etc.) works without modification.
+
+```
+[Video PC A] ──eth──> [PlutoSDR A] ──RF──> [PlutoSDR B] ──eth──> [Video PC B]
+                       TX 434 MHz              TX 439 MHz
+                       RX 439 MHz              RX 434 MHz
+```
+
+**Step 1 — Build (both PCs):**
+
+```bash
+make datalink
+```
+
+**Step 2 — Start bridge on video sender PC (Side A):**
+
+```bash
+# Default: LAN interface eth0, PlutoSDR at 192.168.2.1
+sudo ./bridge-side-a.sh eth0 192.168.2.1
+# or via make:
+make bridge-a LAN=eth0
+```
+
+**Step 3 — Start bridge on video receiver PC (Side B):**
+
+```bash
+sudo ./bridge-side-b.sh eth0 192.168.2.1
+# or via make:
+make bridge-b LAN=eth0
+```
+
+Both scripts:
+- Start the `datalink --mode l2bridge` daemon
+- Wait for the `datalink` TAP interface to appear
+- Create a Linux software bridge (`br0`) joining the TAP and your physical NIC
+- Preserve your existing IP address on the bridge
+- Restore everything cleanly on Ctrl+C
+
+**Step 4 — Stream video:**
+
+Once both bridges are up, both PCs are on the same subnet. Stream normally:
+
+```bash
+# FFmpeg H.264 stream (sender)
+ffmpeg -re -i video.mp4 -vcodec copy -f rtp rtp://192.168.1.50:5004
+
+# VLC receive (receiver)
+vlc rtp://@:5004
+
+# Or use any RTSP / UDP / multicast tool — the bridge is transparent
+```
+
+**Bandwidth budget at 10 MHz BW:**
+
+| Modulation | Raw bitrate | Usable after overhead |
+|------------|-------------|----------------------|
+| QPSK (AUTO default) | ~40 Mbps | ~30 Mbps |
+| 16QAM | ~80 Mbps | ~60 Mbps |
+| 64QAM (close range) | ~120 Mbps | ~90 Mbps |
+
+1080p H.264 at high quality requires ~8–15 Mbps — well within QPSK range. For 4K or multiple streams, use `--bw 20` (doubles all rates above).
+
+> **MTU note:** The bridge scripts set the TAP MTU to 1386 bytes. FFmpeg and VLC automatically respect this. If you use a custom sender, set UDP payload ≤ 1372 bytes (1386 − 14-byte Ethernet header) to avoid fragmentation.
+
+---
+
 ## ARM Deployment (DSP runs on Zynq)
 
 Running the link binaries **on the PlutoSDR** eliminates the IQ-over-Ethernet bottleneck (80 MB/s → 5 MB/s of decoded frames only).
