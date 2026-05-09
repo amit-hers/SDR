@@ -56,6 +56,7 @@ private:
     iio_channel* rx_q_   {nullptr};
     iio_channel* tx_i_   {nullptr};
     iio_channel* tx_q_   {nullptr};
+    iio_channel* temp_ch_{nullptr};
     size_t       buf_sz_ {DEFAULT_BUF};
 };
 

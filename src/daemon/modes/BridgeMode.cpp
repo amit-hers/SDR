@@ -136,8 +136,10 @@ void BridgeMode::rxThread() {
 // ── Stat thread ───────────────────────────────────────────────────────────────
 void BridgeMode::statThread() {
     using clock = std::chrono::steady_clock;
-    auto last = clock::now();
+    auto start = clock::now();
+    auto last  = start;
     uint64_t prev_tx = 0, prev_rx = 0;
+    int temp_tick = 0;
 
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(STAT_TICK));
@@ -152,7 +154,17 @@ void BridgeMode::statThread() {
         stats_.rx_kbps.store(static_cast<float>((rx - prev_rx) * 8 / dt / 1e3),
                              std::memory_order_relaxed);
         prev_tx = tx; prev_rx = rx;
-        stats_.uptime_s.fetch_add(STAT_TICK / 1000, std::memory_order_relaxed);
+
+        stats_.uptime_s.store(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(now - start).count()),
+            std::memory_order_relaxed);
+
+        // Read chip temperature every 5 s (50 × 100 ms ticks)
+        if (++temp_tick >= 50) {
+            temp_tick = 0;
+            stats_.temp_c.store(radio_.getTemp(), std::memory_order_relaxed);
+        }
     }
 }
 

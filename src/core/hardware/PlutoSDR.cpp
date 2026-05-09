@@ -27,7 +27,7 @@ std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& ip) {
 
     // Local oscillators
     p->lo_tx_ = iio_device_find_channel(p->phy_, "altvoltage1", true);
-    p->lo_rx_ = iio_device_find_channel(p->phy_, "altvoltage0", false);
+    p->lo_rx_ = iio_device_find_channel(p->phy_, "altvoltage0", true);
 
     // PHY channels
     p->tx_ch_ = iio_device_find_channel(p->phy_, "voltage0", true);
@@ -44,6 +44,8 @@ std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& ip) {
 
     if (!p->tx_i_ || !p->tx_q_ || !p->rx_i_ || !p->rx_q_)
         throw std::runtime_error("PlutoSDR: IQ channels not found");
+
+    p->temp_ch_ = iio_device_find_channel(p->phy_, "temp0", false);
 
     iio_channel_enable(p->tx_i_);
     iio_channel_enable(p->tx_q_);
@@ -123,16 +125,19 @@ float PlutoSDR::getRSSI() const {
 }
 
 float PlutoSDR::getTemp() const {
+    if (!temp_ch_) return 0.f;
     long long raw = 0;
-    iio_device_attr_read_longlong(phy_, "in_temp0_input", &raw);
+    iio_channel_attr_read_longlong(temp_ch_, "input", &raw);
     return static_cast<float>(raw) / 1000.f;  // millideg → °C
 }
 
 DeviceInfo PlutoSDR::getInfo() const {
     DeviceInfo info;
     info.temp_c = getTemp();
-    if (const char* hw = iio_context_get_attr_value(ctx_, "hw_model"))
-        info.firmware = hw;
+    if (const char* v = iio_context_get_attr_value(ctx_, "hw_model"))
+        info.firmware = v;
+    if (const char* v = iio_context_get_attr_value(ctx_, "hw_serial"))
+        info.serial = v;
     return info;
 }
 

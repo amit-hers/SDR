@@ -33,6 +33,9 @@ struct LinkStats {
     // Spectrum (updated ~5 Hz from stat thread); protected by spectrum_mu
     std::array<float, FFT_BINS> spectrum{};
 
+    // Device telemetry
+    std::atomic<float>    temp_c   {0.f};
+
     // Uptime
     std::atomic<uint64_t> uptime_s {0};
 

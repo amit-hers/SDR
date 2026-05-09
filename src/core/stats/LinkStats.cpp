@@ -28,6 +28,7 @@ std::string LinkStats::toJSON() const {
       << "\"rx_kbps\":"           << f(rx_kbps.load())         << ","
       << "\"dist_km\":"           << f(dist_km.load(), 3)      << ","
       << "\"cur_mod\":"           << cur_mod.load()            << ","
+      << "\"temp_c\":"            << f(temp_c.load(), 1)       << ","
       << "\"uptime_s\":"          << uptime_s.load()           << ","
       << "\"spectrum\":[";
 

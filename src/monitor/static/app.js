@@ -126,6 +126,8 @@ function applyStats(stats) {
     g('s-dropped').textContent   = stats.dropped ?? '--';
     g('s-mod').textContent       = MOD_LABELS[stats.cur_mod] ?? '--';
     g('uptime').textContent      = formatUptime(stats.uptime_s ?? 0);
+    if (typeof stats.temp_c === 'number')
+        g('temp').textContent    = stats.temp_c.toFixed(1) + '°C';
 
     const corr  = stats.fec_corrected  ?? 0;
     const uncorr = stats.fec_uncorrectable ?? 0;

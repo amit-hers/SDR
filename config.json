@@ -1,28 +1,6 @@
 {
-  "mode":             "bridge",
-  "pluto_ip":         "192.168.2.1",
-
-  "freq_tx_mhz":      434.0,
-  "freq_rx_mhz":      439.0,
-  "bw_mhz":           10,
-  "tx_atten_db":      10,
-  "gain_mode":        "fast_attack",
-  "modulation":       "AUTO",
-
-  "tap_iface":        "sdr0",
-  "bridge_iface":     "br0",
-  "lan_iface":        "eth0",
-  "tap_mtu":          1386,
-
-  "encrypt":          false,
-  "fec":              false,
-  "aes_key_hex":      "0000000000000000000000000000000000000000000000000000000000000000",
-
-  "stats_interval_ms": 1000,
-  "monitor_port":     8080,
-  "node_id":          "0x00000001",
-
-  "scan_start_mhz":   430.0,
-  "scan_step_mhz":    1.0,
-  "scan_n":           20
+  "mode": "scan",
+  "freq_tx_mhz": 434.0,
+  "freq_rx_mhz": 439.0,
+  "bw_mhz": 10
 }
