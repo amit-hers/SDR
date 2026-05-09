@@ -1,0 +1,61 @@
+# ── Build output ─────────────────────────────────────────────────────
+build/
+*.o
+*.a
+*.so
+*.out
+
+# ── CMake ─────────────────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_CPack_Packages/
+install_manifest.txt
+
+# ── FPGA / Vivado build artifacts ─────────────────────────────────────
+fpga/hls/*/solution*/
+fpga/hls/*/*.prj/
+fpga/hls/*/*.log
+fpga/bd/*.xpr
+fpga/bd/*.cache/
+fpga/bd/*.hw/
+fpga/bd/*.ip_user_files/
+fpga/bd/*.runs/
+fpga/bd/*.sdk/
+fpga/bd/*.srcs/
+*.bit
+*.bin
+*.ltx
+*.xsa
+*.mcs
+vivado*.log
+vivado*.jou
+vivado_pid*.str
+webtalk*.log
+webtalk*.jou
+
+# ── Runtime / temp files ──────────────────────────────────────────────
+/tmp/sdr_stats.json
+/tmp/sdr_reload.json
+/tmp/sdr_scan.json
+config_side_a.json
+config_side_b.json
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# ── IDE ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
