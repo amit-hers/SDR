@@ -29,20 +29,23 @@ enum class ModCode : uint8_t {
 };
 
 // ── Bandwidth codes ───────────────────────────────────────────────────────
+// HamGeek Pluto+ (XC7z020 + AD9363 in AD9361 mode): up to 61.44 MSPS
 enum class BwCode : uint8_t {
     BW_1P25 = 0,
     BW_2P5  = 1,
     BW_5    = 2,
     BW_10   = 3,
     BW_20   = 4,
+    BW_40   = 5,   // HamGeek Pluto+ only
 };
 
 inline long long bwToSps(BwCode bw) {
     switch (bw) {
-        case BwCode::BW_1P25: return 1'250'000LL;
-        case BwCode::BW_2P5:  return 2'500'000LL;
-        case BwCode::BW_5:    return 5'000'000LL;
+        case BwCode::BW_1P25: return  1'250'000LL;
+        case BwCode::BW_2P5:  return  2'500'000LL;
+        case BwCode::BW_5:    return  5'000'000LL;
         case BwCode::BW_10:   return 10'000'000LL;
+        case BwCode::BW_40:   return 40'000'000LL;
         default:              return 20'000'000LL;
     }
 }
@@ -52,7 +55,8 @@ inline BwCode mhzToBw(int mhz) {
     if (mhz <= 2)  return BwCode::BW_2P5;
     if (mhz <= 5)  return BwCode::BW_5;
     if (mhz <= 10) return BwCode::BW_10;
-    return BwCode::BW_20;
+    if (mhz <= 20) return BwCode::BW_20;
+    return BwCode::BW_40;
 }
 
 // ── Decoded frame ─────────────────────────────────────────────────────────

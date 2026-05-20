@@ -29,7 +29,7 @@ public:
     const std::array<float, BINS>& spectrum() const { return power_db_; }
 
     double center_hz   {434e6};
-    double sample_rate {20e6};
+    double sample_rate {40e6};  // HamGeek Pluto+: 4× oversampled at 10 MHz BW
 
 private:
     fftplan                            plan_    {nullptr};

@@ -8,11 +8,12 @@ A professional C++20 transparent wireless bridge built for the [ADALM-PlutoSDR](
 
 | Item | Detail |
 |------|--------|
-| SDR | ADALM-PlutoSDR Rev.C (default IP `192.168.2.1`) |
-| FPGA | Zynq-7010 (Cortex-A9 + PL) |
-| RF chip | AD9363A |
-| Frequency range | 325 MHz – 3.8 GHz |
-| Max sample rate | 20 MSPS |
+| SDR | **HamGeek Pluto+** (AD9363 in AD9361 mode, default IP `192.168.2.1`) |
+| FPGA | Zynq-7020 XC7z020clg400-2 (Cortex-A9 + PL, 1 GB DDR3) |
+| RF chip | AD9363A (operating in AD9361 mode via F5OEO firmware) |
+| Frequency range | 70 MHz – 6 GHz |
+| Max sample rate | 61.44 MSPS (10 MHz BW → 40 MSPS in 4× oversampled mode) |
+| Ethernet | Gigabit (PS-side) |
 
 ---
 
@@ -384,4 +385,6 @@ python3 src/monitor/server.py --port 8080
 - `altvoltage0` (RX_LO) and `altvoltage1` (TX_LO) are both **output** channels in the iio model
 - Temperature is on channel `temp0`, attribute `input` (millidegrees → divide by 1000)
 - Device names: `ad9361-phy`, `cf-ad9361-dds-core-lpc` (TX), `cf-ad9361-lpc` (RX)
-- Firmware tested: `v0.37-dirty` on `xc7z010clg225-1`
+- Firmware: F5OEO extended firmware (HamGeek ships with this pre-installed)
+- FPGA part: `xc7z020clg400-2` (NOT xc7z010 — affects all HLS synthesis targets)
+- Firmware tested: `v0.37-dirty` (F5OEO build) on `xc7z020clg400-2`

@@ -1,5 +1,5 @@
 set project_name "gain_block"
-set part         "xc7z010clg225-1"
+set part         "xc7z020clg400-2"
 set clock_ns     5
 
 open_project   $project_name

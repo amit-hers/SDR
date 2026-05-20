@@ -1,5 +1,5 @@
 set project_name "qpsk_modem"
-set part         "xc7z010clg225-1"
+set part         "xc7z020clg400-2"
 set clock_ns     5
 
 open_project   $project_name

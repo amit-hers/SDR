@@ -23,7 +23,7 @@ public:
     void setTxFrequency(double hz);
     void setRxFrequency(double hz);
     void setTxAttenuation(int db);       // 0–89 dB (0 = max power)
-    void setSampleRate(long long sps);   // 1e6–20e6
+    void setSampleRate(long long sps);   // 1e6–61.44e6 (HamGeek Pluto+)
     void setBandwidth(long long hz);
     void setGainMode(const std::string& mode); // "fast_attack"|"slow_attack"|"manual"
     void setManualGain(int db);                // used when mode == "manual"

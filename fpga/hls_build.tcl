@@ -6,7 +6,7 @@
 # Output: ./hls_project/qpsk_modem/impl/ip/ — ready to add to Vivado IP catalog
 
 set project_name "qpsk_modem"
-set part         "xc7z010clg225-1"   ;# Zynq-7010 (PlutoSDR / HamGeek Pluto+)
+set part         "xc7z020clg400-2"   ;# Zynq-7010 (PlutoSDR / HamGeek Pluto+)
 set clock_ns     5                    ;# 200 MHz target clock
 
 open_project   $project_name

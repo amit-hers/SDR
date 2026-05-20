@@ -212,11 +212,11 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out)
  * Synthesized to an AXI4-Stream IP core.
  *
  * Interface:
- *   s_axis_iq   → AXI4-Stream input  (AD9363 IQ samples, 20 MSPS)
+ *   s_axis_iq   → AXI4-Stream input  (AD9363 IQ samples, up to 61.44 MSPS (HamGeek Pluto+))
  *   m_axis_bits → AXI4-Stream output (decoded byte stream)
  *
  * Throughput: 1 IQ sample per clock cycle @ up to 200 MHz
- *             → 200 MSPS > 20 MSPS requirement (10× margin)
+ *             → 200 MSPS > 61.44 MSPS requirement (10× margin)
  * Latency:    ~36 clock cycles pipeline depth (RRC filter + sync)
  * Resources:  ~800 LUTs, ~400 FFs, 2 DSP48 slices (Zynq-7010 estimate)
  * ════════════════════════════════════════════════════════════════════ */
