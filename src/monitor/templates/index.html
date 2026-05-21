@@ -10,7 +10,10 @@
 <body>
 <header>
   <div class="logo">&#128225; SDR Datalink</div>
-  <div id="status-badge" class="badge stopped">STOPPED</div>
+  <div class="header-nodes">
+    <span class="node-pill" id="pill-node1">Node 1 <span class="dot stopped"></span></span>
+    <span class="node-pill" id="pill-node2">Node 2 <span class="dot stopped"></span></span>
+  </div>
   <div class="header-right">
     <span id="uptime">0s</span>
     <span id="temp">--°C</span>
@@ -19,9 +22,73 @@
 
 <main>
 
-<!-- ── Control row ─────────────────────────────────────────────────── -->
+<!-- ── Network overview ───────────────────────────────────────────── -->
+<section class="card peers-card">
+  <h2>RF Network — Peer Discovery</h2>
+  <div class="nodes-row">
+
+    <div class="node-box" id="nodebox-node1">
+      <div class="node-title">Node 1 <span class="node-badge stopped" id="nb-node1">STOPPED</span></div>
+      <div class="node-ip" id="nip-node1">192.168.2.32</div>
+      <div class="node-mode" id="nmode-node1">bridge · 434→439 MHz</div>
+      <div class="node-stats">
+        <span>RSSI <b id="np1-rssi">--</b> dBm</span>
+        <span>SNR <b id="np1-snr">--</b> dB</span>
+        <span>TX <b id="np1-tx">--</b> kbps</span>
+        <span>RX <b id="np1-rx">--</b> kbps</span>
+      </div>
+      <div class="node-btns">
+        <button class="btn-start" onclick="startNode('node1')">&#9654; Start</button>
+        <button class="btn-stop"  onclick="stopNode('node1')">&#9632; Stop</button>
+      </div>
+    </div>
+
+    <div class="rf-link" id="rf-link">
+      <div class="rf-arrow">&#8644;</div>
+      <div class="rf-freq">434 / 439 MHz</div>
+      <div class="rf-status" id="rf-status">No link</div>
+    </div>
+
+    <div class="node-box" id="nodebox-node2">
+      <div class="node-title">Node 2 <span class="node-badge stopped" id="nb-node2">STOPPED</span></div>
+      <div class="node-ip" id="nip-node2">192.168.2.17</div>
+      <div class="node-mode" id="nmode-node2">bridge · 439→434 MHz</div>
+      <div class="node-stats">
+        <span>RSSI <b id="np2-rssi">--</b> dBm</span>
+        <span>SNR <b id="np2-snr">--</b> dB</span>
+        <span>TX <b id="np2-tx">--</b> kbps</span>
+        <span>RX <b id="np2-rx">--</b> kbps</span>
+      </div>
+      <div class="node-btns">
+        <button class="btn-start" onclick="startNode('node2')">&#9654; Start</button>
+        <button class="btn-stop"  onclick="stopNode('node2')">&#9632; Stop</button>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="peers-actions">
+    <button class="btn-start" onclick="startAll()">&#9654;&#9654; Start Both</button>
+    <button class="btn-stop"  onclick="stopAll()">&#9632;&#9632; Stop Both</button>
+  </div>
+
+  <!-- Peer table -->
+  <table class="peer-table" id="peer-table">
+    <thead><tr>
+      <th>Seen by</th><th>Peer Node ID</th><th>RSSI</th><th>SNR</th><th>Frames RX</th><th>Last seen</th>
+    </tr></thead>
+    <tbody id="peer-tbody"><tr><td colspan="6" class="no-peers">No peers detected yet</td></tr></tbody>
+  </table>
+</section>
+
+<!-- ── Control panel (active node selector) ───────────────────────── -->
 <section class="card ctrl-card">
-  <h2>Control</h2>
+  <h2>Control
+    <select id="active-node" onchange="loadConfig()" style="margin-left:12px;font-size:0.85em">
+      <option value="node1">Node 1</option>
+      <option value="node2">Node 2</option>
+    </select>
+  </h2>
   <div class="ctrl-grid">
     <label>Mode
       <select id="ctrl-mode">
@@ -73,7 +140,7 @@
   </div>
 </section>
 
-<!-- ── Stats row ──────────────────────────────────────────────────── -->
+<!-- ── Stats row (active node) ────────────────────────────────────── -->
 <div class="stats-row">
   <div class="stat-box"><div class="stat-val" id="s-rssi">--</div><div class="stat-lbl">RSSI dBm</div></div>
   <div class="stat-box"><div class="stat-val" id="s-snr">--</div><div class="stat-lbl">SNR dB</div></div>

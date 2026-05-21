@@ -1,11 +1,20 @@
 #pragma once
 #include <atomic>
 #include <array>
+#include <map>
+#include <mutex>
 #include <string>
 #include <cstdint>
 #include "../dsp/FFTSpectrum.hpp"
 
 namespace sdr {
+
+struct PeerInfo {
+    float    rssi_dbm   {-100.f};
+    float    snr_db     {0.f};
+    uint64_t frames_rx  {0};
+    uint64_t last_seen_ms {0};
+};
 
 struct LinkStats {
     // Frame counters
@@ -38,6 +47,12 @@ struct LinkStats {
 
     // Uptime
     std::atomic<uint64_t> uptime_s {0};
+
+    // Peer table — keyed by node_id, updated on every decoded frame
+    mutable std::mutex                   peers_mu;
+    std::map<uint32_t, PeerInfo>         peers;
+
+    void updatePeer(uint32_t node_id, float rssi, float snr);
 
     std::string toJSON() const;
 

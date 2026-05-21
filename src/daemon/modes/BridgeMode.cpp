@@ -121,6 +121,7 @@ void BridgeMode::rxThread() {
         for (uint8_t byte : bits) {
             auto result = deframer.push(byte, fec_.get(), aes_.get());
             if (!result) continue;
+            stats_.updatePeer(result->node_id, rssi, snr);
             ssize_t w = tap_->write(result->payload.data(), result->payload.size());
             if (w > 0) {
                 stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);

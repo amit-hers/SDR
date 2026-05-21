@@ -84,12 +84,18 @@ void P2PMode::rxThread() {
         tsync.process(iq_dec, iq_timed);
         costas.process(iq_timed, iq_syms);
 
+        float rssi = agc.rssi_dbm();
+        float snr  = rssi + 95.f;
+        stats_.rssi_dbm.store(rssi, std::memory_order_relaxed);
+        stats_.snr_db  .store(snr,  std::memory_order_relaxed);
+
         std::vector<uint8_t> bits;
         modem_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
 
         for (uint8_t byte : bits) {
             auto res = deframer.push(byte, fec_.get(), aes_.get());
             if (!res) continue;
+            stats_.updatePeer(res->node_id, rssi, snr);
             udp_->write(res->payload.data(), res->payload.size());
             stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
             stats_.bytes_rx.fetch_add(static_cast<uint64_t>(res->payload.size()),

@@ -1,9 +1,22 @@
 #include "sdr/stats/LinkStats.hpp"
 #include <sstream>
 #include <iomanip>
-#include <ctime>
+#include <chrono>
 
 namespace sdr {
+
+void LinkStats::updatePeer(uint32_t node_id, float rssi, float snr) {
+    using clock = std::chrono::steady_clock;
+    auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            clock::now().time_since_epoch()).count());
+    std::lock_guard<std::mutex> lk(peers_mu);
+    auto& p       = peers[node_id];
+    p.rssi_dbm    = rssi;
+    p.snr_db      = snr;
+    p.last_seen_ms = now_ms;
+    p.frames_rx++;
+}
 
 std::string LinkStats::toJSON() const {
     auto f = [](float v, int p = 1) {
@@ -36,6 +49,23 @@ std::string LinkStats::toJSON() const {
         j << f(spectrum[static_cast<size_t>(i)]);
         if (i < FFT_BINS - 1) j << ",";
     }
+    j << "],\"peers\":[";
+
+    {
+        std::lock_guard<std::mutex> lk(peers_mu);
+        bool first = true;
+        for (const auto& [id, p] : peers) {
+            if (!first) j << ",";
+            first = false;
+            j << "{\"node_id\":\"0x" << std::hex << std::setw(8) << std::setfill('0') << id << std::dec
+              << "\",\"rssi_dbm\":"   << f(p.rssi_dbm)
+              << ",\"snr_db\":"       << f(p.snr_db)
+              << ",\"frames_rx\":"    << p.frames_rx
+              << ",\"last_seen_ms\":" << p.last_seen_ms
+              << "}";
+        }
+    }
+
     j << "]}";
     return j.str();
 }

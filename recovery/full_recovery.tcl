@@ -55,8 +55,13 @@ proc qspi_tcl_xfer {tx txd_offset cr_val man_start} {
         if {($isr & 0x08) == 0} break
     }
 
-    # Write TX data (byte in [31:24])
-    write_memory $TXD_ADDR 32 [list [expr {($tx & 0xFF) << 24}]]
+    # TXD0 (0x1C, 4-byte) packs first byte at [31:24]; TXD1 (0x80, 1-byte) uses [7:0]
+    if {$txd_offset == 0x80 || $txd_offset == 0x84 || $txd_offset == 0x88} {
+        set txval [expr {$tx & 0xFF}]
+    } else {
+        set txval [expr {($tx & 0xFF) << 24}]
+    }
+    write_memory $TXD_ADDR 32 [list $txval]
 
     # Trigger MANSTRT if requested (set bit 16 in CR)
     if {$man_start} {
@@ -390,7 +395,7 @@ proc enable_qspi_clocks {} {
 proc qspi_recover {} {
     global jedec_cr jedec_txd_off jedec_man_start
 
-    set BOOT_FILE "/home/parallels/Documents/SDR/tezuka-plutoplus-v0.3.5-7cf6171/boot.dfu"
+    set BOOT_FILE "/home/parallels/Documents/SDR/recovery/flash_good.bin"
     set FLASHER   "/home/parallels/Documents/SDR/recovery/qspi_flasher.bin"
 
     set FLASHER_ADDR 0x00020000
@@ -467,7 +472,7 @@ proc qspi_recover {} {
     # Assert CS, send 0xAB, wait RXNE, deassert CS
     write_memory [expr {$QSPI_BASE_L+0x00}] 32 [list $cr_wake_cs]
     after 1
-    write_memory [expr {$QSPI_BASE_L+0x1C}] 32 [list [expr {0xAB << 24}]]
+    write_memory [expr {$QSPI_BASE_L+0x80}] 32 {0xAB}
     for {set i 0} {$i < 200} {incr i} {
         if {([read_memory [expr {$QSPI_BASE_L+0x04}] 32 1] & 0x10) != 0} break
     }
@@ -490,6 +495,44 @@ proc qspi_recover {} {
         echo ""
         echo "TCL JEDEC failed — trying ARM main() for JEDEC confirmation..."
     }
+
+    # ── 5b. Tame Zynq System WDT (SWDT) ─────────────────────────────────────
+    # The SWDT cannot be disabled, but we can change it from RESET mode to
+    # INTERRUPT mode so a timeout never causes a system reset.
+    # SWDT_ZMR (0xF8005000): bits[23:12]=ZKEY=0xABC, bit0=ZIEN
+    #   ZIEN=0 (default): counter=0 → system reset  ← BootROM default, kills us!
+    #   ZIEN=1           : counter=0 → interrupt     ← safe; IRQ is masked anyway
+    # We also reprogram the count to maximum (CRV=0xFFFF, CLKSEL=0xF → ~128 s)
+    # and kick it right away.
+    echo ""
+    echo "--- Configuring System Watchdog Timer (interrupt mode, max count) ---"
+    set swdt_zmr [read_memory 0xF8005000 32 1]
+    set swdt_ccr [read_memory 0xF8005004 32 1]
+    echo "  SWDT_ZMR before = 0x[format %08X $swdt_zmr]  (bit0=ZIEN: 0=reset,1=irq)"
+    echo "  SWDT_CCR before = 0x[format %08X $swdt_ccr]"
+    # ZMR: key=0xABC in bits[23:12], ZIEN=1 → generate interrupt, not reset
+    write_memory 0xF8005000 32 {0x00ABC001}
+    # CCR: key=0x248 in bits[31:20], CRV=0xFFFF in bits[19:4], CLKSEL=0xF → max timeout
+    write_memory 0xF8005004 32 {0x248FFFFF}
+    # RESTART: write 0x1999 to reset counter to new max value
+    write_memory 0xF8005008 32 {0x00001999}
+    set swdt_zmr_after [read_memory 0xF8005000 32 1]
+    set swdt_ccr_after [read_memory 0xF8005004 32 1]
+    echo "  SWDT_ZMR after  = 0x[format %08X $swdt_zmr_after]  (bit0=ZIEN want 1)"
+    echo "  SWDT_CCR after  = 0x[format %08X $swdt_ccr_after]"
+    echo "  SWDT restarted: interrupt mode, ~128 s timeout ✓"
+
+    # ── 5c. Disable Cortex-A9 private watchdog (AWDT) ───────────────────────
+    # The Cortex-A9 has its own per-CPU watchdog at 0xF8F00620.
+    # Two-write magic sequence to the WDTDIS register disables it.
+    echo ""
+    echo "--- Disabling Cortex-A9 Private Watchdog (AWDT) ---"
+    set awd_ctrl [read_memory 0xF8F00628 32 1]
+    echo "  AWDT_CR before = 0x[format %08X $awd_ctrl]  (bit0=enable, bit3=wd_mode)"
+    write_memory 0xF8F00634 32 {0x12345678}   ;# disable word 1
+    write_memory 0xF8F00634 32 {0x87654321}   ;# disable word 2
+    set awd_ctrl_after [read_memory 0xF8F00628 32 1]
+    echo "  AWDT_CR after  = 0x[format %08X $awd_ctrl_after]  (want bit0=0)"
 
     # ── 6. Load flasher binary and confirm JEDEC via ARM main() ─────────────
     echo ""
@@ -520,6 +563,7 @@ proc qspi_recover {} {
         set sv 0; catch { set sv [read_memory $STATUS 32 1] }
         if {$sv == 0xDEAD0003} { set jedec_arm 1; break }
         if {$sv != 0 && $sv != 0xDEAD0001 && $sv != 0xDEAD0002} { break }
+        write_memory 0xF8005008 32 {0x00001999}   ;# kick SWDT
         catch { resume }; after 50
     }
     catch { halt }; after 200
@@ -577,9 +621,12 @@ proc qspi_recover {} {
         return
     }
 
-    # ── 7. Flash boot.dfu chunk by chunk ─────────────────────────────────────
+    # ── 7. Flash image chunk by chunk (RDSR polling, fast) ───────────────────
+    # Now using RDSR WIP polling instead of fixed delays:
+    #   sector erase: ≤2s (W25Q256 max), page_prog: ≤5ms × 128 = 640ms
+    #   → each chunk completes in ≤3s with erase, ≤1s without
     echo ""
-    echo "--- Loading boot.dfu ---"
+    echo "--- Loading flash image (1MB from working device) ---"
     set f [open $BOOT_FILE rb]; set raw [read $f]; close $f
     set total [string length $raw]
     binary scan $raw cu* all_bytes
@@ -587,7 +634,7 @@ proc qspi_recover {} {
     set target [expr {(($total + 32767) / 32768) * 32768}]
     for {set p $total} {$p < $target} {incr p} { lappend all_bytes 255 }
     set nchunks [expr {$target / 32768}]
-    echo "boot.dfu: $total bytes → $nchunks chunks of 32KB"
+    echo "flash_good.bin: $total bytes → $nchunks chunks of 32KB"
     echo ""
 
     for {set c 0} {$c < $nchunks} {incr c} {
@@ -603,18 +650,59 @@ proc qspi_recover {} {
         write_memory $ERASE_REG 32 [list $do_erase]
         write_memory $STATUS    32 {0}
 
-        reg r13_svc 0x0002EFF0  ;# SVC-mode banked SP (see main() comment above)
+        reg r13_svc 0x0002EFF0  ;# SVC-mode banked SP
         reg pc   $CHUNK_ENTRY
-        reg cpsr 0x000001F3  ;# SVC|Thumb|IRQ_dis|FIQ_dis|Abort_dis — code is Thumb-2
+        reg cpsr 0x000001F3  ;# SVC|Thumb|IRQ_dis|FIQ_dis — Thumb-2 code
         resume
 
-        set done [wait_for_status $STATUS 0xBEEF0002 600]
-        halt; after 300
+        # Poll STATUS every 2s; abort after 120s per chunk (60s erase + 60s prog).
+        # Kick SWDT before every resume so a ~128s timer never fires.
+        set wait_total [expr {$do_erase ? 120 : 60}]
+        set elapsed 0
+        set done 0
+        set prev_s -1
+        while {$elapsed < $wait_total} {
+            set step 2
+            after [expr {$step * 1000}]
+            set elapsed [expr {$elapsed + $step}]
+            catch { halt }; after 200
+            set s 0; catch { set s [read_memory $STATUS 32 1] }
+            if {$s != $prev_s} {
+                set desc ""
+                if {$s == 0xBEEF0001} { set desc " (program_chunk entered)" }
+                if {$s == 0xBEEF0011} { set desc " (qspi_init done)" }
+                if {$s == 0xBEEF0012} { set desc " (sector_erase issued)" }
+                if {$s == 0xBEEF0013} { set desc " (erase wait_wip done)" }
+                if {$s == 0xBEEF0020} { set desc " (p=0 loop — calling page_prog)" }
+                if {$s == 0xBEEF0031} { set desc " *** entered page_prog ***" }
+                if {$s == 0xBEEF0032} { set desc " (wren done)" }
+                if {$s == 0xBEEF0033} { set desc " (CS asserted)" }
+                if {$s == 0xBEEF0034} { set desc " (PP cmd 0x02 sent)" }
+                if {$s == 0xBEEF0035} { set desc " (address bytes sent)" }
+                if {$s == 0xBEEF0036} { set desc " (sending data byte 0)" }
+                if {$s == 0xBEEF0037} { set desc " (sending data byte 128)" }
+                if {$s == 0xBEEF0038} { set desc " (all 256 bytes sent)" }
+                if {$s == 0xBEEF0039} { set desc " (CS deasserted — PP issued)" }
+                if {$s == 0xBEEF0060} { set desc " (p=64 loop)" }
+                if {$s == 0xBEEF0002} { set desc " *** ALL DONE! ***" }
+                echo "  ${elapsed}s STATUS=0x[format %08X $s]$desc"
+                set prev_s $s
+            }
+            if {$s == 0xBEEF0002} { set done 1; break }
+            # Kick SWDT before resuming so the ~128s timer never expires
+            write_memory 0xF8005008 32 {0x00001999}
+            catch { resume }; after 100
+        }
+        if {!$done} {
+            catch { halt }; after 200
+            set s 0; catch { set s [read_memory $STATUS 32 1] }
+            if {$s == 0xBEEF0002} { set done 1 }
+        }
 
         if {$done} {
             echo "  OK"
         } else {
-            set s 0; catch {set s [read_memory $STATUS 32 1]}
+            set s 0; catch { set s [read_memory $STATUS 32 1] }
             echo "  FAILED: STATUS=0x[format %08X $s]"
             return
         }
@@ -622,7 +710,7 @@ proc qspi_recover {} {
 
     echo ""
     echo "==================================================================="
-    echo "=== DONE! boot.dfu written to QSPI flash.                      ==="
+    echo "=== DONE! flash_good.bin written to QSPI.                      ==="
     echo "=== Disconnect JTAG, power cycle device.                       ==="
     echo "=== PlutoSDR should appear as USB network + serial port.       ==="
     echo "==================================================================="

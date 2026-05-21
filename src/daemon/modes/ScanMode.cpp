@@ -1,4 +1,5 @@
 #include "ScanMode.hpp"
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -64,7 +65,9 @@ void ScanMode::scanThread() {
     }
     j << "]";
 
-    std::ofstream f("/tmp/sdr_scan.json", std::ios::trunc);
+    const char* scan_path = std::getenv("SDR_SCAN_FILE");
+    std::ofstream f(scan_path && *scan_path ? scan_path : "/tmp/sdr_scan.json",
+                    std::ios::trunc);
     if (f) f << j.str();
 
     running_.store(false);

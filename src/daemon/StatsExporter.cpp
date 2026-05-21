@@ -1,12 +1,17 @@
 #include "StatsExporter.hpp"
 #include <fstream>
 #include <chrono>
+#include <cstdlib>
 
 namespace sdr {
 
 StatsExporter::StatsExporter(const LinkStats& stats, int interval_ms,
                              const std::string& path)
-    : stats_(stats), interval_ms_(interval_ms), path_(path) {}
+    : stats_(stats), interval_ms_(interval_ms)
+{
+    const char* env = std::getenv("SDR_STATS_FILE");
+    path_ = (env && *env) ? env : path;
+}
 
 StatsExporter::~StatsExporter() { stop(); }
 
