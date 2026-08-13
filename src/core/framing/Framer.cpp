@@ -46,12 +46,17 @@ std::vector<uint8_t> Framer::encode(const uint8_t* payload, size_t payload_len,
         aes->crypt(encoded_payload.data(), encoded_payload.size(),
                    static_cast<uint64_t>(seq));
 
-    // 3. Build frame
+    // 3. Build frame. Preamble first, so AGC/timing/carrier loops have a
+    // cold-start runway before the sync word; postamble last, so the
+    // matched-filter/decimator chain has room to flush its group delay
+    // instead of clipping the tail (including the CRC) — see Frame.hpp.
     size_t plen  = encoded_payload.size();
-    size_t total = FRAME_OVERHEAD + plen;
+    size_t total = PREAMBLE_LEN + FRAME_OVERHEAD + plen + POSTAMBLE_LEN;
     std::vector<uint8_t> frame(total);
     uint8_t* p = frame.data();
 
+    std::memset(p, PREAMBLE_BYTE, PREAMBLE_LEN);              p += PREAMBLE_LEN;
+    uint8_t* body = p;   // sync word onward — CRC covers this, not the preamble
     put_u32_be(p, FRAME_SYNC);                               p += 4;
     *p++ = FRAME_VER;
     *p++ = flags;
@@ -62,11 +67,13 @@ std::vector<uint8_t> Framer::encode(const uint8_t* payload, size_t payload_len,
     put_u16_be(p, static_cast<uint16_t>(payload_len));       p += 2;
     std::memcpy(p, encoded_payload.data(), plen);            p += plen;
 
-    uint32_t crc = crc32(frame.data(), static_cast<size_t>(p - frame.data()));
+    uint32_t crc = crc32(body, static_cast<size_t>(p - body));
     *p++ = (crc      ) & 0xFF;
     *p++ = (crc >>  8) & 0xFF;
     *p++ = (crc >> 16) & 0xFF;
     *p++ = (crc >> 24) & 0xFF;
+
+    std::memset(p, PREAMBLE_BYTE, POSTAMBLE_LEN);             p += POSTAMBLE_LEN;
 
     return frame;
 }

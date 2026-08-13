@@ -18,7 +18,7 @@ public:
     void requestReload() { reload_requested_.store(true); }
 
     // Live-tune without restart (called from signal handler / monitor API)
-    void applyLive(int atten_db, double freq_tx_hz, double freq_rx_hz, int mod_code);
+    void applyLive(double atten_db, double freq_tx_hz, double freq_rx_hz, int mod_code);
 
     static Controller* instance() { return instance_; }
 

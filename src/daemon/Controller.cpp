@@ -87,9 +87,9 @@ void Controller::run() {
     std::cout << "[sdr] Stopped.\n";
 }
 
-void Controller::applyLive(int atten_db, double freq_tx_hz,
+void Controller::applyLive(double atten_db, double freq_tx_hz,
                             double freq_rx_hz, int /*mod_code*/) {
-    if (atten_db >= 0)    radio_->setTxAttenuation(atten_db);
+    if (atten_db >= 0.0)  radio_->setTxAttenuation(atten_db);
     if (freq_tx_hz > 0.0) radio_->setTxFrequency(freq_tx_hz);
     if (freq_rx_hz > 0.0) radio_->setRxFrequency(freq_rx_hz);
 }

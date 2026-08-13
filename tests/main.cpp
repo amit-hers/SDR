@@ -10,6 +10,7 @@ void run_fec();
 void run_modem();
 void run_crypto();
 void run_dsp();
+void run_arq();
 
 int main(int argc, char* argv[]) {
     const char* filter = (argc > 1) ? argv[1] : nullptr;
@@ -24,6 +25,7 @@ int main(int argc, char* argv[]) {
         run("modem",   run_modem);
         run("crypto",  run_crypto);
         run("dsp",     run_dsp);
+        run("arq",     run_arq);
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << "\n";
         return 1;

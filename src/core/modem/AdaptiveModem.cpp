@@ -2,8 +2,9 @@
 
 namespace sdr {
 
-AdaptiveModem::AdaptiveModem() {
-    modem_ = std::make_unique<Modem>(ModScheme::QPSK);
+AdaptiveModem::AdaptiveModem(std::optional<ModScheme> forced)
+    : forced_(forced) {
+    modem_ = std::make_unique<Modem>(forced_.value_or(ModScheme::QPSK));
 }
 
 ModScheme AdaptiveModem::selectScheme(float snr) const {
@@ -36,7 +37,7 @@ void AdaptiveModem::switchTo(ModScheme s) {
 void AdaptiveModem::updateSNR(float snr_db) {
     std::lock_guard<std::mutex> lk(mu_);
     snr_db_ = snr_db;
-    switchTo(selectScheme(snr_db));
+    if (!forced_) switchTo(selectScheme(snr_db));
 }
 
 ModScheme AdaptiveModem::currentScheme() const {
@@ -72,7 +73,7 @@ int AdaptiveModem::bitsPerSymbol() const {
 
 std::string AdaptiveModem::name() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return "AUTO/" + modem_->name();
+    return (forced_ ? "FIXED/" : "AUTO/") + modem_->name();
 }
 
 } // namespace sdr

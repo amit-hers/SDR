@@ -66,8 +66,8 @@ void MeshMode::txThread() {
 
 void MeshMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
-    std::vector<std::complex<float>> iq_f, iq_dec, iq_timed, iq_syms;
-    AGC agc; RRCDecim decim; TimingSync tsync; CostasLoop costas;
+    std::vector<std::complex<float>> iq_f, iq_timed, iq_syms;
+    AGC agc; TimingSync tsync; CostasLoop costas;
     Deframer deframer;
 
     while (running_.load()) {
@@ -81,8 +81,9 @@ void MeshMode::rxThread() {
                 iq_hw[static_cast<size_t>(i)*2+1] / 2048.f };
 
         agc.process(iq_f);
-        decim.process(iq_f, iq_dec);
-        tsync.process(iq_dec, iq_timed);
+        // NOTE: TimingSync is itself an RRC matched-filter + decimator
+        // (symsync_crcf expects oversampled input); do not RRCDecim first.
+        tsync.process(iq_f, iq_timed);
         costas.process(iq_timed, iq_syms);
 
         std::vector<uint8_t> bits;

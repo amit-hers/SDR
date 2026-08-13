@@ -156,6 +156,14 @@ When `modulation` is `AUTO`, the daemon automatically switches based on measured
 
 1080p H.264 requires ~8–15 Mbps — comfortable within QPSK. Use `bw_mhz: 20` to double all rates.
 
+Set `"modulation"` to a fixed scheme (`BPSK`/`QPSK`/`16QAM`/`64QAM`) instead of
+`AUTO` to disable auto-switching and lock the link to that scheme (BridgeMode
+only). Useful for diagnosing a link that reports good SNR but won't decode
+anything — high-order QAM has a much narrower carrier-frequency-offset
+tolerance than BPSK, so two radios running off independent free-running
+TCXOs (no shared reference clock) may only be able to hold lock at a lower
+scheme, if at all.
+
 ---
 
 ## Reed-Solomon FEC
@@ -165,6 +173,45 @@ Set `"fec": true` to enable RS(255,223) per-frame error correction via liquid-ds
 - 14.3% overhead per frame
 - Corrects up to 16 byte errors per 255-byte block
 - Negligible CPU impact on the Cortex-A9
+
+---
+
+## ARQ / Reliable Delivery
+
+Set `"arq": true` (BridgeMode only, both sides) to add selective-repeat
+retransmission on top of FEC — anything FEC can't correct gets resent instead
+of just dropped. It's opt-in and complements, rather than replaces, FEC:
+
+- Every accepted data frame triggers a tiny control-frame ACK
+  (`flags = FL_CTRL | FL_ACK`, `seq` = the acknowledged sequence number, zero
+  payload) sent back over the same link — no new wire format needed, it
+  reuses the `FL_ACK`/`FL_CTRL` flags already in the frame header.
+- The sender tracks up to `arq_window` (default 16) outstanding frames. An
+  unacknowledged frame is retransmitted after `arq_timeout_ms` (default 80 ms,
+  backing off ×1.5 per retry up to 500 ms), and dropped after
+  `arq_max_retries` (default 5) attempts.
+- If the window fills up, new packets from the TAP interface are held (not
+  dropped) until space frees — this creates natural backpressure rather than
+  silently discarding traffic.
+- `arq_acked` / `arq_retransmits` / `arq_dropped` counters are exposed in the
+  stats JSON (`/api/stats`, `/ws`) alongside the existing FEC counters.
+
+**Scope:** currently BridgeMode-only and point-to-point — ACKs aren't
+addressed to a specific peer, which is fine for today's 2-node link but will
+need a `dest_id` once real multi-node mesh routing exists. Because TCP
+traffic already self-retransmits, ARQ's main benefit is for UDP/RTP traffic
+sharing the same bridge (e.g. a command/telemetry channel) — for bulk
+loss-tolerant video you may prefer FEC alone to avoid the extra latency of
+waiting on retransmits.
+
+```json
+{
+  "arq": true,
+  "arq_window": 16,
+  "arq_timeout_ms": 80,
+  "arq_max_retries": 5
+}
+```
 
 ---
 
@@ -194,7 +241,7 @@ sdr-datalink/
 ├── include/sdr/
 │   ├── hardware/PlutoSDR.hpp  FPGARegs.hpp
 │   ├── modem/IModem.hpp  Modem.hpp  AdaptiveModem.hpp
-│   ├── framing/Frame.hpp  Framer.hpp  Deframer.hpp
+│   ├── framing/Frame.hpp  Framer.hpp  Deframer.hpp  ArqWindow.hpp
 │   ├── dsp/RRCFilter.hpp  AGC.hpp  TimingSync.hpp  CostasLoop.hpp  FFTSpectrum.hpp
 │   ├── fec/ReedSolomon.hpp
 │   ├── crypto/AESCipher.hpp

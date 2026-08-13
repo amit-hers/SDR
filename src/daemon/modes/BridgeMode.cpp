@@ -10,6 +10,17 @@ namespace sdr {
 
 static constexpr int STAT_TICK = 100;   // ms
 
+// "AUTO" (default) keeps SNR-based auto-switching; anything else locks the
+// modem to that fixed scheme (e.g. to test a link whose frequency offset is
+// too wide for high-order QAM to hold lock).
+static std::optional<ModScheme> parseForcedModulation(const std::string& s) {
+    if (s == "BPSK")  return ModScheme::BPSK;
+    if (s == "QPSK")  return ModScheme::QPSK;
+    if (s == "16QAM") return ModScheme::QAM16;
+    if (s == "64QAM") return ModScheme::QAM64;
+    return std::nullopt;   // "AUTO" or unrecognized
+}
+
 BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
     : cfg_(cfg), radio_(radio)
 {
@@ -18,10 +29,17 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
     if (!cfg_.bridge_iface.empty())
         tap_->addToBridge(cfg_.bridge_iface, cfg_.lan_iface);
 
-    amod_ = std::make_unique<AdaptiveModem>();
+    amod_ = std::make_unique<AdaptiveModem>(parseForcedModulation(cfg_.modulation));
     if (cfg_.fec)     fec_ = std::make_unique<ReedSolomon>();
     if (cfg_.encrypt) aes_ = std::make_unique<AESCipher>(cfg_.aes_key_bytes.data());
     fft_ = std::make_unique<FFTSpectrum>();
+    if (cfg_.arq) {
+        ArqWindow::Config acfg;
+        acfg.window_size = cfg_.arq_window;
+        acfg.timeout_ms  = cfg_.arq_timeout_ms;
+        acfg.max_retries = cfg_.arq_max_retries;
+        arq_ = std::make_unique<ArqWindow>(acfg);
+    }
 }
 
 BridgeMode::~BridgeMode() { stop(); }
@@ -48,22 +66,7 @@ void BridgeMode::txThread() {
     std::vector<int16_t>             iq_hw;
     RRCInterp interp;
 
-    while (running_.load()) {
-        ssize_t n = tap_->read(pkt.data(), pkt.size());
-        if (n <= 0) continue;
-
-        uint8_t flags = 0;
-        if (cfg_.fec)     flags |= FL_FEC;
-        if (cfg_.encrypt) flags |= FL_ENCRYPT;
-        uint32_t seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
-        ModCode  mod = amod_->currentModCode();
-
-        Framer framer;
-        auto frame = framer.encode(pkt.data(), static_cast<size_t>(n),
-                                   flags, mod, mhzToBw(cfg_.bw_mhz),
-                                   cfg_.node_id_u32, seq,
-                                   fec_.get(), aes_.get());
-
+    auto transmit = [&](const std::vector<uint8_t>& frame) {
         amod_->modulate(frame.data(), static_cast<int>(frame.size()), iq_syms);
         interp.process(iq_syms, iq_shaped);
 
@@ -73,16 +76,65 @@ void BridgeMode::txThread() {
             iq_hw[i * 2 + 1] = static_cast<int16_t>(iq_shaped[i].imag() * 2047.f);
         }
         radio_.txPush(iq_hw.data(), iq_shaped.size());
+    };
+
+    bool                  have_pending{false};
+    uint32_t              pending_seq{0};
+    size_t                pending_payload_len{0};
+    std::vector<uint8_t>  pending_frame;
+
+    while (running_.load()) {
+        if (cfg_.arq) {
+            // Drain queued ACK/control frames first — cheap, and keeps the
+            // peer's retransmit timers from firing unnecessarily.
+            while (auto* slot = ctrl_ring_.peek()) {
+                transmit(std::vector<uint8_t>(slot->data, slot->data + slot->len));
+                ctrl_ring_.consume();
+            }
+            // Retransmit anything whose ACK timeout elapsed.
+            for (auto& pf : arq_->pollTimeouts())
+                transmit(pf.encoded_bytes);
+
+            stats_.arq_acked      .store(arq_->acked(),       std::memory_order_relaxed);
+            stats_.arq_retransmits.store(arq_->retransmits(), std::memory_order_relaxed);
+            stats_.arq_dropped    .store(arq_->dropped(),     std::memory_order_relaxed);
+        }
+
+        if (!have_pending) {
+            ssize_t n = tap_->read(pkt.data(), pkt.size());
+            if (n <= 0) continue;
+
+            uint8_t flags = 0;
+            if (cfg_.fec)     flags |= FL_FEC;
+            if (cfg_.encrypt) flags |= FL_ENCRYPT;
+            pending_seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
+            ModCode mod = amod_->currentModCode();
+
+            Framer framer;
+            pending_frame = framer.encode(pkt.data(), static_cast<size_t>(n),
+                                          flags, mod, mhzToBw(cfg_.bw_mhz),
+                                          cfg_.node_id_u32, pending_seq,
+                                          fec_.get(), aes_.get());
+            pending_payload_len = static_cast<size_t>(n);
+            have_pending = true;
+        }
+
+        if (cfg_.arq && !arq_->trySend(pending_seq, pending_frame))
+            continue; // window full — hold the packet, retry next loop
+
+        transmit(pending_frame);
         stats_.frames_tx.fetch_add(1, std::memory_order_relaxed);
-        stats_.bytes_tx .fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+        stats_.bytes_tx .fetch_add(static_cast<uint64_t>(pending_payload_len),
+                                   std::memory_order_relaxed);
+        have_pending = false;
     }
 }
 
 // ── RX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
-    std::vector<std::complex<float>> iq_f, iq_dec, iq_timed, iq_syms;
-    AGC agc; RRCDecim decim; TimingSync tsync; CostasLoop costas;
+    std::vector<std::complex<float>> iq_f, iq_timed, iq_syms;
+    AGC agc; TimingSync tsync; CostasLoop costas;
     Deframer deframer;
 
     while (running_.load()) {
@@ -103,8 +155,9 @@ void BridgeMode::rxThread() {
         }
 
         agc.process(iq_f);                       // in-place
-        decim.process(iq_f, iq_dec);             // downsample by RRC_SPS
-        tsync.process(iq_dec, iq_timed);         // symbol timing
+        // NOTE: TimingSync is itself an RRC matched-filter + decimator
+        // (symsync_crcf expects oversampled input); do not RRCDecim first.
+        tsync.process(iq_f, iq_timed);           // matched filter + symbol timing
         costas.process(iq_timed, iq_syms);       // carrier recovery
 
         std::vector<uint8_t> bits;
@@ -122,6 +175,13 @@ void BridgeMode::rxThread() {
             auto result = deframer.push(byte, fec_.get(), aes_.get());
             if (!result) continue;
             stats_.updatePeer(result->node_id, rssi, snr);
+
+            if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
+                // Control frame: acknowledges our outgoing seq, no TAP payload.
+                if (cfg_.arq && arq_) arq_->onAck(result->seq);
+                continue;
+            }
+
             ssize_t w = tap_->write(result->payload.data(), result->payload.size());
             if (w > 0) {
                 stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
@@ -129,6 +189,16 @@ void BridgeMode::rxThread() {
                                           std::memory_order_relaxed);
                 if (result->flags & FL_FEC)
                     stats_.fec_corrected.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            if (cfg_.arq) {
+                Framer ackFramer;
+                auto ack = ackFramer.encode(std::vector<uint8_t>{},
+                                            FL_CTRL | FL_ACK,
+                                            amod_->currentModCode(),
+                                            mhzToBw(cfg_.bw_mhz),
+                                            cfg_.node_id_u32, result->seq);
+                ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));
             }
         }
     }

@@ -4,6 +4,7 @@ add_library(sdr_core STATIC
     modem/AdaptiveModem.cpp
     framing/Framer.cpp
     framing/Deframer.cpp
+    framing/ArqWindow.cpp
     dsp/RRCFilter.cpp
     dsp/AGC.cpp
     dsp/TimingSync.cpp

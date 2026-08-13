@@ -79,7 +79,7 @@ Config Config::fromFile(const std::string& path) {
     c.freq_tx_mhz      = jsonDouble(json, "freq_tx_mhz",       c.freq_tx_mhz);
     c.freq_rx_mhz      = jsonDouble(json, "freq_rx_mhz",       c.freq_rx_mhz);
     c.bw_mhz           = jsonInt   (json, "bw_mhz",            c.bw_mhz);
-    c.tx_atten_db      = jsonInt   (json, "tx_atten_db",       c.tx_atten_db);
+    c.tx_atten_db      = jsonDouble(json, "tx_atten_db",       c.tx_atten_db);
     c.gain_mode        = jsonStr   (json, "gain_mode",         c.gain_mode);
     c.modulation       = jsonStr   (json, "modulation",        c.modulation);
     c.tap_iface        = jsonStr   (json, "tap_iface",         c.tap_iface);
@@ -89,6 +89,10 @@ Config Config::fromFile(const std::string& path) {
     c.encrypt          = jsonBool  (json, "encrypt",           c.encrypt);
     c.fec              = jsonBool  (json, "fec",               c.fec);
     c.aes_key_hex      = jsonStr   (json, "aes_key_hex",       c.aes_key_hex);
+    c.arq              = jsonBool  (json, "arq",               c.arq);
+    c.arq_window       = jsonInt   (json, "arq_window",        c.arq_window);
+    c.arq_timeout_ms   = jsonInt   (json, "arq_timeout_ms",    c.arq_timeout_ms);
+    c.arq_max_retries  = jsonInt   (json, "arq_max_retries",   c.arq_max_retries);
     c.stats_interval_ms= jsonInt   (json, "stats_interval_ms", c.stats_interval_ms);
     c.monitor_port     = jsonInt   (json, "monitor_port",      c.monitor_port);
     c.node_id          = jsonStr   (json, "node_id",           c.node_id);
@@ -120,10 +124,13 @@ void Config::validate() {
     }
 
     // Clamp values
-    if (tx_atten_db < 0)  tx_atten_db = 0;
-    if (tx_atten_db > 89) tx_atten_db = 89;
+    if (tx_atten_db < 0.0)  tx_atten_db = 0.0;
+    if (tx_atten_db > 89.0) tx_atten_db = 89.0;
     if (bw_mhz < 1)       bw_mhz = 1;
     if (bw_mhz > 20)      bw_mhz = 20;
+    if (arq_window < 1)     arq_window = 1;
+    if (arq_timeout_ms < 1) arq_timeout_ms = 1;
+    if (arq_max_retries < 0) arq_max_retries = 0;
 }
 
 } // namespace sdr

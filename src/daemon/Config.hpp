@@ -15,7 +15,7 @@ struct Config {
     double      freq_tx_mhz {434.0};
     double      freq_rx_mhz {439.0};
     int         bw_mhz      {10};         // 1|2|5|10|20
-    int         tx_atten_db {10};         // 0-89 dB
+    double      tx_atten_db {10.0};       // 0-89 dB, 0.25dB steps
     std::string gain_mode   {"fast_attack"};
     std::string modulation  {"AUTO"};     // AUTO|BPSK|QPSK|16QAM|64QAM
 
@@ -29,6 +29,12 @@ struct Config {
     bool        encrypt       {false};
     bool        fec           {false};
     std::string aes_key_hex;              // 64 hex chars = 32 bytes
+
+    // ── ARQ (reliable delivery, BridgeMode only) ─────────────────────────────
+    bool        arq             {false};
+    int         arq_window      {16};
+    int         arq_timeout_ms  {80};
+    int         arq_max_retries {5};
 
     // ── System ───────────────────────────────────────────────────────────────
     int         stats_interval_ms {1000};

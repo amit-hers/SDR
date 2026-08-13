@@ -4,6 +4,7 @@
 #include "sdr/hardware/PlutoSDR.hpp"
 #include "sdr/framing/Framer.hpp"
 #include "sdr/framing/Deframer.hpp"
+#include "sdr/framing/ArqWindow.hpp"
 #include "sdr/modem/AdaptiveModem.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/dsp/AGC.hpp"
@@ -13,6 +14,7 @@
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include "sdr/transport/TUNTAPDevice.hpp"
+#include "sdr/transport/SPSCRing.hpp"
 #include "sdr/stats/LinkStats.hpp"
 #include <thread>
 #include <atomic>
@@ -44,6 +46,12 @@ private:
     std::unique_ptr<ReedSolomon>   fec_;
     std::unique_ptr<AESCipher>     aes_;
     std::unique_ptr<FFTSpectrum>   fft_;
+    std::unique_ptr<ArqWindow>     arq_;
+
+    // RX->TX handoff for outgoing ACK/control frames (fixed size: preamble+
+    // header+CRC, zero payload). RX thread must never call radio_.txPush
+    // directly.
+    SPSCRing<32, WIRE_FRAME_OVERHEAD> ctrl_ring_;
 
     std::atomic<bool>  running_{false};
     std::thread        tx_thread_;

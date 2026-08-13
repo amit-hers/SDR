@@ -13,6 +13,28 @@ static constexpr size_t   CRC_SIZE     = 4;
 static constexpr size_t   MAX_PAYLOAD  = 1400; // bytes (sets TAP MTU = 1400-14 = 1386)
 static constexpr size_t   FRAME_OVERHEAD = HEADER_SIZE + CRC_SIZE; // 22 bytes
 
+// ── Preamble ──────────────────────────────────────────────────────────────
+// Every burst is transmitted independently (no continuous carrier between
+// frames), so AGC/TimingSync/CostasLoop start cold on each one. Measured
+// settling transient is ~8 bytes even under ideal conditions — longer than
+// the 4-byte sync word itself — so without a training run before it, the
+// sync word can never survive intact. Framer::encode() prepends this many
+// PREAMBLE_BYTE bytes; Deframer's HUNT state already tolerates and skips
+// arbitrary leading bytes while searching for FRAME_SYNC, so no deframer
+// change is needed. Generous margin over the measured ~8-byte minimum.
+static constexpr size_t  PREAMBLE_LEN    = 32;
+static constexpr uint8_t PREAMBLE_BYTE   = 0xAA;
+
+// Each burst is also independently transmitted with nothing following it —
+// the matched-filter/decimator chain (RRC taps + symsync) has group delay,
+// so without trailing padding the last few bytes (including the CRC) can be
+// clipped off the end of the burst. Smaller than PREAMBLE_LEN: this only
+// needs to flush the filter pipeline, not let control loops converge.
+static constexpr size_t  POSTAMBLE_LEN   = 16;
+
+static constexpr size_t  WIRE_FRAME_OVERHEAD =
+    PREAMBLE_LEN + FRAME_OVERHEAD + POSTAMBLE_LEN;
+
 // ── Flags byte ────────────────────────────────────────────────────────────
 static constexpr uint8_t FL_ENCRYPT = 0x01;
 static constexpr uint8_t FL_FEC     = 0x02;

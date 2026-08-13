@@ -72,20 +72,38 @@ void PlutoSDR::setRxFrequency(double hz) {
                                     static_cast<long long>(hz));
 }
 
-void PlutoSDR::setTxAttenuation(int db) {
-    // AD9363: attenuation attr in millidB (0..89000)
-    iio_channel_attr_write_longlong(tx_ch_, "hardwaregain",
-                                    static_cast<long long>(-db));
+void PlutoSDR::setTxAttenuation(double db) {
+    // "hardwaregain" is a fractional-dB attribute (0.25dB steps on AD9361/63),
+    // not millidB despite some vendor docs -- confirmed via readback.
+    iio_channel_attr_write_double(tx_ch_, "hardwaregain", -db);
 }
 
 void PlutoSDR::setSampleRate(long long sps) {
-    iio_channel_attr_write_longlong(rx_ch_, "sampling_frequency", sps);
-    iio_channel_attr_write_longlong(tx_ch_, "sampling_frequency", sps);
+    // The AD9361/9363 kernel driver validates the requested rate against the
+    // digital interface's actual clock ceiling (e.g. CMOS-mode boards top
+    // out well below the 61.44 MSPS LVDS spec) and silently keeps the prior
+    // rate on rejection — these calls previously ignored that, so a request
+    // for an unachievable rate left the whole DSP chain's oversampling-ratio
+    // assumption (RRC_SPS) silently wrong. Fail loudly instead.
+    int rx_ret = iio_channel_attr_write_longlong(rx_ch_, "sampling_frequency", sps);
+    int tx_ret = iio_channel_attr_write_longlong(tx_ch_, "sampling_frequency", sps);
+    if (rx_ret < 0 || tx_ret < 0)
+        throw std::runtime_error(
+            "PlutoSDR: setSampleRate(" + std::to_string(sps) +
+            ") rejected by driver (rx=" + std::to_string(rx_ret) +
+            " tx=" + std::to_string(tx_ret) +
+            ") -- requested rate likely exceeds this board's digital "
+            "interface ceiling (CMOS-mode boards: ~30.72 MSPS, not 61.44)");
 }
 
 void PlutoSDR::setBandwidth(long long hz) {
-    iio_channel_attr_write_longlong(rx_ch_, "rf_bandwidth", hz);
-    iio_channel_attr_write_longlong(tx_ch_, "rf_bandwidth", hz);
+    int rx_ret = iio_channel_attr_write_longlong(rx_ch_, "rf_bandwidth", hz);
+    int tx_ret = iio_channel_attr_write_longlong(tx_ch_, "rf_bandwidth", hz);
+    if (rx_ret < 0 || tx_ret < 0)
+        throw std::runtime_error(
+            "PlutoSDR: setBandwidth(" + std::to_string(hz) +
+            ") rejected by driver (rx=" + std::to_string(rx_ret) +
+            " tx=" + std::to_string(tx_ret) + ")");
 }
 
 void PlutoSDR::setGainMode(const std::string& mode) {
@@ -103,6 +121,12 @@ int PlutoSDR::txPush(const int16_t* iq, size_t n_pairs) {
     size_t cap = static_cast<size_t>(end - p) / 2;
     size_t n   = (n_pairs < cap) ? n_pairs : cap;
     std::memcpy(p, iq, n * 2 * sizeof(int16_t));
+    // iio_buffer_push transmits the WHOLE allocated buffer regardless of how
+    // much we just wrote — zero the remainder so a short burst (the common
+    // case: one frame is far smaller than the buffer) is followed by
+    // silence, not whatever stale data was left over from the previous call.
+    if (n < cap)
+        std::memset(p + n * 2, 0, (cap - n) * 2 * sizeof(int16_t));
     iio_buffer_push(tx_buf_);
     return static_cast<int>(n);
 }

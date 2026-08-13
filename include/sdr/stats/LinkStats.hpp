@@ -25,6 +25,11 @@ struct LinkStats {
     std::atomic<uint64_t> fec_corrected   {0};
     std::atomic<uint64_t> fec_uncorrectable{0};
 
+    // ARQ counters (BridgeMode, when cfg.arq is enabled)
+    std::atomic<uint64_t> arq_acked       {0};
+    std::atomic<uint64_t> arq_retransmits {0};
+    std::atomic<uint64_t> arq_dropped     {0};
+
     // Byte counters
     std::atomic<uint64_t> bytes_tx {0};
     std::atomic<uint64_t> bytes_rx {0};

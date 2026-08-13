@@ -4,14 +4,18 @@
 #include "sdr/framing/Frame.hpp"   // for ModCode
 #include <memory>
 #include <mutex>
+#include <optional>
 
 namespace sdr {
 
 // Wraps a Modem and automatically switches modulation scheme based on SNR.
 // Hysteresis: 2 dB to step up, 1 dB to step down (avoids rapid toggling).
+// If `forced` is set, auto-switching is disabled and the scheme stays fixed
+// — useful for links with frequency offset too wide for high-order QAM to
+// lock (e.g. two free-running TCXOs with no shared reference).
 class AdaptiveModem : public IModem {
 public:
-    AdaptiveModem();
+    explicit AdaptiveModem(std::optional<ModScheme> forced = std::nullopt);
 
     void modulate(const uint8_t* bytes, int n,
                   std::vector<std::complex<float>>& iq) override;
@@ -38,6 +42,7 @@ private:
     mutable std::mutex    mu_;
     std::unique_ptr<Modem> modem_;
     float snr_db_{0.f};
+    std::optional<ModScheme> forced_;
 
     ModScheme selectScheme(float snr) const;
     void      switchTo(ModScheme s);

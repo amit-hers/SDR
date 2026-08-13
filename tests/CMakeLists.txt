@@ -5,6 +5,7 @@ add_executable(sdr-tests
     test_modem.cpp
     test_crypto.cpp
     test_dsp.cpp
+    test_arq.cpp
 )
 
 target_include_directories(sdr-tests PRIVATE
@@ -17,3 +18,4 @@ add_test(NAME fec     COMMAND sdr-tests fec)
 add_test(NAME modem   COMMAND sdr-tests modem)
 add_test(NAME crypto  COMMAND sdr-tests crypto)
 add_test(NAME dsp     COMMAND sdr-tests dsp)
+add_test(NAME arq     COMMAND sdr-tests arq)
