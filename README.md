@@ -12,7 +12,9 @@ A professional C++20 transparent wireless bridge built for the [ADALM-PlutoSDR](
 | FPGA | Zynq-7020 XC7z020clg400-2 (Cortex-A9 + PL, 1 GB DDR3) |
 | RF chip | AD9363A (operating in AD9361 mode via F5OEO firmware) |
 | Frequency range | 70 MHz – 6 GHz |
-| Max sample rate | 61.44 MSPS (10 MHz BW → 40 MSPS in 4× oversampled mode) |
+| Max sample rate | 30.72 MSPS on this board — the CMOS digital interface caps `DATA_CLK` at 61.44 MHz, i.e. half the LVDS-spec 61.44 MSPS. Requests above this are **rejected by the kernel driver**, not clamped. |
+| Usable sample rate | ~4–8 MSPS (`bw_mhz` 1–2) for reliable reception — USB 2.0, not the radio, is the real limit. See [Bandwidth vs. USB throughput](#-bandwidth-vs-usb-throughput--read-before-raising-bw_mhz). |
+| Oscillator | 0.5 ppm VCTCXO, with PPS / 10 MHz external-reference input |
 | Ethernet | Gigabit (PS-side) |
 
 ---
@@ -70,8 +72,13 @@ cmake --build build -j$(nproc)
 ```bash
 ping 192.168.1.20           # round-trip over RF from PC-A
 iperf3 -s                   # on PC-B
-iperf3 -c 192.168.1.20      # on PC-A → ~25–90 Mbps depending on SNR
+iperf3 -c 192.168.1.20      # on PC-A
 ```
+
+Throughput is bounded by `bw_mhz` (see
+[Bandwidth vs. USB throughput](#-bandwidth-vs-usb-throughput--read-before-raising-bw_mhz)),
+not by the modulation table alone: at the recommended `bw_mhz: 1` the symbol
+rate is 1 Msym/s, so BPSK gives ~1 Mbps raw before framing overhead and loss.
 
 ### 5. Monitor
 
@@ -103,11 +110,11 @@ python3 src/monitor/server.py --port 8080
 ```json
 {
   "mode":             "bridge",
-  "pluto_ip":         "192.168.2.1",
+  "pluto_ip":         "192.168.2.1",   // or a URI: "usb:1.56.5"
 
   "freq_tx_mhz":      434.0,
   "freq_rx_mhz":      439.0,
-  "bw_mhz":           10,
+  "bw_mhz":           1,               // 1-2; higher starves RX (see below)
   "tx_atten_db":      10,
   "gain_mode":        "fast_attack",
   "modulation":       "AUTO",
@@ -146,15 +153,66 @@ When `modulation` is `AUTO`, the daemon automatically switches based on measured
 | 15–24 dB | 16QAM | 4 bps/sym |
 | ≥ 24 dB | 64QAM | 6 bps/sym |
 
-**Bandwidth budget at 10 MHz:**
+---
 
-| Scheme | Usable throughput |
-|--------|------------------|
-| QPSK | ~25 Mbps |
-| 16QAM | ~50 Mbps |
-| 64QAM | ~75 Mbps |
+## ⚠ Bandwidth vs. USB throughput — read before raising `bw_mhz`
 
-1080p H.264 requires ~8–15 Mbps — comfortable within QPSK. Use `bw_mhz: 20` to double all rates.
+The AD9363 will happily accept a high sample rate, but the IQ stream still has
+to cross USB. Sample rate is `bw_mhz × 4` (`RRC_SPS`), and each sample is
+4 bytes, so `bw_mhz: 5` means 80 MB/s — far beyond USB 2.0's ~35 MB/s
+practical ceiling. When the link can't keep up, the receiver simply stops
+listening for part of the time, and **bursts that arrive during a gap are
+never seen at all.**
+
+Measured RX duty cycle (fraction of wall time actually receiving):
+
+| `bw_mhz` | Sample rate | Stream rate | USB backend | Network backend |
+|---------:|------------:|------------:|------------:|----------------:|
+| **1** | 4 MSPS | 16 MB/s | **99%** | **99%** |
+| **2** | 8 MSPS | 32 MB/s | **95%** | 69% |
+| 3 | 12 MSPS | 48 MB/s | 63% | 46% |
+| 5 | 20 MSPS | 80 MB/s | 38% | 28% |
+
+Raising `bw_mhz` past ~2 therefore delivers **fewer** frames, not more. Real
+measurement over a cabled link, BPSK, everything else identical:
+
+| Setting | Frames TX | Frames decoded | Rate |
+|---------|----------:|---------------:|-----:|
+| `bw_mhz: 5` | 59 | 6 | 10% |
+| `bw_mhz: 1` | 130 | 76 | **58%** |
+
+Default is `bw_mhz: 1`. The daemon prints a warning if you set it above 2.
+(Higher rates are still fine for TX-only or `scan` mode — the limit is on
+sustained reception.)
+
+---
+
+### Transport: prefer the USB backend
+
+`pluto_ip` accepts either a plain IP (`192.168.2.1`) or an explicit libiio
+backend URI (`usb:1.56.5`). The network backend runs TCP over the board's
+USB-ethernet gadget and sustains a lower rate than talking to the USB
+device directly, so `PlutoSDR::connect()` transparently upgrades a plain IP
+to the USB backend when it can identify the same board unambiguously by
+serial. It logs which transport it ended up on:
+
+```
+[sdr] 192.168.2.1: using transport usb:1.56.5
+```
+
+Boards ship with a blank serial, which makes them impossible to tell apart —
+they then stay on the slower network path (and collide on IP/MAC, see
+"Known Hardware Details"). Give each board a unique serial once:
+
+```bash
+ssh root@192.168.2.1                       # password: root
+fw_setenv UniqueID MY-PLUTO-01
+reboot
+```
+
+Then `iio_info -s` (or the daemon's own log line) will show a distinct
+`usb:` URI per board, which you can also use directly as `pluto_ip` to skip
+IP addressing entirely.
 
 Set `"modulation"` to a fixed scheme (`BPSK`/`QPSK`/`16QAM`/`64QAM`) instead of
 `AUTO` to disable auto-switching and lock the link to that scheme (BridgeMode
@@ -218,14 +276,52 @@ waiting on retransmits.
 ## Frame Format (v3)
 
 ```
-[SYNC 4B 0xC0FFEE77] [VER 1B=0x03] [FLAGS 1B] [MOD 1B] [BW 1B]
+[PREAMBLE 32B 0xAA] [SYNC 4B 0xC0FFEE77] [VER 1B=0x03] [FLAGS 1B] [MOD 1B] [BW 1B]
 [NODE_ID 4B BE] [SEQ 4B BE] [LEN 2B BE]
 [PAYLOAD N bytes  (FEC-encoded if FL_FEC; AES-encrypted if FL_ENCRYPT)]
-[CRC32 4B LE]
-Total overhead: 22 bytes   MAX_PAYLOAD: 1400 bytes
+[CRC32 4B LE] [POSTAMBLE 16B 0xAA]
+Header+CRC overhead: 22 bytes   Preamble+postamble: 48 bytes   MAX_PAYLOAD: 1400 bytes
 ```
 
 Flags: `FL_ENCRYPT=0x01  FL_FEC=0x02  FL_ACK=0x04  FL_CTRL=0x08`
+
+The CRC covers the sync word through the payload — not the preamble or
+postamble, which exist purely to give the receiver's control loops runway:
+
+- **Preamble** — every frame is an isolated burst (there is no carrier between
+  frames), so AGC / timing / carrier recovery all start cold. Their settling
+  transient is longer than the 4-byte sync word, so without a preamble in
+  front the sync word cannot survive.
+- **Postamble** — the matched filter and decimator have group delay; without
+  trailing padding the tail of the burst (including the CRC) gets clipped.
+
+---
+
+## RX pipeline (burst-gated)
+
+A real transmission occupies a tiny fraction of an `rxPull` batch — the rest
+is silence. Running AGC / `TimingSync` / `CostasLoop` continuously across the
+whole batch lets them adapt to the silence rather than the signal, so
+`BridgeMode::rxThread` instead:
+
+1. **Detects bursts** (`BurstDetector`) by block energy vs. the median noise
+   floor, and skips the DSP chain entirely for batches with nothing in them.
+2. **Isolates each burst window**, applies blind coarse CFO correction
+   (`CoarseFreqCorrect`, squaring method), and **resets** AGC / timing /
+   carrier state so each burst starts clean.
+3. **Retries demodulation at every sub-grid alignment** (`DECODE_OFFSETS`,
+   = `RRC_TAPS`), taking the first that yields a frame.
+
+Step 3 matters more than it looks. `symsync_crcf` cannot reliably acquire
+symbol timing from an arbitrary start offset: whether it locks depends on
+where the window begins relative to the RRC tap grid, and the dependence is
+brittle rather than gradual — measured over identical signal content, a
+precursor of 608 or 610 samples decoded 100% of the time while 600, 604, 612
+and 616 decoded 0%. A detected burst starts at an essentially arbitrary
+offset, so sweeping a full grid period is what makes reception reliable
+(synthetic decode rate over realistic batches: ~3/30 → 30/30). Each attempt
+uses a fresh `Deframer`, since a misaligned attempt emits garbage that would
+otherwise poison its state machine.
 
 ---
 
@@ -435,3 +531,28 @@ python3 src/monitor/server.py --port 8080
 - Firmware: F5OEO extended firmware (HamGeek ships with this pre-installed)
 - FPGA part: `xc7z020clg400-2` (NOT xc7z010 — affects all HLS synthesis targets)
 - Firmware tested: `v0.37-dirty` (F5OEO build) on `xc7z020clg400-2`
+- **Sample rate ceiling is 30.72 MSPS, not 61.44.** The CMOS digital interface
+  caps `DATA_CLK`; the driver logs
+  `ad9361_validate_trx_clock_chain: Failed CMOS MODE DATA_CLK > 61.44MSPS`
+  and **rejects** the write (`EINVAL`) rather than clamping it, so an
+  unachievable request silently leaves the previous rate in place unless the
+  return value is checked (`PlutoSDR::setSampleRate` now throws).
+- **Two boards ship identical on the wire.** The host-visible MAC is derived
+  from a hash of the u-boot `UniqueID` variable
+  (see `/etc/init.d/S23udc`), which is *empty* out of the box — so every
+  board hashes to the same MAC, and two of them on one host collide: only one
+  is reachable, ARP behaves erratically under load, and libiio can't tell
+  them apart. Fix once per board:
+  ```bash
+  ssh root@192.168.2.1     # password: root
+  fw_setenv UniqueID MY-PLUTO-01
+  reboot
+  ```
+  After this each board gets a distinct MAC, a distinct `enx…` interface, and
+  a distinct `usb:` URI usable directly as `pluto_ip`.
+- `hardwaregain` (TX attenuation) is a **fractional-dB** attribute (0.25 dB
+  steps), despite some vendor docs describing it as millidB — verified by
+  readback.
+- The board's `rssi` attribute proved unreliable as a signal-presence
+  indicator here: it barely moved between "peer transmitting at full power"
+  and "peer off". Trust raw IQ power / decoded frames instead.

@@ -9,6 +9,8 @@
 #include "sdr/dsp/AGC.hpp"
 #include "sdr/dsp/TimingSync.hpp"
 #include "sdr/dsp/CostasLoop.hpp"
+#include "sdr/dsp/CoarseFreqCorrect.hpp"
+#include "sdr/dsp/BurstDetector.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include "sdr/transport/TUNTAPDevice.hpp"
@@ -48,6 +50,10 @@ private:
     std::atomic<uint32_t> tx_seq_{0};
 
     static constexpr size_t IQ_SAMPLES = 256 * 1024;
+
+    // Sub-grid alignments to retry demodulation at per detected burst --
+    // see BridgeMode::DECODE_OFFSETS.
+    static constexpr size_t DECODE_OFFSETS = RRC_TAPS;
 };
 
 } // namespace sdr

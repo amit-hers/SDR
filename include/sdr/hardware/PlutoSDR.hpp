@@ -18,7 +18,17 @@ public:
     PlutoSDR(const PlutoSDR&)            = delete;
     PlutoSDR& operator=(const PlutoSDR&) = delete;
 
-    static std::unique_ptr<PlutoSDR> connect(const std::string& ip);
+    // `id` is either a plain IP ("192.168.2.1") or an explicit libiio backend
+    // URI ("usb:1.56.5"). For a plain IP the connection transparently upgrades
+    // to the USB backend when the same board can be identified unambiguously
+    // by serial -- the network backend runs TCP over the board's USB-ethernet
+    // gadget and sustains a markedly lower streaming rate. Boards without a
+    // programmed serial (`fw_setenv UniqueID ...`) can't be matched, so pass
+    // their `usb:` URI explicitly to get the faster path.
+    static std::unique_ptr<PlutoSDR> connect(const std::string& id);
+
+    // Which libiio backend this instance actually ended up using.
+    const std::string& transport() const { return transport_; }
 
     void setTxFrequency(double hz);
     void setRxFrequency(double hz);
@@ -58,6 +68,7 @@ private:
     iio_channel* tx_q_   {nullptr};
     iio_channel* temp_ch_{nullptr};
     size_t       buf_sz_ {DEFAULT_BUF};
+    std::string  transport_;   // libiio backend actually in use
 };
 
 } // namespace sdr

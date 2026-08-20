@@ -66,9 +66,10 @@ void MeshMode::txThread() {
 
 void MeshMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
-    std::vector<std::complex<float>> iq_f, iq_timed, iq_syms;
+    std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
     AGC agc; TimingSync tsync; CostasLoop costas;
-    Deframer deframer;
+    BurstDetector detector;
+    const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
 
     while (running_.load()) {
         int n = radio_.rxPull(iq_hw.data(), IQ_SAMPLES);
@@ -80,24 +81,54 @@ void MeshMode::rxThread() {
                 iq_hw[static_cast<size_t>(i)*2]   / 2048.f,
                 iq_hw[static_cast<size_t>(i)*2+1] / 2048.f };
 
-        agc.process(iq_f);
-        // NOTE: TimingSync is itself an RRC matched-filter + decimator
-        // (symsync_crcf expects oversampled input); do not RRCDecim first.
-        tsync.process(iq_f, iq_timed);
-        costas.process(iq_timed, iq_syms);
+        // See BridgeMode::rxThread for why: a real transmission is a sparse,
+        // short burst inside a mostly-silent batch, so detect and isolate
+        // it first rather than running AGC/TimingSync/CostasLoop
+        // continuously across the whole batch.
+        auto windows = detector.detect(iq_f);
+        if (windows.empty()) continue;
 
-        std::vector<uint8_t> bits;
-        amod_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
-        amod_->updateSNR(agc.rssi_dbm() + 95.f);
+        for (const auto& win : windows) {
+            window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
+                              iq_f.begin() + static_cast<long>(win.end));
 
-        for (uint8_t byte : bits) {
-            auto res = deframer.push(byte, fec_.get(), aes_.get());
-            if (!res) continue;
-            ssize_t w = tun_->write(res->payload.data(), res->payload.size());
-            if (w > 0) {
-                stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
-                stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
-                                          std::memory_order_relaxed);
+            CoarseFreqCorrect::apply(window_buf, sample_rate);
+
+            // See BridgeMode::rxThread: TimingSync's lock depends brittlely
+            // on where the window starts relative to the RRC tap grid, so
+            // retry at each sub-grid alignment until one yields a frame.
+            bool decoded_any = false;
+            for (size_t offset = 0; offset < DECODE_OFFSETS && !decoded_any; ++offset) {
+                if (offset >= window_buf.size()) break;
+                offset_buf.assign(window_buf.begin() + static_cast<long>(offset),
+                                  window_buf.end());
+
+                agc.reset(); tsync.reset(); costas.reset();
+
+                agc.process(offset_buf);
+                // NOTE: TimingSync is itself an RRC matched-filter + decimator
+                // (symsync_crcf expects oversampled input); do not RRCDecim first.
+                tsync.process(offset_buf, iq_timed);
+                costas.process(iq_timed, iq_syms);
+
+                std::vector<uint8_t> bits;
+                amod_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
+                amod_->updateSNR(agc.rssi_dbm() + 95.f);
+
+                // Fresh per attempt: a misaligned attempt's garbage would
+                // poison a shared Deframer's state machine.
+                Deframer deframer;
+                for (uint8_t byte : bits) {
+                    auto res = deframer.push(byte, fec_.get(), aes_.get());
+                    if (!res) continue;
+                    decoded_any = true;
+                    ssize_t w = tun_->write(res->payload.data(), res->payload.size());
+                    if (w > 0) {
+                        stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
+                        stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
+                                                  std::memory_order_relaxed);
+                    }
+                }
             }
         }
     }

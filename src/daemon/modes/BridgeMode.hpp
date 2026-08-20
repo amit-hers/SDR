@@ -11,6 +11,8 @@
 #include "sdr/dsp/TimingSync.hpp"
 #include "sdr/dsp/CostasLoop.hpp"
 #include "sdr/dsp/FFTSpectrum.hpp"
+#include "sdr/dsp/CoarseFreqCorrect.hpp"
+#include "sdr/dsp/BurstDetector.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include "sdr/transport/TUNTAPDevice.hpp"
@@ -19,6 +21,7 @@
 #include <thread>
 #include <atomic>
 #include <memory>
+#include <fstream>
 
 namespace sdr {
 
@@ -59,7 +62,23 @@ private:
     std::thread        stat_thread_;
     std::atomic<uint32_t> tx_seq_{0};
 
+    // Diagnostic: if $SDR_FRAME_LOG is set, every decoded frame (successful
+    // or CRC-failed) is logged there with its content, for manual RF-link
+    // analysis. Off by default (empty path -> no file opened).
+    std::ofstream frame_log_;
+
+    // Diagnostic: if $SDR_RAW_LOG is set, every raw demodulated byte (before
+    // framing) is dumped there as hex, for manually inspecting what the
+    // receiver actually produced regardless of whether a frame was found.
+    std::ofstream raw_log_;
+
     static constexpr size_t IQ_SAMPLES = 256 * 1024;
+
+    // Sub-grid alignments to retry demodulation at per detected burst.
+    // Matches RRC_TAPS: TimingSync's ability to lock depends on where the
+    // window starts relative to the filter's tap grid, so sweeping a full
+    // grid period guarantees hitting a workable alignment. See rxThread().
+    static constexpr size_t DECODE_OFFSETS = RRC_TAPS;
 };
 
 } // namespace sdr

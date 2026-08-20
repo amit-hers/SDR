@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <iostream>
 
 // Minimal JSON parser (avoids nlohmann/rapidjson dependency).
 // Parses the flat key:value pairs we need from config.json.
@@ -131,6 +132,20 @@ void Config::validate() {
     if (arq_window < 1)     arq_window = 1;
     if (arq_timeout_ms < 1) arq_timeout_ms = 1;
     if (arq_max_retries < 0) arq_max_retries = 0;
+
+    // Above ~2 MHz the IQ stream exceeds what USB 2.0 sustains, so the
+    // receiver spends most of its time not listening and silently misses
+    // most bursts. Warn rather than clamp: a high rate is legitimate for
+    // TX-only or scan use, it just cripples reception.
+    if (bw_mhz > 2) {
+        std::cerr << "[sdr] WARNING: bw_mhz=" << bw_mhz << " => "
+                  << (bw_mhz * 4) << " MSPS => " << (bw_mhz * 16)
+                  << " MB/s over USB, which exceeds USB 2.0's practical "
+                     "throughput. Expect the receiver to miss most frames "
+                     "(measured RX duty cycle: 99% at bw_mhz=1, 95% at 2, "
+                     "but only ~38% at 5). Use bw_mhz 1-2 for reliable "
+                     "reception.\n";
+    }
 }
 
 } // namespace sdr

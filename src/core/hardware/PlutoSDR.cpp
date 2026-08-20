@@ -2,8 +2,50 @@
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 namespace sdr {
+
+namespace {
+
+// Looks for a USB-backend context whose scan description advertises `serial`.
+// Returns its URI, or an empty string if there isn't exactly one match.
+// The USB backend avoids the TCP/IP stack that the network backend runs over
+// the board's USB-ethernet gadget, which measurably raises the sustainable
+// streaming rate (see PlutoSDR::connect).
+std::string findUsbUriForSerial(const std::string& serial) {
+    if (serial.empty()) return {};   // can't disambiguate without a serial
+
+    iio_scan_context* scan = iio_create_scan_context(nullptr, 0);
+    if (!scan) return {};
+
+    iio_context_info** info = nullptr;
+    ssize_t n = iio_scan_context_get_info_list(scan, &info);
+
+    std::string match;
+    int hits = 0;
+    for (ssize_t i = 0; i < n; ++i) {
+        std::string uri  = iio_context_info_get_uri(info[i]);
+        std::string desc = iio_context_info_get_description(info[i]);
+        if (uri.rfind("usb:", 0) != 0) continue;
+        if (desc.find(serial) == std::string::npos) continue;
+        match = uri;
+        ++hits;
+    }
+
+    if (info) iio_context_info_list_free(info);
+    iio_scan_context_destroy(scan);
+
+    return (hits == 1) ? match : std::string{};
+}
+
+bool looksLikeUri(const std::string& s) {
+    return s.rfind("usb:", 0) == 0 || s.rfind("ip:", 0) == 0
+        || s.rfind("local:", 0) == 0 || s.find("://") != std::string::npos;
+}
+
+} // namespace
 
 PlutoSDR::~PlutoSDR() {
     if (tx_buf_) iio_buffer_destroy(tx_buf_);
@@ -11,19 +53,47 @@ PlutoSDR::~PlutoSDR() {
     if (ctx_)    iio_context_destroy(ctx_);
 }
 
-std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& ip) {
+std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& id) {
     auto p = std::unique_ptr<PlutoSDR>(new PlutoSDR());
 
-    p->ctx_ = iio_create_network_context(ip.c_str());
-    if (!p->ctx_)
-        throw std::runtime_error("PlutoSDR: cannot connect to " + ip);
+    if (looksLikeUri(id)) {
+        // Explicit backend URI (e.g. "usb:1.56.5") -- use it verbatim.
+        p->ctx_ = iio_create_context_from_uri(id.c_str());
+        if (!p->ctx_)
+            throw std::runtime_error("PlutoSDR: cannot open context " + id);
+        p->transport_ = id;
+    } else {
+        // Plain IP. Connect over the network backend first, then transparently
+        // upgrade to the USB backend for the same physical board when we can
+        // identify it unambiguously by serial -- the network path runs TCP over
+        // the board's USB-ethernet gadget and sustains a markedly lower
+        // streaming rate, which starves the receiver of listening time.
+        p->ctx_ = iio_create_network_context(id.c_str());
+        if (!p->ctx_)
+            throw std::runtime_error("PlutoSDR: cannot connect to " + id);
+        p->transport_ = "ip:" + id;
+
+        const char* serial = iio_context_get_attr_value(p->ctx_, "hw_serial");
+        std::string usb_uri = findUsbUriForSerial(serial ? serial : "");
+        if (!usb_uri.empty()) {
+            if (iio_context* usb = iio_create_context_from_uri(usb_uri.c_str())) {
+                iio_context_destroy(p->ctx_);
+                p->ctx_ = usb;
+                p->transport_ = usb_uri;
+            }
+            // On failure just keep the working network context.
+        }
+    }
+
+    std::printf("[sdr] %s: using transport %s\n", id.c_str(), p->transport_.c_str());
 
     p->phy_    = iio_context_find_device(p->ctx_, "ad9361-phy");
     p->tx_dev_ = iio_context_find_device(p->ctx_, "cf-ad9361-dds-core-lpc");
     p->rx_dev_ = iio_context_find_device(p->ctx_, "cf-ad9361-lpc");
 
     if (!p->phy_ || !p->tx_dev_ || !p->rx_dev_)
-        throw std::runtime_error("PlutoSDR: AD9361 devices not found");
+        throw std::runtime_error("PlutoSDR: AD9361 devices not found on "
+                                 + p->transport_);
 
     // Local oscillators
     p->lo_tx_ = iio_device_find_channel(p->phy_, "altvoltage1", true);

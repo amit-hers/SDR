@@ -2,6 +2,7 @@
 #include "sdr/framing/Frame.hpp"
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 #include <complex>
@@ -40,6 +41,11 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
         acfg.max_retries = cfg_.arq_max_retries;
         arq_ = std::make_unique<ArqWindow>(acfg);
     }
+
+    if (const char* path = std::getenv("SDR_FRAME_LOG"); path && *path)
+        frame_log_.open(path, std::ios::trunc);
+    if (const char* path = std::getenv("SDR_RAW_LOG"); path && *path)
+        raw_log_.open(path, std::ios::trunc);
 }
 
 BridgeMode::~BridgeMode() { stop(); }
@@ -133,9 +139,11 @@ void BridgeMode::txThread() {
 // ── RX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
-    std::vector<std::complex<float>> iq_f, iq_timed, iq_syms;
+    std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
     AGC agc; TimingSync tsync; CostasLoop costas;
-    Deframer deframer;
+    BurstDetector detector;
+    uint64_t logged_crc_errors = 0;
+    const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
 
     while (running_.load()) {
         int n = radio_.rxPull(iq_hw.data(), IQ_SAMPLES);
@@ -154,51 +162,132 @@ void BridgeMode::rxThread() {
                 stats_.spectrum[i] = spec[i];
         }
 
-        agc.process(iq_f);                       // in-place
-        // NOTE: TimingSync is itself an RRC matched-filter + decimator
-        // (symsync_crcf expects oversampled input); do not RRCDecim first.
-        tsync.process(iq_f, iq_timed);           // matched filter + symbol timing
-        costas.process(iq_timed, iq_syms);       // carrier recovery
+        // A real transmission is a sparse, short burst inside a mostly-
+        // silent batch. Feeding AGC/TimingSync/CostasLoop the whole batch
+        // continuously lets their state adapt to whatever's dominant (the
+        // silence), not the brief real signal. Detect and isolate the
+        // actual burst window(s) first, and reset the chain fresh for each
+        // one, instead of running it blindly across the whole batch.
+        auto windows = detector.detect(iq_f);
+        if (windows.empty()) continue; // nothing here -- skip the DSP chain entirely
 
-        std::vector<uint8_t> bits;
-        amod_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
+        for (const auto& win : windows) {
+            window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
+                              iq_f.begin() + static_cast<long>(win.end));
 
-        float rssi = agc.rssi_dbm();
-        float snr  = rssi + 95.f;
-        stats_.rssi_dbm.store(rssi, std::memory_order_relaxed);
-        stats_.snr_db  .store(snr,  std::memory_order_relaxed);
-        amod_->updateSNR(snr);
-        stats_.cur_mod .store(static_cast<int>(amod_->currentModCode()),
-                              std::memory_order_relaxed);
+            // Blind coarse CFO correction: two independent free-running
+            // TCXOs (no shared reference clock) can produce an offset well
+            // outside CostasLoop's native (and non-monotonic past that
+            // range) pull-in range. Collapse it to a small residual before
+            // AGC/Costas. Cheaper and more accurate now that it runs on an
+            // isolated window instead of the whole batch.
+            CoarseFreqCorrect::apply(window_buf, sample_rate);
 
-        for (uint8_t byte : bits) {
-            auto result = deframer.push(byte, fec_.get(), aes_.get());
-            if (!result) continue;
-            stats_.updatePeer(result->node_id, rssi, snr);
+            // TimingSync cannot reliably acquire symbol timing from an
+            // arbitrary start offset within a burst: whether it locks is a
+            // brittle function of where the window happens to begin
+            // relative to the RRC tap grid (measured: some offsets decode
+            // 100% of the time, immediate neighbours 0%). A detected burst
+            // window starts at an essentially arbitrary offset, so retry
+            // the demod at each sub-grid alignment and take the first one
+            // that yields a frame. Sweeping all RRC_TAPS offsets recovers
+            // every frame that the naive single-offset attempt misses.
+            // Cost is bounded: this runs only on short, sparse burst
+            // windows, not on the whole batch.
+            bool decoded_any = false;
+            for (size_t offset = 0; offset < DECODE_OFFSETS && !decoded_any; ++offset) {
+                if (offset >= window_buf.size()) break;
+                offset_buf.assign(window_buf.begin() + static_cast<long>(offset),
+                                  window_buf.end());
 
-            if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
-                // Control frame: acknowledges our outgoing seq, no TAP payload.
-                if (cfg_.arq && arq_) arq_->onAck(result->seq);
-                continue;
-            }
+                // Fresh cold start per attempt -- do not carry over state
+                // adapted to the preceding silence or a failed alignment.
+                agc.reset(); tsync.reset(); costas.reset();
 
-            ssize_t w = tap_->write(result->payload.data(), result->payload.size());
-            if (w > 0) {
-                stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
-                stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
-                                          std::memory_order_relaxed);
-                if (result->flags & FL_FEC)
-                    stats_.fec_corrected.fetch_add(1, std::memory_order_relaxed);
-            }
+                agc.process(offset_buf);                 // in-place
+                // NOTE: TimingSync is itself an RRC matched-filter + decimator
+                // (symsync_crcf expects oversampled input); do not RRCDecim first.
+                tsync.process(offset_buf, iq_timed);      // matched filter + symbol timing
+                costas.process(iq_timed, iq_syms);        // carrier recovery
 
-            if (cfg_.arq) {
-                Framer ackFramer;
-                auto ack = ackFramer.encode(std::vector<uint8_t>{},
-                                            FL_CTRL | FL_ACK,
-                                            amod_->currentModCode(),
-                                            mhzToBw(cfg_.bw_mhz),
-                                            cfg_.node_id_u32, result->seq);
-                ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));
+                std::vector<uint8_t> bits;
+                amod_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
+
+                if (raw_log_.is_open() && !bits.empty()) {
+                    static char hex[] = "0123456789abcdef";
+                    std::string line;
+                    line.reserve(bits.size() * 3);
+                    for (uint8_t b : bits) {
+                        line += hex[b >> 4]; line += hex[b & 0xF]; line += ' ';
+                    }
+                    raw_log_ << line << "\n";
+                    raw_log_.flush();
+                }
+
+                float rssi = agc.rssi_dbm();
+                float snr  = rssi + 95.f;
+                stats_.rssi_dbm.store(rssi, std::memory_order_relaxed);
+                stats_.snr_db  .store(snr,  std::memory_order_relaxed);
+                amod_->updateSNR(snr);
+                stats_.cur_mod .store(static_cast<int>(amod_->currentModCode()),
+                                      std::memory_order_relaxed);
+
+                // A misaligned attempt produces garbage that would poison a
+                // shared Deframer's state machine -- use a fresh one per
+                // alignment attempt.
+                Deframer deframer;
+                for (uint8_t byte : bits) {
+                    auto result = deframer.push(byte, fec_.get(), aes_.get());
+
+                    if (deframer.crcErrors() > logged_crc_errors) {
+                        logged_crc_errors = deframer.crcErrors();
+                        stats_.frames_rx_bad.fetch_add(1, std::memory_order_relaxed);
+                        if (frame_log_.is_open())
+                            frame_log_ << "[CRC-FAIL] total_so_far=" << logged_crc_errors
+                                       << " rssi=" << rssi << " snr=" << snr << "\n";
+                    }
+
+                    if (!result) continue;
+                    decoded_any = true;
+                    stats_.updatePeer(result->node_id, rssi, snr);
+
+                    if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
+                        // Control frame: acknowledges our outgoing seq, no TAP payload.
+                        if (cfg_.arq && arq_) arq_->onAck(result->seq);
+                        continue;
+                    }
+
+                    if (frame_log_.is_open()) {
+                        std::string content;
+                        for (uint8_t b : result->payload)
+                            content += (b >= 32 && b < 127) ? static_cast<char>(b) : '.';
+                        frame_log_ << "[GOOD] seq=" << result->seq
+                                   << " node=0x" << std::hex << result->node_id << std::dec
+                                   << " len=" << result->payload.size()
+                                   << " rssi=" << rssi << " snr=" << snr
+                                   << " content=\"" << content << "\"\n";
+                        frame_log_.flush();
+                    }
+
+                    ssize_t w = tap_->write(result->payload.data(), result->payload.size());
+                    if (w > 0) {
+                        stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
+                        stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
+                                                  std::memory_order_relaxed);
+                        if (result->flags & FL_FEC)
+                            stats_.fec_corrected.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    if (cfg_.arq) {
+                        Framer ackFramer;
+                        auto ack = ackFramer.encode(std::vector<uint8_t>{},
+                                                    FL_CTRL | FL_ACK,
+                                                    amod_->currentModCode(),
+                                                    mhzToBw(cfg_.bw_mhz),
+                                                    cfg_.node_id_u32, result->seq);
+                        ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));
+                    }
+                }
             }
         }
     }

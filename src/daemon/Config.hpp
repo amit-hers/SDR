@@ -11,10 +11,20 @@ struct Config {
     std::string mode        {"bridge"};   // bridge|mesh|p2p-tx|p2p-rx|scan
 
     // ── Hardware ────────────────────────────────────────────────────────────
+    // Plain IP, or an explicit libiio backend URI ("usb:1.56.5") -- see
+    // PlutoSDR::connect. The USB backend sustains a much higher streaming
+    // rate than the network backend, so prefer it where possible.
     std::string pluto_ip    {"192.168.2.1"};
     double      freq_tx_mhz {434.0};
     double      freq_rx_mhz {439.0};
-    int         bw_mhz      {10};         // 1|2|5|10|20
+    // Sample rate is bw_mhz * 4 (RRC_SPS), and every sample is 4 bytes over
+    // USB. USB 2.0 tops out near 35 MB/s in practice, so anything above
+    // ~2 MHz here starves the receiver of listening time: measured RX duty
+    // cycle is 99% at 1 MHz, 95% at 2 MHz (USB backend), but only 38% at
+    // 5 MHz and 27% at 5 MHz over the network backend. Bursts arriving while
+    // the receiver isn't listening are simply never seen, so a "faster"
+    // setting here yields *fewer* delivered frames, not more.
+    int         bw_mhz      {1};          // 1|2|5|10|20 (1-2 recommended)
     double      tx_atten_db {10.0};       // 0-89 dB, 0.25dB steps
     std::string gain_mode   {"fast_attack"};
     std::string modulation  {"AUTO"};     // AUTO|BPSK|QPSK|16QAM|64QAM

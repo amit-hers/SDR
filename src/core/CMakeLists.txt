@@ -10,6 +10,8 @@ add_library(sdr_core STATIC
     dsp/TimingSync.cpp
     dsp/CostasLoop.cpp
     dsp/FFTSpectrum.cpp
+    dsp/CoarseFreqCorrect.cpp
+    dsp/BurstDetector.cpp
     fec/ReedSolomon.cpp
     crypto/AESCipher.cpp
     transport/TUNTAPDevice.cpp
