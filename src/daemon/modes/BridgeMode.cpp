@@ -215,9 +215,17 @@ void BridgeMode::rxThread() {
     bcfg.threshold_x = static_cast<float>(cfg_.burst_threshold);
     bcfg.margin      = static_cast<size_t>(cfg_.burst_margin);
     bcfg.merge_gap   = static_cast<size_t>(cfg_.burst_merge_gap);
+    bcfg.noise_quantile = static_cast<float>(cfg_.burst_noise_q);
     BurstDetector detector(bcfg);
+    PreambleSync psync(RRC_SPS);
     uint64_t logged_crc_errors = 0;
     const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
+    // The detector keeps burst_margin samples of context before the burst,
+    // so the frame start is within roughly that plus a block. Bounding the
+    // correlation search keeps its cost proportional to that, not to the
+    // whole window.
+    const size_t preamble_search =
+        static_cast<size_t>(cfg_.burst_margin) + static_cast<size_t>(cfg_.burst_block) * 4;
 
     while (running_.load()) {
         {
@@ -269,18 +277,49 @@ void BridgeMode::rxThread() {
             CoarseFreqCorrect::apply(window_buf, sample_rate);
 
             // TimingSync cannot reliably acquire symbol timing from an
-            // arbitrary start offset within a burst: whether it locks is a
-            // brittle function of where the window happens to begin
-            // relative to the RRC tap grid (measured: some offsets decode
-            // 100% of the time, immediate neighbours 0%). A detected burst
-            // window starts at an essentially arbitrary offset, so retry
-            // the demod at each sub-grid alignment and take the first one
-            // that yields a frame. Sweeping all RRC_TAPS offsets recovers
-            // every frame that the naive single-offset attempt misses.
-            // Cost is bounded: this runs only on short, sparse burst
-            // windows, not on the whole batch.
+            // arbitrary start offset: whether it locks is a brittle function
+            // of where the window begins relative to the RRC tap grid
+            // (measured: some offsets decode 100% of the time, immediate
+            // neighbours 0%). Rather than retrying the whole DSP chain at
+            // every alignment -- 32x the cost per burst, which saturates the
+            // CPU and starves reception -- correlate against the known
+            // preamble+sync-word waveform to *compute* the frame start, then
+            // demodulate once there.
+            //
+            // A window with no real frame in it (noise, or a false burst
+            // detection) fails the correlation cheaply instead of paying for
+            // 32 full demod passes.
+            // Under continuous traffic a single detected window spans many
+            // back-to-back frames, so walk the window: locate a frame, decode
+            // from there, then resume searching after it. Decoding only the
+            // first frame per window would throw away most of a busy channel.
             bool decoded_any = false;
-            for (size_t offset = 0; offset < DECODE_OFFSETS && !decoded_any; ++offset) {
+            size_t search_from = 0;
+            for (int frame_no = 0; frame_no < MAX_FRAMES_PER_WINDOW; ++frame_no) {
+                if (search_from >= window_buf.size()) break;
+
+                std::vector<std::complex<float>> tail(
+                    window_buf.begin() + static_cast<long>(search_from), window_buf.end());
+                // Always bound the search. Letting it scan the whole tail
+                // makes each correlation O(window * ref), and on a busy
+                // channel the window is large and this loop runs many times
+                // -- that alone starves the DSP thread. Frames follow each
+                // other closely, so the next preamble is near at hand.
+                auto match = psync.find(tail, preamble_search);
+                if (!match.found) break;
+
+                const size_t base = search_from + static_cast<size_t>(match.offset);
+                const size_t offsets[] = {
+                    base,
+                    // Neighbours, in case the peak sat a sample either side of
+                    // the alignment TimingSync actually wants.
+                    base > 0 ? base - 1 : 0,
+                    base + 1,
+                };
+
+                bool this_frame_ok = false;
+                for (size_t oi = 0; oi < 3 && !this_frame_ok; ++oi) {
+                size_t offset = offsets[oi];
                 if (offset >= window_buf.size()) break;
                 offset_buf.assign(window_buf.begin() + static_cast<long>(offset),
                                   window_buf.end());
@@ -334,6 +373,7 @@ void BridgeMode::rxThread() {
 
                     if (!result) continue;
                     decoded_any = true;
+                    this_frame_ok = true;
                     stats_.updatePeer(result->node_id, rssi, snr);
 
                     if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
@@ -373,6 +413,12 @@ void BridgeMode::rxThread() {
                         ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));
                     }
                 }
+                }   // end alignment-neighbour loop
+
+                // Advance past this frame and look for the next one in the
+                // same window. Even if the decode failed, step forward so a
+                // stubborn correlation peak can't spin us in place.
+                search_from = base + psync.referenceLength();
             }
             if (decoded_any)
                 stats_.bursts_demodulated.fetch_add(1, std::memory_order_relaxed);

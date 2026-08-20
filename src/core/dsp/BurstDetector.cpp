@@ -21,9 +21,17 @@ BurstDetector::detect(const std::vector<std::complex<float>>& buf) const {
         power[b] = static_cast<float>(acc / static_cast<double>(block));
     }
 
+    // Noise floor = a low quantile of block power, not the median: see
+    // Config::noise_quantile. nth_element is enough, no full sort needed.
     std::vector<float> sorted_power = power;
-    std::sort(sorted_power.begin(), sorted_power.end());
-    float noise_floor = sorted_power[sorted_power.size() / 2]; // median
+    float q = cfg_.noise_quantile;
+    if (q < 0.01f) q = 0.01f;
+    if (q > 0.99f) q = 0.99f;
+    size_t qi = static_cast<size_t>(q * static_cast<float>(sorted_power.size()));
+    if (qi >= sorted_power.size()) qi = sorted_power.size() - 1;
+    std::nth_element(sorted_power.begin(), sorted_power.begin() + static_cast<long>(qi),
+                     sorted_power.end());
+    float noise_floor = sorted_power[qi];
     float threshold   = noise_floor * cfg_.threshold_x;
 
     // Find contiguous (block-granularity) elevated regions.

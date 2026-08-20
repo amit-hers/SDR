@@ -49,6 +49,7 @@ struct Config {
     double      burst_threshold  {3.0};   // multiple of median block power
     int         burst_margin     {512};   // context kept either side
     int         burst_merge_gap  {512};   // merge windows closer than this
+    double      burst_noise_q    {0.20};  // quantile treated as noise floor
 
     // ── ARQ (reliable delivery, BridgeMode only) ─────────────────────────────
     bool        arq             {false};

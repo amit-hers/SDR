@@ -50,6 +50,15 @@ const iqChart = new Chart(document.getElementById('chart-iq'), {
 const fecChart = makeLineChart('chart-fec', [], [
     { label:'FEC corrected', data:[], borderColor:YELLOW, borderWidth:1.5, pointRadius:0, tension:0.3, fill:false },
 ]);
+// Rates rather than totals: the interesting signal is how the funnel
+// narrows over time, which cumulative counters hide.
+const rxFunnelChart = makeLineChart('chart-rxfunnel', [], [
+    { label:'detected/s',    data:[], borderColor:ACCENT, borderWidth:1.5, pointRadius:0, tension:0.3, fill:false },
+    { label:'demodulated/s', data:[], borderColor:GREEN,  borderWidth:1.5, pointRadius:0, tension:0.3, fill:false },
+    { label:'good/s',        data:[], borderColor:YELLOW, borderWidth:1.5, pointRadius:0, tension:0.3, fill:false },
+]);
+let _prevFunnel = null;
+
 const scanChart = new Chart(document.getElementById('chart-scan'), {
     type:'bar', data:{labels:[],datasets:[{label:'Power dBm',data:[],backgroundColor:GREEN+'88',borderColor:GREEN,borderWidth:1}]},
     options:{animation:false,responsive:true,maintainAspectRatio:true,
@@ -93,6 +102,40 @@ function applyStats(stats) {
     g('fec-corrected').textContent = corr;
     g('fec-uncorr').textContent    = uncorr;
     g('fec-rate').textContent      = (corr+uncorr)>0 ? (corr/(corr+uncorr)*100).toFixed(1)+'%':'0%';
+
+    // --- RX pipeline funnel ---
+    const det  = stats.bursts_detected ?? 0;
+    const dem  = stats.bursts_demodulated ?? 0;
+    const good = stats.frames_rx_good ?? 0;
+    const bad  = stats.frames_rx_bad ?? 0;
+    g('rx-detected').textContent = det;
+    g('rx-demod').textContent    = dem;
+    g('rx-good').textContent     = good;
+    g('rx-bad').textContent      = bad;
+    g('rx-conv').textContent     = det > 0 ? (dem/det*100).toFixed(0)+'%' : '0%';
+    g('rx-duty').textContent     = (stats.rx_duty_pct ?? '--') + '%';
+    g('rx-dropped').textContent  = stats.dropped ?? 0;
+
+    const nowMs = Date.now();
+    if (_prevFunnel) {
+        const dt = (nowMs - _prevFunnel.t) / 1000;
+        if (dt > 0.05) {
+            push(rxFunnelChart,
+                 Math.max(0, (det  - _prevFunnel.det )) / dt,
+                 Math.max(0, (dem  - _prevFunnel.dem )) / dt,
+                 Math.max(0, (good - _prevFunnel.good)) / dt);
+            _prevFunnel = { t: nowMs, det, dem, good };
+        }
+    } else {
+        _prevFunnel = { t: nowMs, det, dem, good };
+    }
+
+    // --- ARQ ---
+    const ack = stats.arq_acked ?? 0, adrop = stats.arq_dropped ?? 0;
+    g('arq-acked').textContent   = ack;
+    g('arq-retx').textContent    = stats.arq_retransmits ?? 0;
+    g('arq-dropped').textContent = adrop;
+    g('arq-rate').textContent    = (ack+adrop) > 0 ? (ack/(ack+adrop)*100).toFixed(0)+'%' : '0%';
 
     push(signalChart, stats.rssi_dbm??-100, stats.snr_db??0);
     push(tputChart,   stats.tx_kbps??0,     stats.rx_kbps??0);

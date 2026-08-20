@@ -185,6 +185,35 @@
     <canvas id="chart-fec"></canvas>
   </section>
 
+  <!-- Where frames are lost between "energy on air" and "delivered". Each
+       stage narrows: bursts detected -> demodulated -> CRC-good. A big drop
+       at one stage points straight at the subsystem responsible. -->
+  <section class="card">
+    <h2>RX Pipeline (where frames are lost)</h2>
+    <div class="fec-stats">
+      <div><span id="rx-detected">0</span><small>bursts detected</small></div>
+      <div><span id="rx-demod">0</span><small>demodulated</small></div>
+      <div><span id="rx-good">0</span><small>CRC good</small></div>
+      <div><span id="rx-bad">0</span><small>CRC fail</small></div>
+    </div>
+    <div class="fec-stats">
+      <div><span id="rx-conv">0%</span><small>detect→demod</small></div>
+      <div><span id="rx-duty">--%</span><small>RX duty cycle</small></div>
+      <div><span id="rx-dropped">0</span><small>queue drops</small></div>
+    </div>
+    <canvas id="chart-rxfunnel"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>ARQ (reliable delivery)</h2>
+    <div class="fec-stats">
+      <div><span id="arq-acked">0</span><small>acked</small></div>
+      <div><span id="arq-retx">0</span><small>retransmits</small></div>
+      <div><span id="arq-dropped">0</span><small>gave up</small></div>
+      <div><span id="arq-rate">0%</span><small>delivered</small></div>
+    </div>
+  </section>
+
   <section class="card">
     <h2>Channel Scanner</h2>
     <div class="scan-btns">

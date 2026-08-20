@@ -25,21 +25,26 @@ static uint16_t get_u16_be(const uint8_t* p) {
 }
 
 void Deframer::reset() {
-    state_   = State::HUNT;
-    shift_   = 0;
-    hdr_pos_ = 0;
-    pay_pos_ = 0;
+    state_    = State::HUNT;
+    shift_    = 0;
+    hdr_pos_  = 0;
+    pay_pos_  = 0;
+    inverted_ = false;
 }
 
 std::optional<DecodedFrame> Deframer::push(uint8_t byte,
                                            const ReedSolomon* fec,
                                            const AESCipher*   aes) {
     switch (state_) {
-    // ── HUNT: scan for 4-byte sync word ─────────────────────────────────
+    // ── HUNT: scan for 4-byte sync word (either phase) ──────────────────
     case State::HUNT:
         shift_ = (shift_ << 8) | byte;
-        if (shift_ == FRAME_SYNC) {
-            // Pre-fill header buffer with sync bytes
+        // Accept the complemented sync word too, and remember that this
+        // frame arrived on the inverted carrier phase so the remaining
+        // bytes can be corrected as they come in.
+        if (shift_ == FRAME_SYNC || shift_ == ~FRAME_SYNC) {
+            inverted_ = (shift_ != FRAME_SYNC);
+            // Pre-fill header buffer with sync bytes (canonical, un-inverted)
             hdr_buf_[0] = 0xC0; hdr_buf_[1] = 0xFF;
             hdr_buf_[2] = 0xEE; hdr_buf_[3] = 0x77;
             hdr_pos_  = 4;
@@ -49,6 +54,7 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
 
     // ── HEADER: collect remaining 14 bytes (after 4B sync) ──────────────
     case State::HEADER:
+        if (inverted_) byte = static_cast<uint8_t>(~byte);
         hdr_buf_[hdr_pos_++] = byte;
         if (hdr_pos_ == static_cast<int>(HEADER_SIZE)) {
             // Parse header
@@ -79,6 +85,7 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
 
     // ── PAYLOAD: collect payload + CRC ──────────────────────────────────
     case State::PAYLOAD:
+        if (inverted_) byte = static_cast<uint8_t>(~byte);
         payload_buf_[pay_pos_++] = byte;
         if (pay_pos_ == pay_total_) {
             // Verify CRC over header + payload (excluding the 4 CRC bytes)

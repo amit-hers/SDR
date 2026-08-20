@@ -31,6 +31,15 @@ private:
 
     State    state_     {State::HUNT};
     uint32_t shift_     {0};
+
+    // BPSK (and any M-PSK) carries an unresolved phase ambiguity: a Costas
+    // loop has two equally stable lock points 180 degrees apart, and on the
+    // wrong one every recovered bit is inverted. The frame is otherwise
+    // perfectly intact, so rather than discard it we also hunt for the
+    // complemented sync word and, on a match, un-invert the rest of the
+    // frame. Measured on real captures: without this the receiver threw away
+    // frames whose preamble and sync word were textbook-correct but flipped.
+    bool     inverted_  {false};
     uint8_t  hdr_buf_   [HEADER_SIZE]{};
     int      hdr_pos_   {0};
     uint16_t plen_      {0};

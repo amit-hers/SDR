@@ -13,6 +13,7 @@
 #include "sdr/dsp/FFTSpectrum.hpp"
 #include "sdr/dsp/CoarseFreqCorrect.hpp"
 #include "sdr/dsp/BurstDetector.hpp"
+#include "sdr/dsp/PreambleSync.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include "sdr/transport/TUNTAPDevice.hpp"
@@ -92,11 +93,16 @@ private:
 
     static constexpr size_t IQ_SAMPLES = 256 * 1024;
 
-    // Sub-grid alignments to retry demodulation at per detected burst.
-    // Matches RRC_TAPS: TimingSync's ability to lock depends on where the
-    // window starts relative to the filter's tap grid, so sweeping a full
-    // grid period guarantees hitting a workable alignment. See rxThread().
-    static constexpr size_t DECODE_OFFSETS = RRC_TAPS;
+    // Cap on frames decoded from a single detected window. Under continuous
+    // traffic one window spans many back-to-back frames; the cap bounds the
+    // worst-case work per window so the DSP thread cannot stall the capture
+    // queue behind one pathological buffer.
+    static constexpr int MAX_FRAMES_PER_WINDOW = 64;
+
+    // NOTE: the old brute-force alignment sweep (retrying the whole DSP
+    // chain at every RRC_TAPS offset) has been replaced by PreambleSync,
+    // which correlates against the preamble+sync-word to compute the frame
+    // start directly. See rxThread().
 };
 
 } // namespace sdr

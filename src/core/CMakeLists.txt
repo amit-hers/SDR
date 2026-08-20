@@ -12,6 +12,7 @@ add_library(sdr_core STATIC
     dsp/FFTSpectrum.cpp
     dsp/CoarseFreqCorrect.cpp
     dsp/BurstDetector.cpp
+    dsp/PreambleSync.cpp
     fec/ReedSolomon.cpp
     crypto/AESCipher.cpp
     transport/TUNTAPDevice.cpp

@@ -94,6 +94,7 @@ Config Config::fromFile(const std::string& path) {
     c.burst_threshold  = jsonDouble(json, "burst_threshold",   c.burst_threshold);
     c.burst_margin     = jsonInt   (json, "burst_margin",      c.burst_margin);
     c.burst_merge_gap  = jsonInt   (json, "burst_merge_gap",   c.burst_merge_gap);
+    c.burst_noise_q    = jsonDouble(json, "burst_noise_q",     c.burst_noise_q);
     c.arq              = jsonBool  (json, "arq",               c.arq);
     c.arq_window       = jsonInt   (json, "arq_window",        c.arq_window);
     c.arq_timeout_ms   = jsonInt   (json, "arq_timeout_ms",    c.arq_timeout_ms);
