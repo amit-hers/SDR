@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <vector>
 #include <complex>
+#include <algorithm>
 
 namespace sdr {
 
@@ -265,8 +266,19 @@ void BridgeMode::rxThread() {
         stats_.bursts_detected.fetch_add(windows.size(), std::memory_order_relaxed);
 
         for (const auto& win : windows) {
+            // The detector marks where energy is, which is not the same as
+            // where the frame ends: pulse shaping and threshold hysteresis
+            // routinely clip a window well short of a full frame, and
+            // demodulating a fragment can never satisfy the CRC. Extend to
+            // at least one maximum-size frame (plus slack for the alignment
+            // search) so a located frame is always complete.
+            const size_t max_frame_samples =
+                (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 * static_cast<size_t>(RRC_SPS);
+            size_t win_end = std::min(iq_f.size(),
+                                      std::max(win.end, win.start + max_frame_samples
+                                                        + static_cast<size_t>(cfg_.burst_margin)));
             window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
-                              iq_f.begin() + static_cast<long>(win.end));
+                              iq_f.begin() + static_cast<long>(win_end));
 
             // Blind coarse CFO correction: two independent free-running
             // TCXOs (no shared reference clock) can produce an offset well
