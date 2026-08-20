@@ -53,16 +53,19 @@ BridgeMode::~BridgeMode() { stop(); }
 void BridgeMode::start() {
     if (running_.exchange(true)) return;
     stats_.uptime_s.store(0);
-    tx_thread_   = std::thread(&BridgeMode::txThread,   this);
-    rx_thread_   = std::thread(&BridgeMode::rxThread,   this);
-    stat_thread_ = std::thread(&BridgeMode::statThread, this);
+    tx_thread_      = std::thread(&BridgeMode::txThread,      this);
+    capture_thread_ = std::thread(&BridgeMode::captureThread, this);
+    rx_thread_      = std::thread(&BridgeMode::rxThread,      this);
+    stat_thread_    = std::thread(&BridgeMode::statThread,    this);
 }
 
 void BridgeMode::stop() {
     running_.store(false);
-    if (tx_thread_.joinable())   tx_thread_.join();
-    if (rx_thread_.joinable())   rx_thread_.join();
-    if (stat_thread_.joinable()) stat_thread_.join();
+    capture_cv_.notify_all();   // wake the DSP thread out of its wait
+    if (tx_thread_.joinable())      tx_thread_.join();
+    if (capture_thread_.joinable()) capture_thread_.join();
+    if (rx_thread_.joinable())      rx_thread_.join();
+    if (stat_thread_.joinable())    stat_thread_.join();
 }
 
 // ── TX thread ────────────────────────────────────────────────────────────────
@@ -71,6 +74,20 @@ void BridgeMode::txThread() {
     std::vector<std::complex<float>> iq_syms, iq_shaped;
     std::vector<int16_t>             iq_hw;
     RRCInterp interp;
+
+    // A txPush costs the full tx-buffer length in airtime no matter how few
+    // samples were written, so frames are staged here and flushed together.
+    // Without this, a short frame wastes >98% of the air time on zero padding
+    // and the link tops out around 15 frames/sec regardless of symbol rate.
+    const size_t tx_capacity = radio_.txCapacity();
+    std::vector<int16_t> stage;
+    stage.reserve(tx_capacity * 2);
+
+    auto flush = [&]() {
+        if (stage.empty()) return;
+        radio_.txPush(stage.data(), stage.size() / 2);
+        stage.clear();
+    };
 
     auto transmit = [&](const std::vector<uint8_t>& frame) {
         amod_->modulate(frame.data(), static_cast<int>(frame.size()), iq_syms);
@@ -81,7 +98,15 @@ void BridgeMode::txThread() {
             iq_hw[i * 2]     = static_cast<int16_t>(iq_shaped[i].real() * 2047.f);
             iq_hw[i * 2 + 1] = static_cast<int16_t>(iq_shaped[i].imag() * 2047.f);
         }
-        radio_.txPush(iq_hw.data(), iq_shaped.size());
+
+        // Flush first if this frame wouldn't fit, then stage it. A frame
+        // larger than the whole buffer is pushed on its own (txPush clamps).
+        if (stage.size() / 2 + iq_shaped.size() > tx_capacity) flush();
+        if (iq_shaped.size() > tx_capacity) {
+            radio_.txPush(iq_hw.data(), iq_shaped.size());
+            return;
+        }
+        stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
     };
 
     bool                  have_pending{false};
@@ -108,7 +133,16 @@ void BridgeMode::txThread() {
 
         if (!have_pending) {
             ssize_t n = tap_->read(pkt.data(), pkt.size());
-            if (n <= 0) continue;
+            if (n <= 0) {
+                // TAP is non-blocking and currently empty: nothing more is
+                // coming right now, so send whatever is staged rather than
+                // holding it until the buffer happens to fill. Then idle
+                // briefly -- spinning here would burn a core that the
+                // capture and DSP threads need.
+                flush();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
 
             uint8_t flags = 0;
             if (cfg_.fec)     flags |= FL_FEC;
@@ -136,17 +170,67 @@ void BridgeMode::txThread() {
     }
 }
 
+// ── Capture thread ───────────────────────────────────────────────────────────
+// Nothing but rxPull -> queue. Keeping this free of DSP work is what stops
+// the receiver going deaf mid-burst (see CAPTURE_QUEUE_MAX in the header).
+void BridgeMode::captureThread() {
+    while (running_.load()) {
+        std::vector<int16_t> buf(IQ_SAMPLES * 2);
+
+        auto t0 = std::chrono::steady_clock::now();
+        int n = radio_.rxPull(buf.data(), IQ_SAMPLES);
+        auto t1 = std::chrono::steady_clock::now();
+
+        auto us = [](auto a, auto b) {
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
+        };
+        stats_.rx_pull_us .fetch_add(us(t0, t1), std::memory_order_relaxed);
+        stats_.rx_total_us.fetch_add(us(t0, std::chrono::steady_clock::now()),
+                                     std::memory_order_relaxed);
+
+        if (n <= 0) continue;
+        buf.resize(static_cast<size_t>(n) * 2);
+
+        {
+            std::lock_guard<std::mutex> lk(capture_mu_);
+            if (capture_queue_.size() >= CAPTURE_QUEUE_MAX) {
+                capture_queue_.pop_front();          // DSP can't keep up
+                stats_.dropped.fetch_add(1, std::memory_order_relaxed);
+            }
+            capture_queue_.push_back(std::move(buf));
+        }
+        capture_cv_.notify_one();
+    }
+    capture_cv_.notify_all();   // release a waiting DSP thread on shutdown
+}
+
 // ── RX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::rxThread() {
-    std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
+    std::vector<int16_t>             iq_hw;
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
     AGC agc; TimingSync tsync; CostasLoop costas;
-    BurstDetector detector;
+    BurstDetector::Config bcfg;
+    bcfg.block_size  = static_cast<size_t>(cfg_.burst_block);
+    bcfg.threshold_x = static_cast<float>(cfg_.burst_threshold);
+    bcfg.margin      = static_cast<size_t>(cfg_.burst_margin);
+    bcfg.merge_gap   = static_cast<size_t>(cfg_.burst_merge_gap);
+    BurstDetector detector(bcfg);
     uint64_t logged_crc_errors = 0;
     const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
 
     while (running_.load()) {
-        int n = radio_.rxPull(iq_hw.data(), IQ_SAMPLES);
+        {
+            std::unique_lock<std::mutex> lk(capture_mu_);
+            capture_cv_.wait(lk, [&] {
+                return !capture_queue_.empty() || !running_.load();
+            });
+            if (!running_.load() && capture_queue_.empty()) break;
+            iq_hw = std::move(capture_queue_.front());
+            capture_queue_.pop_front();
+        }
+
+        int n = static_cast<int>(iq_hw.size() / 2);
         if (n <= 0) continue;
 
         iq_f.resize(static_cast<size_t>(n));
@@ -170,6 +254,7 @@ void BridgeMode::rxThread() {
         // one, instead of running it blindly across the whole batch.
         auto windows = detector.detect(iq_f);
         if (windows.empty()) continue; // nothing here -- skip the DSP chain entirely
+        stats_.bursts_detected.fetch_add(windows.size(), std::memory_order_relaxed);
 
         for (const auto& win : windows) {
             window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
@@ -289,6 +374,8 @@ void BridgeMode::rxThread() {
                     }
                 }
             }
+            if (decoded_any)
+                stats_.bursts_demodulated.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }

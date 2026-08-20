@@ -30,6 +30,22 @@ struct LinkStats {
     std::atomic<uint64_t> arq_retransmits {0};
     std::atomic<uint64_t> arq_dropped     {0};
 
+    // RX pipeline funnel -- where frames are lost between "energy seen on
+    // air" and "frame delivered". bursts_detected counts candidate windows
+    // BurstDetector found; bursts_demodulated counts those that yielded a
+    // CRC-good frame. A large gap means the demod chain is failing on real
+    // bursts; a small bursts_detected relative to the peer's frames_tx means
+    // energy isn't being seen at all (missed reception or detector threshold).
+    std::atomic<uint64_t> bursts_detected    {0};
+    std::atomic<uint64_t> bursts_demodulated {0};
+
+    // Fraction of RX-thread wall time actually spent inside rxPull(). Time
+    // spent demodulating is time NOT spent listening, and any burst that
+    // arrives while we're busy is lost outright -- so a low value here caps
+    // frame delivery no matter how good the DSP is.
+    std::atomic<uint64_t> rx_pull_us   {0};
+    std::atomic<uint64_t> rx_total_us  {0};
+
     // Byte counters
     std::atomic<uint64_t> bytes_tx {0};
     std::atomic<uint64_t> bytes_rx {0};

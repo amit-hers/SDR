@@ -45,6 +45,16 @@ bool looksLikeUri(const std::string& s) {
         || s.rfind("local:", 0) == 0 || s.find("://") != std::string::npos;
 }
 
+// The board's USB-ethernet gadget defaults to 192.168.2.x, so an address in
+// that subnet means we're already talking over USB and the direct USB
+// backend is strictly faster. Any *other* address is a real network path --
+// most importantly the board's Gigabit RJ45, which sustains far more than
+// USB 2.0 (measured RX duty at 48 MB/s: 96% over Ethernet vs 63% over USB).
+// Silently "upgrading" that to USB would throw the Gigabit link away.
+bool isUsbGadgetSubnet(const std::string& ip) {
+    return ip.rfind("192.168.2.", 0) == 0;
+}
+
 } // namespace
 
 PlutoSDR::~PlutoSDR() {
@@ -74,7 +84,9 @@ std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& id) {
         p->transport_ = "ip:" + id;
 
         const char* serial = iio_context_get_attr_value(p->ctx_, "hw_serial");
-        std::string usb_uri = findUsbUriForSerial(serial ? serial : "");
+        std::string usb_uri = isUsbGadgetSubnet(id)
+                            ? findUsbUriForSerial(serial ? serial : "")
+                            : std::string{};   // real network path -- keep it
         if (!usb_uri.empty()) {
             if (iio_context* usb = iio_create_context_from_uri(usb_uri.c_str())) {
                 iio_context_destroy(p->ctx_);
@@ -122,8 +134,9 @@ std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& id) {
     iio_channel_enable(p->rx_i_);
     iio_channel_enable(p->rx_q_);
 
-    // Create buffers
-    p->tx_buf_ = iio_device_create_buffer(p->tx_dev_, p->buf_sz_, false);
+    // Create buffers. TX is deliberately much smaller than RX: a push costs
+    // its full buffer length in airtime regardless of how much was written.
+    p->tx_buf_ = iio_device_create_buffer(p->tx_dev_, p->tx_buf_sz_, false);
     p->rx_buf_ = iio_device_create_buffer(p->rx_dev_, p->buf_sz_, false);
 
     if (!p->tx_buf_ || !p->rx_buf_)

@@ -38,16 +38,27 @@ public:
     void setGainMode(const std::string& mode); // "fast_attack"|"slow_attack"|"manual"
     void setManualGain(int db);                // used when mode == "manual"
 
-    // Returns samples written/read (IQ pairs, each 2×int16)
+    // Returns samples written/read (IQ pairs, each 2×int16).
+    // NOTE: txPush transmits the WHOLE tx buffer (zero-padding whatever the
+    // caller didn't fill), so airtime cost is txCapacity() regardless of
+    // n_pairs. Batch frames up to txCapacity() before pushing, or most of
+    // the air time is spent radiating zeros.
     int txPush(const int16_t* iq, size_t n_pairs);
     int rxPull(int16_t* iq, size_t n_pairs);
+
+    // IQ pairs per tx buffer push -- the batching target for callers.
+    size_t txCapacity() const { return tx_buf_sz_; }
 
     float      getRSSI()  const;
     float      getTemp()  const;
     DeviceInfo getInfo()  const;
 
     static constexpr int    IQ_SCALE      = 2047;
-    static constexpr size_t DEFAULT_BUF   = 1024 * 256;  // samples
+    static constexpr size_t DEFAULT_BUF   = 1024 * 256;  // rx samples
+    // TX buffer is sized to hold one maximum-size frame (a 1400-byte payload
+    // at BPSK is ~47k samples) with a little slack -- not the much larger rx
+    // size, since every push costs its full length in airtime.
+    static constexpr size_t TX_BUF        = 1024 * 64;   // tx samples
 
 private:
     explicit PlutoSDR() = default;
@@ -67,7 +78,8 @@ private:
     iio_channel* tx_i_   {nullptr};
     iio_channel* tx_q_   {nullptr};
     iio_channel* temp_ch_{nullptr};
-    size_t       buf_sz_ {DEFAULT_BUF};
+    size_t       buf_sz_    {DEFAULT_BUF};
+    size_t       tx_buf_sz_ {TX_BUF};
     std::string  transport_;   // libiio backend actually in use
 };
 

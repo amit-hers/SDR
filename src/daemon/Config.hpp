@@ -40,6 +40,16 @@ struct Config {
     bool        fec           {false};
     std::string aes_key_hex;              // 64 hex chars = 32 bytes
 
+    // ── Burst detection (RX) ─────────────────────────────────────────────────
+    // Tuning knobs for BurstDetector. Defaults match BurstDetector::Config;
+    // exposed here because the right threshold depends on the noise floor of
+    // the deployment, and because `bursts_detected` vs `bursts_demodulated`
+    // in the stats makes the effect directly measurable.
+    int         burst_block      {256};   // samples per power block
+    double      burst_threshold  {3.0};   // multiple of median block power
+    int         burst_margin     {512};   // context kept either side
+    int         burst_merge_gap  {512};   // merge windows closer than this
+
     // ── ARQ (reliable delivery, BridgeMode only) ─────────────────────────────
     bool        arq             {false};
     int         arq_window      {16};

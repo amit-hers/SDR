@@ -22,6 +22,10 @@
 #include <atomic>
 #include <memory>
 #include <fstream>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+#include <vector>
 
 namespace sdr {
 
@@ -37,7 +41,8 @@ public:
 
 private:
     void txThread();
-    void rxThread();
+    void captureThread();   // does nothing but rxPull -> queue, so reception never stops
+    void rxThread();        // consumes the queue and runs the DSP chain
     void statThread();
 
     const Config& cfg_;
@@ -58,9 +63,22 @@ private:
 
     std::atomic<bool>  running_{false};
     std::thread        tx_thread_;
+    std::thread        capture_thread_;
     std::thread        rx_thread_;
     std::thread        stat_thread_;
     std::atomic<uint32_t> tx_seq_{0};
+
+    // Capture -> DSP handoff. Demodulating a burst takes long enough that
+    // doing it inline with rxPull() left the receiver deaf ~30% of the time,
+    // and a frame straddling one of those gaps is captured only partially --
+    // enough energy for the burst detector to fire, but never decodable. A
+    // dedicated capture thread keeps reception continuous; the DSP thread
+    // drains this queue. Bounded, dropping oldest, so a slow DSP thread
+    // costs whole frames rather than unbounded memory.
+    static constexpr size_t CAPTURE_QUEUE_MAX = 8;
+    std::deque<std::vector<int16_t>> capture_queue_;
+    std::mutex                       capture_mu_;
+    std::condition_variable          capture_cv_;
 
     // Diagnostic: if $SDR_FRAME_LOG is set, every decoded frame (successful
     // or CRC-failed) is logged there with its content, for manual RF-link

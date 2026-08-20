@@ -36,6 +36,12 @@ std::string LinkStats::toJSON() const {
       << "\"arq_acked\":"         << arq_acked.load()          << ","
       << "\"arq_retransmits\":"   << arq_retransmits.load()    << ","
       << "\"arq_dropped\":"       << arq_dropped.load()        << ","
+      << "\"bursts_detected\":"   << bursts_detected.load()    << ","
+      << "\"bursts_demodulated\":"<< bursts_demodulated.load() << ","
+      << "\"rx_duty_pct\":"       << f(rx_total_us.load()
+             ? 100.f * static_cast<float>(rx_pull_us.load())
+                     / static_cast<float>(rx_total_us.load())
+             : 0.f)                                            << ","
       << "\"bytes_tx\":"          << bytes_tx.load()           << ","
       << "\"bytes_rx\":"          << bytes_rx.load()           << ","
       << "\"rssi_dbm\":"          << f(rssi_dbm.load())        << ","

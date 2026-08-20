@@ -90,6 +90,10 @@ Config Config::fromFile(const std::string& path) {
     c.encrypt          = jsonBool  (json, "encrypt",           c.encrypt);
     c.fec              = jsonBool  (json, "fec",               c.fec);
     c.aes_key_hex      = jsonStr   (json, "aes_key_hex",       c.aes_key_hex);
+    c.burst_block      = jsonInt   (json, "burst_block",       c.burst_block);
+    c.burst_threshold  = jsonDouble(json, "burst_threshold",   c.burst_threshold);
+    c.burst_margin     = jsonInt   (json, "burst_margin",      c.burst_margin);
+    c.burst_merge_gap  = jsonInt   (json, "burst_merge_gap",   c.burst_merge_gap);
     c.arq              = jsonBool  (json, "arq",               c.arq);
     c.arq_window       = jsonInt   (json, "arq_window",        c.arq_window);
     c.arq_timeout_ms   = jsonInt   (json, "arq_timeout_ms",    c.arq_timeout_ms);
