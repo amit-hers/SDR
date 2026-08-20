@@ -40,8 +40,24 @@ public:
     Result estimate(const std::vector<std::complex<float>>& syms,
                     int max_sym_search = 64) const;
 
-    // Removes the estimated phase ramp in place.
+    // Removes the estimated phase ramp in place (open loop).
     static void derotate(std::vector<std::complex<float>>& syms, const Result& r);
+
+    // Removes the phase ramp while continuously re-estimating it from the
+    // decided symbols (decision-directed tracking).
+    //
+    // The open-loop version above measures phase over the preamble+sync and
+    // then *extrapolates* across the rest of the frame. Any residual
+    // frequency error accumulates: measured on hardware, ~0.0009 rad/symbol
+    // over a ~2100-symbol frame is ~109 degrees, so phase crosses the
+    // 90-degree BPSK decision boundary about 83% of the way in and every
+    // remaining bit inverts. That is ~45 consecutive corrupted bytes -- far
+    // past what RS(255,223) can repair -- which is why such frames parse a
+    // perfect header and still fail CRC. Tracking keeps the estimate honest
+    // through the payload instead of trusting one extrapolation.
+    static void derotateTracked(std::vector<std::complex<float>>& syms,
+                                const Result& r,
+                                float alpha = 0.02f);
 
     static constexpr float MIN_QUALITY = 0.45f;
     size_t referenceSymbols() const { return ref_.size(); }

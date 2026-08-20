@@ -12,6 +12,13 @@ static void test_clean_roundtrip() {
 
     auto encoded = rs.encode(data.data(), data.size());
     auto decoded = rs.decode(encoded.data(), encoded.size());
+    // RS(255,223) hands back the whole 223-byte data block; the original
+    // length is carried in the frame header, so callers trim (see
+    // Deframer::push -> raw.resize(plen_)). Trim here likewise before
+    // comparing -- otherwise this compares a padded block against the input
+    // and fails on length even though every payload byte is correct.
+    assert(decoded.size() >= data.size());
+    decoded.resize(data.size());
     assert(decoded == data);
     std::cout << "  [fec] clean roundtrip: PASS\n";
 }
@@ -26,6 +33,8 @@ static void test_error_correction() {
         encoded[static_cast<size_t>(i * 3)] ^= 0xFF;
 
     auto decoded = rs.decode(encoded.data(), encoded.size());
+    assert(decoded.size() >= data.size());
+    decoded.resize(data.size());   // trim RS block padding, as callers do
     assert(decoded == data);
     std::cout << "  [fec] 15-error correction: PASS\n";
 }
@@ -48,6 +57,8 @@ static void test_multi_block() {
     for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i & 0xFF);
     auto enc = rs.encode(data.data(), data.size());
     auto dec = rs.decode(enc.data(), enc.size());
+    assert(dec.size() >= data.size());
+    dec.resize(data.size());       // trim RS block padding, as callers do
     assert(dec == data);
     std::cout << "  [fec] multi-block (500B → 3 blocks): PASS\n";
 }

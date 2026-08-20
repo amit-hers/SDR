@@ -53,4 +53,10 @@ void CostasLoop::reset() {
     phase_err_ = 0.f;
 }
 
+void CostasLoop::seed(float phase, float freq_per_sym) {
+    nco_crcf_set_phase(nco_, phase);
+    nco_crcf_set_frequency(nco_, freq_per_sym);
+    phase_err_ = 0.f;
+}
+
 } // namespace sdr
