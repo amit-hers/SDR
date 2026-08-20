@@ -215,13 +215,26 @@ int PlutoSDR::txPush(const int16_t* iq, size_t n_pairs) {
 }
 
 int PlutoSDR::rxPull(int16_t* iq, size_t n_pairs) {
-    ssize_t nb = iio_buffer_refill(rx_buf_);
-    if (nb < 0) return -1;
-    auto* p   = static_cast<int16_t*>(iio_buffer_start(rx_buf_));
-    auto* end = static_cast<int16_t*>(iio_buffer_end(rx_buf_));
-    size_t avail = static_cast<size_t>(end - p) / 2;
-    size_t n     = (n_pairs < avail) ? n_pairs : avail;
-    std::memcpy(iq, p, n * 2 * sizeof(int16_t));
+    if (n_pairs == 0) return 0;
+
+    // Refill only once the previous one is used up; otherwise keep serving
+    // from it, so consecutive reads are contiguous in time. iio_buffer_start()
+    // stays valid until the next refill, which is exactly when we re-read it.
+    if (rx_pos_ >= rx_avail_) {
+        ssize_t nb = iio_buffer_refill(rx_buf_);
+        if (nb < 0) return -1;
+        auto* p   = static_cast<int16_t*>(iio_buffer_start(rx_buf_));
+        auto* end = static_cast<int16_t*>(iio_buffer_end(rx_buf_));
+        rx_avail_ = static_cast<size_t>(end - p) / 2;
+        rx_pos_   = 0;
+        if (rx_avail_ == 0) return 0;
+    }
+
+    auto* base = static_cast<int16_t*>(iio_buffer_start(rx_buf_));
+    size_t left = rx_avail_ - rx_pos_;
+    size_t n    = (n_pairs < left) ? n_pairs : left;
+    std::memcpy(iq, base + rx_pos_ * 2, n * 2 * sizeof(int16_t));
+    rx_pos_ += n;
     return static_cast<int>(n);
 }
 

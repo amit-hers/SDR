@@ -44,6 +44,17 @@ public:
     // n_pairs. Batch frames up to txCapacity() before pushing, or most of
     // the air time is spent radiating zeros.
     int txPush(const int16_t* iq, size_t n_pairs);
+
+    // Reads up to n_pairs samples, refilling the hardware buffer only when the
+    // previous refill has been fully consumed. Successive small reads therefore
+    // return *consecutive* samples rather than a fresh refill each time.
+    //
+    // This used to refill unconditionally and return only the first n_pairs,
+    // silently discarding the rest -- so rxPull(buf, 8192) against a 262144-
+    // sample buffer kept 3.1% of the air and threw away the other 96.9%. The
+    // resulting stream looked continuous but was spliced, and no frame longer
+    // than the request could survive it. Callers that pass DEFAULT_BUF (the
+    // daemon's capture thread) are unaffected either way.
     int rxPull(int16_t* iq, size_t n_pairs);
 
     // IQ pairs per tx buffer push -- the batching target for callers.
@@ -80,6 +91,10 @@ private:
     iio_channel* temp_ch_{nullptr};
     size_t       buf_sz_    {DEFAULT_BUF};
     size_t       tx_buf_sz_ {TX_BUF};
+    // Read cursor into the current rx refill, so partial reads consume the
+    // buffer instead of discarding its tail.
+    size_t       rx_avail_  {0};      // IQ pairs in the current refill
+    size_t       rx_pos_    {0};      // IQ pairs already handed out
     std::string  transport_;   // libiio backend actually in use
 };
 
