@@ -50,8 +50,8 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
     }
     std::cerr << "[sdr] RX carrier recovery: "
               << (carrier_mode_ == CarrierMode::LS        ? "LS (data-aided, open loop)"
-                : carrier_mode_ == CarrierMode::COSTAS    ? "Costas loop (cold start)"
-                : carrier_mode_ == CarrierMode::LS_COSTAS ? "Costas loop seeded by LS estimate"
+                : carrier_mode_ == CarrierMode::COSTAS    ? "Costas loop over whole burst"
+                : carrier_mode_ == CarrierMode::LS_COSTAS ? "LS derotation + Costas on payload only"
                                                           : "none")
               << "\n";
 
@@ -109,6 +109,15 @@ void BridgeMode::stop() {
                   << " bursts=" << stats_.bursts_detected.load()
                   << " | bytes tx=" << stats_.bytes_tx.load()
                   << " rx=" << stats_.bytes_rx.load() << "\n";
+        uint64_t h0 = align_hits_[0].load(), h1 = align_hits_[1].load(),
+                 h2 = align_hits_[2].load();
+        uint64_t tot = h0 + h1 + h2;
+        std::cerr << "alignment retry: attempts=" << align_attempts_.load()
+                  << " decodes at base=" << h0 << " base-1=" << h1
+                  << " base+1=" << h2
+                  << "  (neighbours contributed "
+                  << (tot ? 100.0 * double(h1 + h2) / double(tot) : 0.0)
+                  << "% of decodes)\n";
     }
 }
 
@@ -440,9 +449,10 @@ void BridgeMode::rxThread() {
                 };
 
                 bool this_frame_ok = false;
-                for (size_t oi = 0; oi < 3 && !this_frame_ok; ++oi) {
+                for (size_t oi = 0; oi < ALIGN_OFFSETS && !this_frame_ok; ++oi) {
                 size_t offset = offsets[oi];
                 if (offset >= window_buf.size()) break;
+                align_attempts_.fetch_add(1, std::memory_order_relaxed);
                 offset_buf.assign(window_buf.begin() + static_cast<long>(offset),
                                   window_buf.end());
 
@@ -470,6 +480,7 @@ void BridgeMode::rxThread() {
                 //
                 // $SDR_RX_CARRIER selects the method so the comparison stays
                 // reproducible on hardware: ls (default) | costas | none.
+                bool track_payload = false;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_CARRIER, iq_timed.size());
                 switch (carrier_mode_) {
                     case CarrierMode::COSTAS:
@@ -488,17 +499,19 @@ void BridgeMode::rxThread() {
                         break;
                     }
                     case CarrierMode::LS_COSTAS: {
-                        // Seed the loop with the data-aided estimate instead
-                        // of starting it cold. The LS fit supplies absolute
-                        // phase and residual frequency measured on symbols the
-                        // receiver already knows; the loop then only has to
-                        // track what the open-loop extrapolation leaves behind,
-                        // which is where the residual errors were concentrated
-                        // (measured: 0% wrong in the first three eighths of the
-                        // payload, 10.6% in the last).
+                        // Open-loop LS derotation over the whole burst. This
+                        // uses only symbols the receiver already knows (the
+                        // BPSK preamble and sync word), recovers *absolute*
+                        // phase -- which resolves the constellation ambiguity
+                        // outright -- and leaves a small residual drift.
+                        //
+                        // The loop that cleans up that residual is NOT run
+                        // here; it runs on the payload alone, via the tap
+                        // below. See SplitModem::PayloadTap.
+                        iq_syms = iq_timed;
                         auto est = dasync.estimate(iq_timed, DAS_SEARCH_SYMS);
-                        if (est.ok) costas.seed(est.phase, est.freq_per_sym);
-                        costas.process(iq_timed, iq_syms);
+                        if (est.ok) DataAidedSync::derotate(iq_syms, est);
+                        track_payload = true;
                         break;
                     }
                 }
@@ -514,10 +527,25 @@ void BridgeMode::rxThread() {
                 // Split demodulation: BPSK acquisition, then the payload in
                 // whatever scheme the header declares. The receiver holds no
                 // modulation state of its own.
+                // Residual carrier tracking, applied to the payload symbols
+                // only. After the LS derotation above the residual starts at
+                // roughly zero phase and frequency, so the loop begins from
+                // rest and only has to follow the drift that open-loop
+                // extrapolation accumulates towards the end of a frame.
+                SplitModem::PayloadTap tap;
+                if (track_payload) {
+                    tap = [&](std::vector<std::complex<float>>& p) {
+                        costas.reset();
+                        std::vector<std::complex<float>> out;
+                        costas.process(p, out);
+                        p.swap(out);
+                    };
+                }
+
                 SplitModem::Result sm;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
                   sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
-                                              SYNC_SEARCH_SYMS); }
+                                              SYNC_SEARCH_SYMS, tap); }
                 if (sm.header_ok) {
                     stats_.cur_mod.store(static_cast<int>(sm.payload_mod),
                                          std::memory_order_relaxed);
@@ -569,6 +597,8 @@ void BridgeMode::rxThread() {
 
                     if (!result) continue;
                     decoded_any = true;
+                    if (!this_frame_ok)
+                        align_hits_[oi].fetch_add(1, std::memory_order_relaxed);
                     this_frame_ok = true;
                     stats_.updatePeer(result->node_id, rssi, snr);
 

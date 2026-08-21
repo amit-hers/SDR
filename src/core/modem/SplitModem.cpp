@@ -67,7 +67,8 @@ void SplitModem::bpskBits(const std::complex<float>* syms, size_t n,
 
 SplitModem::Result SplitModem::demodulate(const std::vector<std::complex<float>>& syms,
                                           bool   fec_enabled,
-                                          size_t max_search_syms) {
+                                          size_t max_search_syms,
+                                          const PayloadTap& payload_tap) {
     Result r;
     if (syms.size() < HEADER_SYMS) return r;
 
@@ -136,6 +137,10 @@ SplitModem::Result SplitModem::demodulate(const std::vector<std::complex<float>>
                                                   syms.begin() + static_cast<long>(r.end_sym));
     if (r.inverted)
         for (auto& s : pay_syms_buf) s = -s;
+
+    // Carrier tracking, if the caller wants it, sees only these symbols --
+    // never the BPSK acquisition section ahead of them.
+    if (payload_tap) payload_tap(pay_syms_buf);
 
     Modem pay(toScheme(r.payload_mod));
     std::vector<uint8_t> pay_bytes_buf;

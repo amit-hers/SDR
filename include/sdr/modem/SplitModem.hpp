@@ -1,6 +1,7 @@
 #pragma once
 #include "sdr/framing/Frame.hpp"
 #include <complex>
+#include <functional>
 #include <cstdint>
 #include <vector>
 
@@ -47,13 +48,26 @@ public:
         std::vector<uint8_t> bytes;
     };
 
+    // Hook applied to the payload symbols after they are extracted (and
+    // de-rotated for a 180-degree error) but before they reach the modem.
+    //
+    // This exists so carrier tracking can run on the payload *alone*. A
+    // decision-directed loop needs a detector matched to the constellation
+    // it is tracking, and the acquisition section is always BPSK while the
+    // payload may not be -- running one loop across both feeds it symbols
+    // its detector is wrong for. Measured on hardware: a Costas loop run
+    // over the whole stream took QPSK from 25.3% CRC (open-loop LS only)
+    // down to 9.7%, while being essential for BPSK.
+    using PayloadTap = std::function<void(std::vector<std::complex<float>>&)>;
+
     // Demodulates one frame starting within the first `max_search_syms`
     // symbols. `fec_enabled` must match the receiver's FEC configuration --
     // it decides whether the header's payload length refers to pre- or
     // post-RS bytes, and therefore how many payload symbols to consume.
     static Result demodulate(const std::vector<std::complex<float>>& syms,
                              bool   fec_enabled,
-                             size_t max_search_syms = 512);
+                             size_t max_search_syms = 512,
+                             const PayloadTap& payload_tap = {});
 
 private:
     // Demodulates `n` symbols as BPSK into a bit vector (1 symbol = 1 bit).

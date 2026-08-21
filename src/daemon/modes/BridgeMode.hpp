@@ -21,6 +21,7 @@
 #include "sdr/transport/SPSCRing.hpp"
 #include "sdr/stats/LinkStats.hpp"
 #include "sdr/stats/StageProfiler.hpp"
+#include <array>
 #include <chrono>
 #include <thread>
 #include <atomic>
@@ -112,6 +113,25 @@ private:
     // found -- which looks exactly like a dead link.
     static constexpr size_t SYNC_SEARCH_SYMS =
         PREAMBLE_START_SLACK + PREAMBLE_LEN * 8;
+
+    // Alignment attempts per located preamble. PreambleSync's correlation
+    // peak used to land a sample or two off what TimingSync wanted, so each
+    // burst was retried at base, base-1, base+1 -- and TimingSync, the most
+    // expensive stage, runs once per attempt.
+    //
+    // Measured once the CFO estimate was properly conditioned: the two
+    // neighbours together produced 34 of 1289 decodes (2.6%) while inflating
+    // TimingSync and AGC call counts by ~30%. Set to 1; raise to 3 to restore
+    // the sweep if a future change makes the peak less reliable again.
+    static constexpr size_t ALIGN_OFFSETS = 1;
+
+    // Which of the three alignment neighbours actually yielded the decode.
+    // PreambleSync's peak was historically a sample or two off what
+    // TimingSync wanted, so each burst is retried at base, base-1, base+1.
+    // That retry is ~1.8 correlations per burst; these counters say whether
+    // it still earns its cost.
+    std::array<std::atomic<uint64_t>, 3> align_hits_{};
+    std::atomic<uint64_t>                align_attempts_{0};
 
     // Throttles the display-only FFT spectrum -- see cfg_.spectrum_interval_ms.
     std::chrono::steady_clock::time_point last_spectrum_{};

@@ -9,6 +9,8 @@
 #include "sdr/framing/Deframer.hpp"
 #include "sdr/framing/Frame.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
+#include "sdr/dsp/CostasLoop.hpp"
+#include <cmath>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -260,6 +262,69 @@ void run_splitmod() {
         assert(r.found);
         assert(!r.header_ok);       // rejected before any payload demod
         assert(!r.complete);
+    }
+
+    std::printf("[splitmod] payload tap sees only payload symbols\n");
+    {
+        // The tap must receive exactly the payload+CRC+postamble symbols --
+        // never the BPSK acquisition section. A carrier loop given the
+        // acquisition symbols is being fed a constellation its decision
+        // detector does not match, which is what broke QPSK on hardware.
+        auto payload = makePayload(242);
+        Framer framer;
+        auto frame = framer.encode(payload, 0, ModCode::QPSK, BwCode::BW_1P25, 1, 21);
+        std::vector<std::complex<float>> syms;
+        SplitModem::modulate(frame, ModCode::QPSK, syms);
+
+        size_t seen = 0;
+        auto r = SplitModem::demodulate(syms, false, 512,
+            [&](std::vector<std::complex<float>>& p) { seen = p.size(); });
+        assert(r.complete);
+        const size_t tail = frame.size() - BOOTSTRAP_BYTES - POSTAMBLE_LEN;
+        assert(seen == symsForBytes(tail, ModCode::QPSK));
+        assert(seen == r.end_sym - (r.sync_sym + HEADER_SYMS));
+        // and it must be strictly less than the whole burst
+        assert(seen < syms.size());
+    }
+
+    std::printf("[splitmod] QPSK payload survives residual carrier drift\n");
+    {
+        // Reproduces the hardware failure mode in software: a small residual
+        // frequency error left after acquisition. QPSK decision boundaries
+        // are at 45 degrees, half of BPSK's, so it crosses first.
+        auto payload = makePayload(242);
+        Framer framer;
+        auto frame = framer.encode(payload, 0, ModCode::QPSK, BwCode::BW_1P25, 1, 77);
+        std::vector<std::complex<float>> syms;
+        SplitModem::modulate(frame, ModCode::QPSK, syms);
+
+        const double drift = 0.0008;            // rad/symbol, as measured on air
+        for (size_t i = 0; i < syms.size(); ++i) {
+            double a = drift * static_cast<double>(i);
+            syms[i] *= std::complex<float>(static_cast<float>(std::cos(a)),
+                                           static_cast<float>(std::sin(a)));
+        }
+
+        // Without tracking the frame is expected to fail; with a payload-only
+        // loop it must decode. Only the second is asserted -- the first is
+        // sensitive to exact frame length and is not the contract.
+        CostasLoop loop;
+        auto r = SplitModem::demodulate(syms, false, 512,
+            [&](std::vector<std::complex<float>>& p) {
+                loop.reset();
+                std::vector<std::complex<float>> out;
+                loop.process(p, out);
+                p.swap(out);
+            });
+        assert(r.complete);
+        assert(r.payload_mod == ModCode::QPSK);
+
+        Deframer df;
+        std::optional<DecodedFrame> out;
+        for (uint8_t b : r.bytes)
+            if (auto d = df.push(b, nullptr, nullptr)) { out = std::move(d); break; }
+        assert(out.has_value());
+        assert(out->payload == payload);
     }
 
     std::printf("[splitmod] OK\n");
