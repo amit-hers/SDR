@@ -220,10 +220,30 @@ int PlutoSDR::txPush(const int16_t* iq, size_t n_pairs) {
     size_t cap = static_cast<size_t>(end - p) / 2;
     size_t n   = (n_pairs < cap) ? n_pairs : cap;
     std::memcpy(p, iq, n * 2 * sizeof(int16_t));
-    // iio_buffer_push transmits the WHOLE allocated buffer regardless of how
-    // much we just wrote — zero the remainder so a short burst (the common
-    // case: one frame is far smaller than the buffer) is followed by
-    // silence, not whatever stale data was left over from the previous call.
+
+    // Transmit only what was actually written.
+    //
+    // iio_buffer_push() transmits the WHOLE allocated buffer no matter how
+    // little of it was filled, so a partly-filled push radiates the balance
+    // as zeros and burns the airtime anyway. Measured on the live link: 699
+    // pushes averaging 6470 useful samples into a 65536-sample buffer --
+    // 9.9% fill, so 90% of all transmitted airtime was zero padding, and the
+    // link was occupying 23% duty cycle to deliver 2.3% of real signal.
+    //
+    // push_partial() sends just `n` samples, making airtime proportional to
+    // data instead of to buffer size.
+    if (!tx_partial_unsupported_) {
+        ssize_t r = iio_buffer_push_partial(tx_buf_, n);
+        if (r >= 0) return static_cast<int>(n);
+        // Some backends/kernels reject partial pushes; fall back permanently.
+        tx_partial_unsupported_ = true;
+        std::cerr << "[sdr] WARNING: iio_buffer_push_partial unsupported on "
+                     "this transport (" << transport_ << "); falling back to "
+                     "full-buffer pushes. Expect most TX airtime to be spent "
+                     "radiating zero padding.\n";
+    }
+    // Fallback: zero the remainder so a short burst is followed by silence
+    // rather than stale samples from the previous call.
     if (n < cap)
         std::memset(p + n * 2, 0, (cap - n) * 2 * sizeof(int16_t));
     iio_buffer_push(tx_buf_);

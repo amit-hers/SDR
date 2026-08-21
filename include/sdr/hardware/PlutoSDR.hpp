@@ -39,10 +39,10 @@ public:
     void setManualGain(int db);                // used when mode == "manual"
 
     // Returns samples written/read (IQ pairs, each 2×int16).
-    // NOTE: txPush transmits the WHOLE tx buffer (zero-padding whatever the
-    // caller didn't fill), so airtime cost is txCapacity() regardless of
-    // n_pairs. Batch frames up to txCapacity() before pushing, or most of
-    // the air time is spent radiating zeros.
+    // txPush transmits exactly n_pairs samples (via iio_buffer_push_partial),
+    // so airtime is proportional to the data written rather than to the
+    // buffer size. Batching still helps -- each push has fixed overhead --
+    // but a short frame no longer costs a full buffer of airtime.
     int txPush(const int16_t* iq, size_t n_pairs);
 
     // Reads up to n_pairs samples, refilling the hardware buffer only when the
@@ -95,6 +95,8 @@ private:
     // buffer instead of discarding its tail.
     size_t       rx_avail_  {0};      // IQ pairs in the current refill
     size_t       rx_pos_    {0};      // IQ pairs already handed out
+    // Set once if the transport rejects a partial push, so we stop retrying.
+    bool         tx_partial_unsupported_ {false};
     std::string  transport_;   // libiio backend actually in use
 };
 

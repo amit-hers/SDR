@@ -114,6 +114,16 @@ private:
     static constexpr size_t SYNC_SEARCH_SYMS =
         PREAMBLE_START_SLACK + PREAMBLE_LEN * 8;
 
+    // How long staged frames may wait for company before being transmitted.
+    //
+    // Each push carries fixed per-transfer overhead, so batching several
+    // frames into one is worth a little delay -- but only a little, since
+    // this is added latency on every packet. The old code flushed on every
+    // idle TAP poll (once per millisecond), which meant almost no batching
+    // at all: measured 6470 samples per push into a 65536-sample buffer.
+    static constexpr int TX_AGGREGATE_MS = 2;
+    std::chrono::steady_clock::time_point stage_started_{};
+
     // Alignment attempts per located preamble. PreambleSync's correlation
     // peak used to land a sample or two off what TimingSync wanted, so each
     // burst was retried at base, base-1, base+1 -- and TimingSync, the most

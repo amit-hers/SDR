@@ -166,6 +166,7 @@ void BridgeMode::txThread() {
             radio_.txPush(iq_hw.data(), iq_shaped.size());
             return;
         }
+        if (stage.empty()) stage_started_ = std::chrono::steady_clock::now();
         stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
     };
 
@@ -196,12 +197,14 @@ void BridgeMode::txThread() {
             { StageProfiler::Scope sc(prof_, StageProfiler::TX_TAPR);
               n = tap_->read(pkt.data(), pkt.size()); }
             if (n <= 0) {
-                // TAP is non-blocking and currently empty: nothing more is
-                // coming right now, so send whatever is staged rather than
-                // holding it until the buffer happens to fill. Then idle
-                // briefly -- spinning here would burn a core that the
-                // capture and DSP threads need.
-                flush();
+                // TAP is empty right now. Do NOT flush immediately: this poll
+                // fires every millisecond, so flushing here pushed a barely
+                // filled buffer constantly. Give frames a short window to
+                // accumulate first, bounded so latency stays small.
+                if (!stage.empty() &&
+                    std::chrono::steady_clock::now() - stage_started_ >=
+                        std::chrono::milliseconds(TX_AGGREGATE_MS))
+                    flush();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
