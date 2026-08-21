@@ -20,6 +20,7 @@ add_library(sdr_core STATIC
     transport/TUNTAPDevice.cpp
     transport/UDPSocket.cpp
     stats/LinkStats.cpp
+    stats/StageProfiler.cpp
 )
 
 target_include_directories(sdr_core

@@ -101,6 +101,7 @@ Config Config::fromFile(const std::string& path) {
     c.arq_timeout_ms   = jsonInt   (json, "arq_timeout_ms",    c.arq_timeout_ms);
     c.arq_max_retries  = jsonInt   (json, "arq_max_retries",   c.arq_max_retries);
     c.stats_interval_ms= jsonInt   (json, "stats_interval_ms", c.stats_interval_ms);
+    c.spectrum_interval_ms = jsonInt(json, "spectrum_interval_ms", c.spectrum_interval_ms);
     c.monitor_port     = jsonInt   (json, "monitor_port",      c.monitor_port);
     c.node_id          = jsonStr   (json, "node_id",           c.node_id);
     c.scan_start_mhz   = jsonDouble(json, "scan_start_mhz",    c.scan_start_mhz);

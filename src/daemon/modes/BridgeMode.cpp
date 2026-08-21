@@ -55,6 +55,11 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
                                                           : "none")
               << "\n";
 
+    if (const char* e = std::getenv("SDR_PROFILE"); e && *e && std::string(e) != "0") {
+        prof_.enable(true);
+        std::cerr << "[sdr] stage profiling ENABLED\n";
+    }
+
     if (const char* path = std::getenv("SDR_FRAME_LOG"); path && *path)
         frame_log_.open(path, std::ios::trunc);
     if (const char* path = std::getenv("SDR_RAW_LOG"); path && *path)
@@ -74,6 +79,8 @@ BridgeMode::~BridgeMode() { stop(); }
 void BridgeMode::start() {
     if (running_.exchange(true)) return;
     stats_.uptime_s.store(0);
+    prof_t0_   = std::chrono::steady_clock::now();
+    prof_cpu0_ = StageProfiler::processCpuSeconds();
     tx_thread_      = std::thread(&BridgeMode::txThread,      this);
     capture_thread_ = std::thread(&BridgeMode::captureThread, this);
     rx_thread_      = std::thread(&BridgeMode::rxThread,      this);
@@ -87,6 +94,22 @@ void BridgeMode::stop() {
     if (capture_thread_.joinable()) capture_thread_.join();
     if (rx_thread_.joinable())      rx_thread_.join();
     if (stat_thread_.joinable())    stat_thread_.join();
+
+    if (prof_.enabled()) {
+        double wall = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - prof_t0_).count();
+        double cpu  = StageProfiler::processCpuSeconds() - prof_cpu0_;
+        std::cerr << prof_.report(wall)
+                  << "process CPU " << cpu << " s over " << wall << " s wall = "
+                  << (wall > 0 ? 100.0 * cpu / wall : 0.0) << "% of one core"
+                  << " | RSS " << StageProfiler::residentMb() << " MB\n"
+                  << "frames tx=" << stats_.frames_tx.load()
+                  << " rx_good=" << stats_.frames_rx_good.load()
+                  << " rx_bad=" << stats_.frames_rx_bad.load()
+                  << " bursts=" << stats_.bursts_detected.load()
+                  << " | bytes tx=" << stats_.bytes_tx.load()
+                  << " rx=" << stats_.bytes_rx.load() << "\n";
+    }
 }
 
 // ── TX thread ────────────────────────────────────────────────────────────────
@@ -106,7 +129,8 @@ void BridgeMode::txThread() {
 
     auto flush = [&]() {
         if (stage.empty()) return;
-        radio_.txPush(stage.data(), stage.size() / 2);
+        { StageProfiler::Scope sc(prof_, StageProfiler::TX_PUSH, stage.size() / 2);
+          radio_.txPush(stage.data(), stage.size() / 2); }
         stage.clear();
     };
 
@@ -114,14 +138,17 @@ void BridgeMode::txThread() {
         // Acquisition section in BPSK, payload in tx_mod_. Never modulate the
         // preamble with the payload scheme: the receiver correlates against a
         // fixed BPSK reference and would not see the burst at all.
-        SplitModem::modulate(frame, tx_mod_, iq_syms);
-        interp.process(iq_syms, iq_shaped);
+        { StageProfiler::Scope sc(prof_, StageProfiler::TX_MOD, frame.size() * 8);
+          SplitModem::modulate(frame, tx_mod_, iq_syms); }
+        { StageProfiler::Scope sc(prof_, StageProfiler::TX_RRC, iq_syms.size());
+          interp.process(iq_syms, iq_shaped); }
 
-        iq_hw.resize(iq_shaped.size() * 2);
-        for (size_t i = 0; i < iq_shaped.size(); ++i) {
-            iq_hw[i * 2]     = static_cast<int16_t>(iq_shaped[i].real() * 2047.f);
-            iq_hw[i * 2 + 1] = static_cast<int16_t>(iq_shaped[i].imag() * 2047.f);
-        }
+        { StageProfiler::Scope sc(prof_, StageProfiler::TX_CONV, iq_shaped.size());
+          iq_hw.resize(iq_shaped.size() * 2);
+          for (size_t i = 0; i < iq_shaped.size(); ++i) {
+              iq_hw[i * 2]     = static_cast<int16_t>(iq_shaped[i].real() * 2047.f);
+              iq_hw[i * 2 + 1] = static_cast<int16_t>(iq_shaped[i].imag() * 2047.f);
+          } }
 
         // Flush first if this frame wouldn't fit, then stage it. A frame
         // larger than the whole buffer is pushed on its own (txPush clamps).
@@ -156,7 +183,9 @@ void BridgeMode::txThread() {
         }
 
         if (!have_pending) {
-            ssize_t n = tap_->read(pkt.data(), pkt.size());
+            ssize_t n;
+            { StageProfiler::Scope sc(prof_, StageProfiler::TX_TAPR);
+              n = tap_->read(pkt.data(), pkt.size()); }
             if (n <= 0) {
                 // TAP is non-blocking and currently empty: nothing more is
                 // coming right now, so send whatever is staged rather than
@@ -174,6 +203,7 @@ void BridgeMode::txThread() {
             pending_seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
 
             Framer framer;
+            StageProfiler::Scope sc_fr(prof_, StageProfiler::TX_FRAME, (uint64_t)n);
             pending_frame = framer.encode(pkt.data(), static_cast<size_t>(n),
                                           flags, tx_mod_, mhzToBw(cfg_.bw_mhz),
                                           cfg_.node_id_u32, pending_seq,
@@ -206,7 +236,9 @@ void BridgeMode::captureThread() {
         std::vector<int16_t> buf(IQ_SAMPLES * 2);
 
         auto t0 = std::chrono::steady_clock::now();
-        int n = radio_.rxPull(buf.data(), IQ_SAMPLES);
+        int n;
+        { StageProfiler::Scope sc(prof_, StageProfiler::RX_PULL, IQ_SAMPLES);
+          n = radio_.rxPull(buf.data(), IQ_SAMPLES); }
         auto t1 = std::chrono::steady_clock::now();
 
         auto us = [](auto a, auto b) {
@@ -290,17 +322,31 @@ void BridgeMode::rxThread() {
         int n = static_cast<int>(iq_hw.size() / 2);
         if (n <= 0) continue;
 
-        iq_f.resize(static_cast<size_t>(n));
-        for (int i = 0; i < n; ++i)
-            iq_f[static_cast<size_t>(i)] = {
-                iq_hw[static_cast<size_t>(i) * 2]     / 2048.f,
-                iq_hw[static_cast<size_t>(i) * 2 + 1] / 2048.f };
+        {
+            StageProfiler::Scope sc(prof_, StageProfiler::RX_CONVERT, (uint64_t)n);
+            iq_f.resize(static_cast<size_t>(n));
+            for (int i = 0; i < n; ++i)
+                iq_f[static_cast<size_t>(i)] = {
+                    iq_hw[static_cast<size_t>(i) * 2]     / 2048.f,
+                    iq_hw[static_cast<size_t>(i) * 2 + 1] / 2048.f };
+        }
 
-        fft_->accumulate(iq_f.data(), n);
-        if (fft_->ready()) {
-            auto& spec = fft_->get();
-            for (size_t i = 0; i < spec.size(); ++i)
-                stats_.spectrum[i] = spec[i];
+        // Spectrum is display-only. Rate-limit it: measured at 73% of all
+        // process CPU when the link was idle, for something no decode path
+        // reads. spectrum_interval_ms = 0 turns it off completely.
+        if (cfg_.spectrum_interval_ms > 0) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_spectrum_ >=
+                std::chrono::milliseconds(cfg_.spectrum_interval_ms)) {
+                last_spectrum_ = now;
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_FFT, (uint64_t)n);
+                  fft_->accumulate(iq_f.data(), n); }
+                if (fft_->ready()) {
+                    auto& spec = fft_->get();
+                    for (size_t i = 0; i < spec.size(); ++i)
+                        stats_.spectrum[i] = spec[i];
+                }
+            }
         }
 
         // A real transmission is a sparse, short burst inside a mostly-
@@ -309,7 +355,9 @@ void BridgeMode::rxThread() {
         // silence), not the brief real signal. Detect and isolate the
         // actual burst window(s) first, and reset the chain fresh for each
         // one, instead of running it blindly across the whole batch.
-        auto windows = detector.detect(iq_f);
+        std::vector<BurstDetector::Window> windows;
+        { StageProfiler::Scope sc(prof_, StageProfiler::RX_DETECT, iq_f.size());
+          windows = detector.detect(iq_f); }
         if (windows.empty()) continue; // nothing here -- skip the DSP chain entirely
         stats_.bursts_detected.fetch_add(windows.size(), std::memory_order_relaxed);
 
@@ -334,7 +382,8 @@ void BridgeMode::rxThread() {
             // range) pull-in range. Collapse it to a small residual before
             // AGC/Costas. Cheaper and more accurate now that it runs on an
             // isolated window instead of the whole batch.
-            CoarseFreqCorrect::apply(window_buf, sample_rate);
+            { StageProfiler::Scope sc(prof_, StageProfiler::RX_CFO, window_buf.size());
+              CoarseFreqCorrect::apply(window_buf, sample_rate); }
 
             // TimingSync cannot reliably acquire symbol timing from an
             // arbitrary start offset: whether it locks is a brittle function
@@ -365,7 +414,9 @@ void BridgeMode::rxThread() {
                 // channel the window is large and this loop runs many times
                 // -- that alone starves the DSP thread. Frames follow each
                 // other closely, so the next preamble is near at hand.
-                auto match = psync.find(tail, preamble_search);
+                PreambleSync::Match match;
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_PSYNC, tail.size());
+                  match = psync.find(tail, preamble_search); }
                 if (!match.found) break;
 
                 const size_t base = search_from + static_cast<size_t>(match.offset);
@@ -388,10 +439,12 @@ void BridgeMode::rxThread() {
                 // adapted to the preceding silence or a failed alignment.
                 agc.reset(); tsync.reset(); costas.reset();
 
-                agc.process(offset_buf);                 // in-place
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_AGC, offset_buf.size());
+                  agc.process(offset_buf); }                 // in-place
                 // NOTE: TimingSync is itself an RRC matched-filter + decimator
                 // (symsync_crcf expects oversampled input); do not RRCDecim first.
-                tsync.process(offset_buf, iq_timed);      // matched filter + symbol timing
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_TSYNC, offset_buf.size());
+                  tsync.process(offset_buf, iq_timed); }     // matched filter + symbol timing
 
                 // Carrier recovery. The default is a least-squares estimate
                 // taken from the known BPSK acquisition symbols, then a single
@@ -406,6 +459,7 @@ void BridgeMode::rxThread() {
                 //
                 // $SDR_RX_CARRIER selects the method so the comparison stays
                 // reproducible on hardware: ls (default) | costas | none.
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_CARRIER, iq_timed.size());
                 switch (carrier_mode_) {
                     case CarrierMode::COSTAS:
                         costas.process(iq_timed, iq_syms);
@@ -437,6 +491,7 @@ void BridgeMode::rxThread() {
                         break;
                     }
                 }
+                }
 
                 float rssi = agc.rssi_dbm();
                 float snr  = rssi + 95.f;
@@ -448,8 +503,10 @@ void BridgeMode::rxThread() {
                 // Split demodulation: BPSK acquisition, then the payload in
                 // whatever scheme the header declares. The receiver holds no
                 // modulation state of its own.
-                auto sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
-                                                 SYNC_SEARCH_SYMS);
+                SplitModem::Result sm;
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
+                  sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
+                                              SYNC_SEARCH_SYMS); }
                 if (sm.header_ok) {
                     stats_.cur_mod.store(static_cast<int>(sm.payload_mod),
                                          std::memory_order_relaxed);
@@ -478,6 +535,7 @@ void BridgeMode::rxThread() {
                 // shared Deframer's state machine -- use a fresh one per
                 // alignment attempt.
                 Deframer deframer;
+                StageProfiler::Scope sc_df(prof_, StageProfiler::RX_DEFRAME, sm.bytes.size());
                 for (uint8_t byte : sm.bytes) {
                     auto result = deframer.push(byte, fec_.get(), aes_.get());
 
@@ -521,7 +579,9 @@ void BridgeMode::rxThread() {
                         frame_log_.flush();
                     }
 
-                    ssize_t w = tap_->write(result->payload.data(), result->payload.size());
+                    ssize_t w;
+                    { StageProfiler::Scope sc(prof_, StageProfiler::RX_TAPW, result->payload.size());
+                      w = tap_->write(result->payload.data(), result->payload.size()); }
                     if (w > 0) {
                         stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
                         stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),

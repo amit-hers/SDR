@@ -1,5 +1,6 @@
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/dsp/AGC.hpp"
+#include "sdr/dsp/CoarseFreqCorrect.hpp"
 #include "sdr/dsp/TimingSync.hpp"
 #include "sdr/dsp/CostasLoop.hpp"
 #include "sdr/dsp/FFTSpectrum.hpp"
@@ -49,6 +50,30 @@ static void test_agc_settles() {
     std::cout << "  [dsp] AGC converges (mag=" << mag << "): PASS\n";
 }
 
+// The coarse CFO search was rewritten to advance one complex phasor instead
+// of calling cos/sin per sample (it was 67% of one core). Pin the behaviour:
+// a known offset must still be recovered on the same search grid.
+static void test_coarse_cfo_recovers_offset() {
+    const double FS = 4e6;
+    for (double cfo : {0.0, 1000.0, -5000.0, 25000.0}) {
+        std::vector<std::complex<float>> buf(60000);
+        std::srand(7);
+        for (auto& s : buf)
+            s = {0.01f * ((std::rand() % 2000) / 1000.f - 1.f),
+                 0.01f * ((std::rand() % 2000) / 1000.f - 1.f)};
+        for (size_t i = 20000; i < 30000; ++i) {          // BPSK burst
+            float b = ((i / 4) % 2) ? 1.f : -1.f;
+            double ph = 2.0 * M_PI * cfo * static_cast<double>(i) / FS;
+            buf[i] += std::complex<float>(static_cast<float>(b * std::cos(ph)),
+                                          static_cast<float>(b * std::sin(ph)));
+        }
+        double est = sdr::CoarseFreqCorrect::apply(buf, FS);
+        // Grid resolution is ~(FS/N)*4/2 Hz, so allow a couple of bins.
+        assert(std::fabs(est - cfo) < 700.0);
+    }
+    std::cout << "  [dsp] CoarseFreqCorrect recovers known offsets: PASS\n";
+}
+
 static void test_fft_spectrum_length() {
     sdr::FFTSpectrum fft;
     for (int i = 0; i < sdr::FFTSpectrum::BINS; ++i)
@@ -80,6 +105,7 @@ void run_dsp() {
     std::cout << "[dsp tests]\n";
     test_rrc_shape();
     test_agc_settles();
+    test_coarse_cfo_recovers_offset();
     test_fft_spectrum_length();
     test_fft_dc_tone();
     std::cout << "[dsp tests] ALL PASS\n\n";

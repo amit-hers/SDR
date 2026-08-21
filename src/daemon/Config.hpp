@@ -68,6 +68,12 @@ struct Config {
 
     // ── System ───────────────────────────────────────────────────────────────
     int         stats_interval_ms {1000};
+    // Minimum gap between FFT spectrum updates. The spectrum feeds the
+    // monitor UI only -- it contributes nothing to decoding -- yet it ran on
+    // every capture buffer and was measured at 73% of all CPU while the
+    // receiver was hearing nothing but noise. A few updates per second is
+    // ample for a display. 0 disables the spectrum entirely.
+    int         spectrum_interval_ms {200};
     // Where the JSON stats snapshot is written. Configurable because two
     // nodes run on one host during link testing and would otherwise
     // overwrite each other's file.

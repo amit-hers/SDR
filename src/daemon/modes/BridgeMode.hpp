@@ -20,6 +20,8 @@
 #include "sdr/transport/TUNTAPDevice.hpp"
 #include "sdr/transport/SPSCRing.hpp"
 #include "sdr/stats/LinkStats.hpp"
+#include "sdr/stats/StageProfiler.hpp"
+#include <chrono>
 #include <thread>
 #include <atomic>
 #include <memory>
@@ -50,6 +52,12 @@ private:
     const Config& cfg_;
     PlutoSDR&     radio_;
     LinkStats     stats_;
+
+    // Stage-level CPU accounting, enabled by $SDR_PROFILE. Gates any
+    // optimisation work: without it, "where the CPU goes" is guesswork.
+    StageProfiler prof_;
+    std::chrono::steady_clock::time_point prof_t0_;
+    double        prof_cpu0_{0.0};
 
     std::unique_ptr<TUNTAPDevice>  tap_;
     std::unique_ptr<ReedSolomon>   fec_;
@@ -104,6 +112,9 @@ private:
     // found -- which looks exactly like a dead link.
     static constexpr size_t SYNC_SEARCH_SYMS =
         PREAMBLE_START_SLACK + PREAMBLE_LEN * 8;
+
+    // Throttles the display-only FFT spectrum -- see cfg_.spectrum_interval_ms.
+    std::chrono::steady_clock::time_point last_spectrum_{};
 
     std::atomic<bool>  running_{false};
     std::thread        tx_thread_;
