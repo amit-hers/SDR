@@ -59,6 +59,14 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
         frame_log_.open(path, std::ios::trunc);
     if (const char* path = std::getenv("SDR_RAW_LOG"); path && *path)
         raw_log_.open(path, std::ios::trunc);
+    if (const char* path = std::getenv("SDR_IQ_DUMP"); path && *path) {
+        size_t mb = 128;
+        if (const char* m = std::getenv("SDR_IQ_DUMP_MB"); m && *m)
+            mb = static_cast<size_t>(std::strtoul(m, nullptr, 10));
+        iq_dump_limit_ = mb * 1024 * 1024;
+        iq_dump_.open(path, std::ios::binary | std::ios::trunc);
+        std::cerr << "[sdr] IQ dump -> " << path << " (limit " << mb << " MB)\n";
+    }
 }
 
 BridgeMode::~BridgeMode() { stop(); }
@@ -211,6 +219,26 @@ void BridgeMode::captureThread() {
 
         if (n <= 0) continue;
         buf.resize(static_cast<size_t>(n) * 2);
+
+        // Diagnostic tap: write the raw capture stream to disk exactly as the
+        // DSP thread will see it. The radio is held exclusively by this
+        // process, so an external capture tool cannot observe a live link --
+        // this is the only way to compare what the daemon actually receives
+        // against what the offline analysis tools make of the same samples.
+        // Written from the capture thread and bounded, so a long run cannot
+        // fill the disk or stall reception.
+        if (iq_dump_.is_open() && iq_dumped_ < iq_dump_limit_) {
+            size_t want = std::min(buf.size() * sizeof(int16_t),
+                                   iq_dump_limit_ - iq_dumped_);
+            iq_dump_.write(reinterpret_cast<const char*>(buf.data()),
+                           static_cast<std::streamsize>(want));
+            iq_dumped_ += want;
+            if (iq_dumped_ >= iq_dump_limit_) {
+                iq_dump_.flush();
+                std::cerr << "[sdr] IQ dump complete (" << iq_dumped_ / (1024 * 1024)
+                          << " MB); further samples not recorded\n";
+            }
+        }
 
         {
             std::lock_guard<std::mutex> lk(capture_mu_);

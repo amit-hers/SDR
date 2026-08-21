@@ -134,6 +134,15 @@ private:
     // receiver actually produced regardless of whether a frame was found.
     std::ofstream raw_log_;
 
+    // Diagnostic: if $SDR_IQ_DUMP is set, the raw capture stream is written
+    // there (interleaved int16 I/Q, the same format the offline analysis
+    // tools read), bounded by $SDR_IQ_DUMP_MB. The radio is opened
+    // exclusively, so this is the only way to see what the receiver is
+    // actually being fed during a live two-node link.
+    std::ofstream iq_dump_;
+    size_t        iq_dumped_     {0};
+    size_t        iq_dump_limit_ {0};
+
     static constexpr size_t IQ_SAMPLES = 256 * 1024;
 
     // Cap on frames decoded from a single detected window. Under continuous
