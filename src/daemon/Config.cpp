@@ -83,6 +83,9 @@ Config Config::fromFile(const std::string& path) {
     c.tx_atten_db      = jsonDouble(json, "tx_atten_db",       c.tx_atten_db);
     c.gain_mode        = jsonStr   (json, "gain_mode",         c.gain_mode);
     c.tx_duty_max      = jsonDouble(json, "tx_duty_max",       c.tx_duty_max);
+    c.cfo_method       = jsonStr   (json, "cfo_method",        c.cfo_method);
+    c.rt_priority      = jsonInt   (json, "rt_priority",       c.rt_priority);
+    c.pin_cores        = jsonBool  (json, "pin_cores",         c.pin_cores);
     c.rx_bw_factor     = jsonDouble(json, "rx_bw_factor",      c.rx_bw_factor);
     c.rx_buffer_samples= jsonInt   (json, "rx_buffer_samples", c.rx_buffer_samples);
     c.rx_queue_depth   = jsonInt   (json, "rx_queue_depth",    c.rx_queue_depth);
@@ -154,6 +157,8 @@ void Config::validate() {
     if (rx_queue_depth > 256) rx_queue_depth = 256;
     if (rx_bw_factor < 1.0) rx_bw_factor = 1.0;
     if (rx_bw_factor > 3.0) rx_bw_factor = 3.0;
+    if (rt_priority < 0) rt_priority = 0;
+    if (rt_priority > 90) rt_priority = 90;
 
     // Above ~2 MHz the IQ stream exceeds what USB 2.0 sustains, so the
     // receiver spends most of its time not listening and silently misses

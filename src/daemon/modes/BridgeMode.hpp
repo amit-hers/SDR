@@ -50,6 +50,7 @@ private:
     void captureThread();   // does nothing but rxPull -> queue, so reception never stops
     void rxThread();        // consumes the queue and runs the DSP chain
     void statThread();
+    void applyRealtime(const char* who, int core);
 
     const Config& cfg_;
     PlutoSDR&     radio_;

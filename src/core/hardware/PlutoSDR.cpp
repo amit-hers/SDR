@@ -203,6 +203,19 @@ void PlutoSDR::setBandwidth(long long hz) {
             "PlutoSDR: setBandwidth(" + std::to_string(hz) +
             ") rejected by driver (rx=" + std::to_string(rx_ret) +
             " tx=" + std::to_string(tx_ret) + ")");
+
+    // The AD9361 driver quantises rf_bandwidth to what its filter chain can
+    // synthesise, so a write can succeed and still land somewhere else. Read
+    // it back: comparing filter settings across runs is meaningless if the
+    // requested value is not what the hardware actually used.
+    long long rx_now = 0, tx_now = 0;
+    iio_channel_attr_read_longlong(rx_ch_, "rf_bandwidth", &rx_now);
+    iio_channel_attr_read_longlong(tx_ch_, "rf_bandwidth", &tx_now);
+    std::cerr << "[sdr] rf_bandwidth requested " << hz
+              << " -> applied rx=" << rx_now << " tx=" << tx_now << "\n";
+    if (rx_now != hz || tx_now != hz)
+        std::cerr << "[sdr] NOTE: applied bandwidth differs from the request "
+                     "(driver quantisation)\n";
 }
 
 void PlutoSDR::setGainMode(const std::string& mode) {

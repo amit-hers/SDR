@@ -73,7 +73,19 @@ public:
     static double apply(std::vector<std::complex<float>>& buf, double sample_rate,
                         size_t est_begin, size_t est_end);
 
+    // Selects the estimator. GRID is the bounded correlation search (the
+    // original); FFT transforms the squared signal once and takes the peak
+    // bin, which is O(N log N) instead of O(grid_points * N).
+    enum class Method { GRID, FFT };
+    static void setMethod(Method m) { method_ = m; }
+    static Method method() { return method_; }
+
 private:
+    static Method method_;
+    static double estimateGrid(const std::vector<std::complex<double>>& sq,
+                               double eff_rate);
+    static double estimateFft(const std::vector<std::complex<double>>& sq,
+                              double eff_rate);
     static double applyImpl(std::vector<std::complex<float>>& buf, double sample_rate,
                             size_t est_begin, size_t est_end,
                             size_t max_samples, bool strided);

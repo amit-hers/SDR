@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>
+#include <pthread.h>
+#include <sched.h>
 
 namespace sdr {
 
@@ -150,6 +152,32 @@ void BridgeMode::stop() {
                   << "  (neighbours contributed "
                   << (tot ? 100.0 * double(h1 + h2) / double(tot) : 0.0)
                   << "% of decodes)\n";
+    }
+}
+
+// Applies SCHED_FIFO and (optionally) a core pin to the calling thread.
+// Failures are reported once and are not fatal: the daemon must still run
+// unprivileged, just without the jitter guarantees.
+void BridgeMode::applyRealtime(const char* who, int core) {
+    if (cfg_.rt_priority > 0) {
+        sched_param sp{};
+        sp.sched_priority = cfg_.rt_priority;
+        int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+        if (rc != 0)
+            std::cerr << "[sdr] " << who << ": SCHED_FIFO(" << cfg_.rt_priority
+                      << ") failed (" << rc << ") -- needs root/CAP_SYS_NICE; "
+                         "running at normal priority\n";
+        else
+            std::cerr << "[sdr] " << who << ": SCHED_FIFO priority "
+                      << cfg_.rt_priority << "\n";
+    }
+    if (cfg_.pin_cores && core >= 0) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(static_cast<unsigned>(core), &set);
+        int rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+        std::cerr << "[sdr] " << who << ": pinned to core " << core
+                  << (rc == 0 ? "" : " (FAILED)") << "\n";
     }
 }
 
@@ -385,6 +413,7 @@ void BridgeMode::txThread() {
 // Nothing but rxPull -> queue. Keeping this free of DSP work is what stops
 // the receiver going deaf mid-burst (see CAPTURE_QUEUE_MAX in the header).
 void BridgeMode::captureThread() {
+    applyRealtime("capture", 2);
     while (running_.load()) {
         std::vector<int16_t> buf(static_cast<size_t>(cfg_.rx_buffer_samples) * 2);
 
@@ -467,6 +496,7 @@ void BridgeMode::captureThread() {
 
 // ── RX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::rxThread() {
+    applyRealtime("dsp", 3);
     std::vector<int16_t>             iq_hw;
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
     AGC agc; TimingSync tsync; CostasLoop costas;

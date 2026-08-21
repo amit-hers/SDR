@@ -79,6 +79,25 @@ struct Config {
     // matched filter needs, too wide admits extra noise. Swept on hardware
     // because the AD9363's filter is not ideal and the best point is not
     // necessarily the theoretical one.
+    // Real-time scheduling for the capture and DSP threads.
+    //
+    // At 2 MHz the DSP thread uses only ~64% of its per-buffer budget on
+    // average, yet identical runs vary 3.9x in goodput and 62x in dropped
+    // buffers. That pattern -- marginal average load, wild variance -- is
+    // scheduling jitter, not throughput. SCHED_FIFO removes preemption by
+    // ordinary tasks; pinning keeps the capture and DSP threads off each
+    // other's core and preserves cache locality.
+    //
+    // 0 disables (ordinary SCHED_OTHER). Needs CAP_SYS_NICE / root.
+    int         rt_priority  {0};
+    bool        pin_cores    {false};
+
+    // "fft" (default) or "grid". The FFT estimator is O(N log N) against the
+    // grid search's O(points*N): measured 0.337 vs 5.463 ms per call, 16x,
+    // with worst-case error 71 Hz -- far inside what the downstream carrier
+    // recovery absorbs.
+    std::string cfo_method {"fft"};
+
     double      rx_bw_factor {1.4};
 
     int         rx_buffer_samples {262144};

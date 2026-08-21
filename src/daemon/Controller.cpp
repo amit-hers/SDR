@@ -1,5 +1,6 @@
 #include "Controller.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
+#include "sdr/dsp/CoarseFreqCorrect.hpp"
 #include "modes/BridgeMode.hpp"
 #include "modes/MeshMode.hpp"
 #include "modes/P2PMode.hpp"
@@ -45,6 +46,11 @@ Controller::Controller(Config cfg) : cfg_(std::move(cfg)) {
               << RRC_ROLLOFF << " occupies " << (1.0 + RRC_ROLLOFF)
               << "x; factor=" << cfg_.rx_bw_factor << ")\n";
     radio_->setGainMode(cfg_.gain_mode);
+
+    CoarseFreqCorrect::setMethod(cfg_.cfo_method == "grid"
+                                 ? CoarseFreqCorrect::Method::GRID
+                                 : CoarseFreqCorrect::Method::FFT);
+    std::cerr << "[sdr] coarse CFO estimator: " << cfg_.cfo_method << "\n";
 
     mode_     = makeMode();
     exporter_ = std::make_unique<StatsExporter>(mode_->stats(), cfg_.stats_interval_ms,
