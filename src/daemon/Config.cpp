@@ -82,6 +82,10 @@ Config Config::fromFile(const std::string& path) {
     c.bw_mhz           = jsonInt   (json, "bw_mhz",            c.bw_mhz);
     c.tx_atten_db      = jsonDouble(json, "tx_atten_db",       c.tx_atten_db);
     c.gain_mode        = jsonStr   (json, "gain_mode",         c.gain_mode);
+    c.tx_duty_max      = jsonDouble(json, "tx_duty_max",       c.tx_duty_max);
+    c.carrier_sense    = jsonBool  (json, "carrier_sense",     c.carrier_sense);
+    c.carrier_sense_hold_ms = jsonInt(json, "carrier_sense_hold_ms", c.carrier_sense_hold_ms);
+    c.carrier_sense_max_defer_ms = jsonInt(json, "carrier_sense_max_defer_ms", c.carrier_sense_max_defer_ms);
     c.modulation       = jsonStr   (json, "modulation",        c.modulation);
     c.stats_path       = jsonStr   (json, "stats_path",        c.stats_path);
     c.tap_iface        = jsonStr   (json, "tap_iface",         c.tap_iface);
@@ -139,6 +143,8 @@ void Config::validate() {
     if (arq_window < 1)     arq_window = 1;
     if (arq_timeout_ms < 1) arq_timeout_ms = 1;
     if (arq_max_retries < 0) arq_max_retries = 0;
+    if (tx_duty_max < 0.0) tx_duty_max = 0.0;
+    if (tx_duty_max > 1.0) tx_duty_max = 1.0;
 
     // Above ~2 MHz the IQ stream exceeds what USB 2.0 sustains, so the
     // receiver spends most of its time not listening and silently misses

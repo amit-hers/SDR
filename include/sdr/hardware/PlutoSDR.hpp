@@ -1,5 +1,6 @@
 #pragma once
 #include <iio.h>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <stdexcept>
@@ -60,6 +61,18 @@ public:
     // IQ pairs per tx buffer push -- the batching target for callers.
     size_t txCapacity() const { return tx_buf_sz_; }
 
+    // Transmit accounting. `pushed_pairs` is what the hardware actually
+    // accepted, which is the only number that corresponds to airtime.
+    struct TxStats {
+        uint64_t pushes{0};
+        uint64_t requested_pairs{0};
+        uint64_t pushed_pairs{0};
+        uint64_t short_pushes{0};
+    };
+    TxStats txStats() const {
+        return { tx_pushes_, tx_req_pairs_, tx_pushed_pairs_, tx_short_pushes_ };
+    }
+
     float      getRSSI()  const;
     float      getTemp()  const;
     DeviceInfo getInfo()  const;
@@ -97,6 +110,10 @@ private:
     size_t       rx_pos_    {0};      // IQ pairs already handed out
     // Set once if the transport rejects a partial push, so we stop retrying.
     bool         tx_partial_unsupported_ {false};
+    uint64_t     tx_pushes_        {0};
+    uint64_t     tx_req_pairs_     {0};
+    uint64_t     tx_pushed_pairs_  {0};
+    uint64_t     tx_short_pushes_  {0};
     std::string  transport_;   // libiio backend actually in use
 };
 

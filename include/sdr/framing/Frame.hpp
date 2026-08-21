@@ -40,6 +40,19 @@ static constexpr uint8_t FL_ENCRYPT = 0x01;
 static constexpr uint8_t FL_FEC     = 0x02;
 static constexpr uint8_t FL_ACK     = 0x04;
 static constexpr uint8_t FL_CTRL    = 0x08;
+// Payload holds several TAP packets, each preceded by a big-endian uint16
+// length. Acquisition (preamble+sync+header) costs 50 bytes per burst no
+// matter how little it carries, so one packet per burst wastes a large
+// fraction of the air: at a 242-byte payload only 77.6% of the frame is
+// user data, versus 94.7% at 1242 bytes. Aggregation buys that back.
+static constexpr uint8_t FL_AGGR    = 0x10;
+
+// Target size for an aggregated payload. Chosen from the measured airtime
+// table: efficiency is still climbing at 1242 B and every tracked carrier
+// variant decodes that size at 100% CRC, so there is no reliability reason
+// to stay small.
+static constexpr size_t AGGR_TARGET_BYTES = 1200;
+static constexpr size_t AGGR_LEN_PREFIX   = 2;
 
 // ── Modulation codes ──────────────────────────────────────────────────────
 enum class ModCode : uint8_t {

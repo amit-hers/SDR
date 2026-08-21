@@ -1,13 +1,14 @@
 {
   "mode": "bridge",
-  "pluto_ip": "169.254.12.40",
+  "pluto_ip": "169.254.8.172",
   "node_id": "0x00000001",
   "freq_tx_mhz": 434.0,
   "freq_rx_mhz": 439.0,
   "bw_mhz": 1,
   "tx_atten_db": 10.0,
-  "modulation": "BPSK",
+  "modulation": "QPSK",
   "tap_iface": "sdr0",
   "bridge_iface": "",
-  "stats_path": "/tmp/sdr_stats_A.json"
+  "stats_path": "/tmp/sdr_stats_A.json",
+  "tx_duty_max": 0.65
 }

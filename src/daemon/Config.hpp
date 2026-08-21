@@ -38,6 +38,34 @@ struct Config {
     // produce agreement. Defaults to BPSK, the validated configuration.
     std::string modulation  {"BPSK"};     // BPSK|QPSK (16QAM|64QAM untested on air)
 
+    // Fraction of the air this node may occupy with its own transmissions.
+    //
+    // The receiver acquires per burst: it needs quiet between bursts to
+    // estimate a noise floor and to tell where one burst ends. Measured on
+    // the live link, an unthrottled transmitter under load fills the channel
+    // to 100% occupancy, at which point burst detection degenerates and
+    // frame recovery collapses to ~3% -- while the same receiver recovers
+    // ~92% from captures at 57-63% occupancy. There is no medium access
+    // control here, so the limit has to be self-imposed.
+    //
+    // 0 (or >= 1) disables throttling.
+    double      tx_duty_max  {0.65};
+
+    // Defer transmitting while the peer is heard on the air.
+    //
+    // Per-node duty limiting alone does not work: two independently
+    // scheduled 65% transmitters still fill the channel, because each one's
+    // bursts land in the other's gaps (measured 96% occupancy with both
+    // active, 70% with one silenced -- and 13x the goodput in the latter).
+    // The gaps have to be ones both nodes agree on.
+    //
+    // This node receives on the frequency the peer transmits on, so its own
+    // energy detector is already a peer-activity sensor; nothing new has to
+    // be measured.
+    bool        carrier_sense       {true};
+    int         carrier_sense_hold_ms {25};   // stay off after hearing energy
+    int         carrier_sense_max_defer_ms {60}; // never starve the transmitter
+
     // ── Bridge / mesh interface ──────────────────────────────────────────────
     std::string tap_iface    {"sdr0"};
     std::string bridge_iface {"br0"};

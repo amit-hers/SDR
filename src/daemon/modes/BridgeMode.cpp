@@ -8,6 +8,7 @@
 #include <complex>
 #include <algorithm>
 #include <iostream>
+#include <cmath>
 
 namespace sdr {
 
@@ -48,6 +49,15 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
                        << "' is not one of ls|costas|ls+costas|none; "
                           "using ls+costas\n";
     }
+    std::cerr << "[sdr] carrier sense: "
+              << (cfg_.carrier_sense ? "ON" : "OFF")
+              << " (hold " << cfg_.carrier_sense_hold_ms << " ms, max defer "
+              << cfg_.carrier_sense_max_defer_ms << " ms)\n";
+    if (cfg_.tx_duty_max > 0.0 && cfg_.tx_duty_max < 1.0)
+        std::cerr << "[sdr] TX duty limit: " << (cfg_.tx_duty_max * 100.0)
+                  << "% (gaps inserted between bursts so the peer can acquire)\n";
+    else
+        std::cerr << "[sdr] TX duty limit: DISABLED -- the channel may saturate\n";
     std::cerr << "[sdr] RX carrier recovery: "
               << (carrier_mode_ == CarrierMode::LS        ? "LS (data-aided, open loop)"
                 : carrier_mode_ == CarrierMode::COSTAS    ? "Costas loop over whole burst"
@@ -109,6 +119,25 @@ void BridgeMode::stop() {
                   << " bursts=" << stats_.bursts_detected.load()
                   << " | bytes tx=" << stats_.bytes_tx.load()
                   << " rx=" << stats_.bytes_rx.load() << "\n";
+        auto tx = radio_.txStats();
+        std::cerr << "tx airtime=" << tx_air_seconds_.load() << " s over "
+                  << wall << " s wall = "
+                  << (wall > 0 ? 100.0 * tx_air_seconds_.load() / wall : 0.0)
+                  << "% duty (limit " << cfg_.tx_duty_max * 100.0 << "%)\n";
+        std::cerr << "tx pushes=" << tx.pushes
+                  << " requested=" << tx.requested_pairs
+                  << " pushed=" << tx.pushed_pairs
+                  << " (" << (tx.requested_pairs ? 100.0 * double(tx.pushed_pairs)
+                                                 / double(tx.requested_pairs) : 0.0)
+                  << "% of requested samples reached the radio)"
+                  << " short_pushes=" << tx.short_pushes
+                  << " | frames_tx(on air)=" << stats_.frames_tx.load()
+                  << " frames_lost_in_push=" << tx_frames_lost_.load() << "\n";
+        std::cerr << "carrier sense: defers=" << cs_defers_.load()
+                  << " forced_overrides=" << cs_overrides_.load() << "\n";
+        std::cerr << "aggregation rx: records=" << rx_records_.load()
+                  << " written=" << rx_rec_written_.load()
+                  << " write_failed=" << rx_rec_failed_.load() << "\n";
         uint64_t h0 = align_hits_[0].load(), h1 = align_hits_[1].load(),
                  h2 = align_hits_[2].load();
         uint64_t tot = h0 + h1 + h2;
@@ -136,10 +165,74 @@ void BridgeMode::txThread() {
     std::vector<int16_t> stage;
     stage.reserve(tx_capacity * 2);
 
-    auto flush = [&]() {
+    // Frames currently sitting in `stage`, i.e. modulated but not yet handed
+    // to the radio. They only count as transmitted once a push completes.
+    size_t staged_frames = 0;
+
+    // Transmit pacing. After sending `air` seconds of samples the node stays
+    // quiet until `air / duty` has elapsed, so a gap of air*(1/duty - 1)
+    // opens between bursts. Without this the transmitter fills the channel
+    // solid and the peer's burst detector has nothing to acquire in.
+    const double sample_rate_tx = static_cast<double>(cfg_.bw_mhz) * 4e6;
+    const double duty = (cfg_.tx_duty_max > 0.0 && cfg_.tx_duty_max < 1.0)
+                      ? cfg_.tx_duty_max : 1.0;
+    std::chrono::steady_clock::time_point next_tx_allowed{};
+
+    // `force` waits out the gap instead of deferring -- used when the stage
+    // is full and deferring would overflow it.
+    auto flush = [&](bool force) {
         if (stage.empty()) return;
-        { StageProfiler::Scope sc(prof_, StageProfiler::TX_PUSH, stage.size() / 2);
-          radio_.txPush(stage.data(), stage.size() / 2); }
+        auto now = std::chrono::steady_clock::now();
+        if (now < next_tx_allowed) {
+            if (!force) return;                 // try again on a later poll
+            std::this_thread::sleep_for(next_tx_allowed - now);
+        }
+
+        // Carrier sense: hold off while the peer is on the air, so the quiet
+        // periods are ones both ends agree on. Bounded, so a peer that never
+        // stops cannot starve this node entirely.
+        if (cfg_.carrier_sense) {
+            now = std::chrono::steady_clock::now();
+            const auto busy_until = std::chrono::steady_clock::time_point(
+                std::chrono::microseconds(
+                    peer_busy_until_us_.load(std::memory_order_relaxed)));
+            if (now < busy_until) {
+                if (!force) {
+                    cs_defers_.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                auto wait = busy_until - now;
+                const auto cap = std::chrono::milliseconds(cfg_.carrier_sense_max_defer_ms);
+                if (wait > cap) { wait = cap; cs_overrides_.fetch_add(1, std::memory_order_relaxed); }
+                std::this_thread::sleep_for(wait);
+            }
+        }
+
+        const size_t want = stage.size() / 2;
+        int pushed = 0;
+        { StageProfiler::Scope sc(prof_, StageProfiler::TX_PUSH, want);
+          pushed = radio_.txPush(stage.data(), want); }
+
+        const double air = static_cast<double>(want) / sample_rate_tx;
+        tx_air_seconds_.store(tx_air_seconds_.load(std::memory_order_relaxed) + air,
+                              std::memory_order_relaxed);
+        next_tx_allowed = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(air / duty - air));
+
+        // Credit frames to frames_tx only on a complete push. A short or
+        // failed push means some of these never reached the air, and
+        // counting them anyway is what made the transmitter look healthy
+        // while the channel was empty.
+        if (pushed >= 0 && static_cast<size_t>(pushed) == want) {
+            stats_.frames_tx.fetch_add(staged_frames, std::memory_order_relaxed);
+        } else {
+            tx_frames_lost_.fetch_add(staged_frames, std::memory_order_relaxed);
+            if (frame_log_.is_open())
+                frame_log_ << "[TX-SHORT] wanted=" << want << " pushed=" << pushed
+                           << " frames_dropped=" << staged_frames << "\n";
+        }
+        staged_frames = 0;
         stage.clear();
     };
 
@@ -161,11 +254,16 @@ void BridgeMode::txThread() {
 
         // Flush first if this frame wouldn't fit, then stage it. A frame
         // larger than the whole buffer is pushed on its own (txPush clamps).
-        if (stage.size() / 2 + iq_shaped.size() > tx_capacity) flush();
+        if (stage.size() / 2 + iq_shaped.size() > tx_capacity) flush(/*force=*/true);
         if (iq_shaped.size() > tx_capacity) {
-            radio_.txPush(iq_hw.data(), iq_shaped.size());
+            int pushed = radio_.txPush(iq_hw.data(), iq_shaped.size());
+            if (pushed >= 0 && static_cast<size_t>(pushed) == iq_shaped.size())
+                stats_.frames_tx.fetch_add(1, std::memory_order_relaxed);
+            else
+                tx_frames_lost_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
+        ++staged_frames;
         if (stage.empty()) stage_started_ = std::chrono::steady_clock::now();
         stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
     };
@@ -174,6 +272,42 @@ void BridgeMode::txThread() {
     uint32_t              pending_seq{0};
     size_t                pending_payload_len{0};
     std::vector<uint8_t>  pending_frame;
+
+    // Aggregation buffer: several TAP packets, each length-prefixed, packed
+    // into one RF payload. aggr_payload_bytes counts user bytes only, so the
+    // throughput statistic stays comparable with the unaggregated case.
+    std::vector<uint8_t>  aggr;
+    size_t                aggr_count{0};
+    size_t                aggr_payload_bytes{0};
+    std::chrono::steady_clock::time_point aggr_started{};
+    aggr.reserve(AGGR_TARGET_BYTES + MAX_PAYLOAD);
+
+    // Builds one RF frame out of everything currently aggregated.
+    auto sealAggregate = [&]() {
+        if (aggr.empty()) return;
+        uint8_t flags = FL_AGGR;
+        if (cfg_.fec)     flags |= FL_FEC;
+        if (cfg_.encrypt) flags |= FL_ENCRYPT;
+        pending_seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
+
+        Framer framer;
+        StageProfiler::Scope sc_fr(prof_, StageProfiler::TX_FRAME, aggr.size());
+        pending_frame = framer.encode(aggr.data(), aggr.size(),
+                                      flags, tx_mod_, mhzToBw(cfg_.bw_mhz),
+                                      cfg_.node_id_u32, pending_seq,
+                                      fec_.get(), aes_.get());
+        if (frame_log_.is_open())
+            frame_log_ << "[TX] seq=" << pending_seq
+                       << " payload=" << aggr.size()
+                       << " packets=" << aggr_count
+                       << " mod=" << modCodeName(tx_mod_)
+                       << " wire=" << pending_frame.size() << "B\n";
+        pending_payload_len = aggr_payload_bytes;
+        aggr.clear();
+        aggr_count = 0;
+        aggr_payload_bytes = 0;
+        have_pending = true;
+    };
 
     while (running_.load()) {
         if (cfg_.arq) {
@@ -197,43 +331,47 @@ void BridgeMode::txThread() {
             { StageProfiler::Scope sc(prof_, StageProfiler::TX_TAPR);
               n = tap_->read(pkt.data(), pkt.size()); }
             if (n <= 0) {
-                // TAP is empty right now. Do NOT flush immediately: this poll
-                // fires every millisecond, so flushing here pushed a barely
-                // filled buffer constantly. Give frames a short window to
-                // accumulate first, bounded so latency stays small.
-                if (!stage.empty() &&
-                    std::chrono::steady_clock::now() - stage_started_ >=
-                        std::chrono::milliseconds(TX_AGGREGATE_MS))
-                    flush();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
+                // TAP is empty right now. Seal whatever has accumulated once
+                // it has waited long enough, then push whatever is staged.
+                // Neither happens on every poll: this fires once a
+                // millisecond, and flushing that often is what kept the TX
+                // buffer ~10% full.
+                if (!aggr.empty() &&
+                    std::chrono::steady_clock::now() - aggr_started >=
+                        std::chrono::milliseconds(TX_AGGREGATE_MS)) {
+                    sealAggregate();
+                } else {
+                    if (!stage.empty() &&
+                        std::chrono::steady_clock::now() - stage_started_ >=
+                            std::chrono::milliseconds(TX_AGGREGATE_MS))
+                        flush(/*force=*/false);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+            } else {
+                // Append [u16 len][packet]. Seal first if this packet would
+                // push the aggregate past the target, so frames land near the
+                // efficient size rather than overshooting it.
+                const size_t need = aggregate::costOf(static_cast<size_t>(n));
+                if (!aggr.empty() && aggr.size() + need > AGGR_TARGET_BYTES)
+                    sealAggregate();
+
+                if (aggr.empty()) aggr_started = std::chrono::steady_clock::now();
+                aggregate::append(aggr, pkt.data(), static_cast<size_t>(n));
+                ++aggr_count;
+                aggr_payload_bytes += static_cast<size_t>(n);
+
+                // Full enough that another typical packet would not fit.
+                if (!have_pending && aggr.size() >= AGGR_TARGET_BYTES - 64)
+                    sealAggregate();
+                if (!have_pending) continue;   // keep filling
             }
-
-            uint8_t flags = 0;
-            if (cfg_.fec)     flags |= FL_FEC;
-            if (cfg_.encrypt) flags |= FL_ENCRYPT;
-            pending_seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
-
-            Framer framer;
-            StageProfiler::Scope sc_fr(prof_, StageProfiler::TX_FRAME, (uint64_t)n);
-            pending_frame = framer.encode(pkt.data(), static_cast<size_t>(n),
-                                          flags, tx_mod_, mhzToBw(cfg_.bw_mhz),
-                                          cfg_.node_id_u32, pending_seq,
-                                          fec_.get(), aes_.get());
-            if (frame_log_.is_open())
-                frame_log_ << "[TX] seq=" << pending_seq
-                           << " payload=" << n
-                           << " mod=" << modCodeName(tx_mod_)
-                           << " wire=" << pending_frame.size() << "B\n";
-            pending_payload_len = static_cast<size_t>(n);
-            have_pending = true;
         }
 
         if (cfg_.arq && !arq_->trySend(pending_seq, pending_frame))
             continue; // window full — hold the packet, retry next loop
 
-        transmit(pending_frame);
-        stats_.frames_tx.fetch_add(1, std::memory_order_relaxed);
+        transmit(pending_frame);   // stages only; frames_tx is credited on push
         stats_.bytes_tx .fetch_add(static_cast<uint64_t>(pending_payload_len),
                                    std::memory_order_relaxed);
         have_pending = false;
@@ -263,6 +401,33 @@ void BridgeMode::captureThread() {
 
         if (n <= 0) continue;
         buf.resize(static_cast<size_t>(n) * 2);
+
+        // Carrier sense: cheap strided energy estimate on the buffer we just
+        // pulled. This runs here, not in the DSP thread, so the answer is at
+        // most one buffer stale rather than a whole queue deep.
+        if (cfg_.carrier_sense) {
+            double acc = 0; size_t cnt = 0;
+            for (size_t i = 0; i + 1 < buf.size(); i += 128) {   // ~1 in 64 samples
+                double re = buf[i] / 2048.0, im = buf[i + 1] / 2048.0;
+                acc += std::sqrt(re * re + im * im);
+                ++cnt;
+            }
+            const double lvl = cnt ? acc / static_cast<double>(cnt) : 0.0;
+            // Track the quietest level seen, with slow upward relaxation so a
+            // permanently busy channel cannot pin the floor at a stale value.
+            if (cs_noise_floor_ <= 0.0)      cs_noise_floor_ = lvl;
+            else if (lvl < cs_noise_floor_)  cs_noise_floor_ = lvl;
+            else                             cs_noise_floor_ += (lvl - cs_noise_floor_) * 0.0005;
+
+            if (lvl > cs_noise_floor_ * 3.0) {
+                auto until = std::chrono::steady_clock::now() +
+                             std::chrono::milliseconds(cfg_.carrier_sense_hold_ms);
+                peer_busy_until_us_.store(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        until.time_since_epoch()).count(),
+                    std::memory_order_relaxed);
+            }
+        }
 
         // Diagnostic tap: write the raw capture stream to disk exactly as the
         // DSP thread will see it. The radio is held exclusively by this
@@ -623,9 +788,29 @@ void BridgeMode::rxThread() {
                         frame_log_.flush();
                     }
 
-                    ssize_t w;
+                    ssize_t w = 0;
                     { StageProfiler::Scope sc(prof_, StageProfiler::RX_TAPW, result->payload.size());
-                      w = tap_->write(result->payload.data(), result->payload.size()); }
+                      if (result->flags & FL_AGGR) {
+                          // Codec lives in framing/Aggregate.hpp and is
+                          // covered by tests; here we only care how many
+                          // records the frame held and how many of those the
+                          // TAP actually accepted. A short/failed write is
+                          // silent otherwise -- the frame still counts as
+                          // good because the first record landed.
+                          size_t ok = 0, failed = 0;
+                          size_t recs = aggregate::split(
+                              result->payload.data(), result->payload.size(),
+                              [&](const uint8_t* d, size_t l) {
+                                  ssize_t one = tap_->write(d, l);
+                                  if (one > 0) { w += one; ++ok; }
+                                  else         { ++failed; }
+                              });
+                          rx_records_.fetch_add(recs, std::memory_order_relaxed);
+                          rx_rec_written_.fetch_add(ok, std::memory_order_relaxed);
+                          rx_rec_failed_.fetch_add(failed, std::memory_order_relaxed);
+                      } else {
+                          w = tap_->write(result->payload.data(), result->payload.size());
+                      } }
                     if (w > 0) {
                         stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
                         stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),

@@ -234,7 +234,30 @@ int PlutoSDR::txPush(const int16_t* iq, size_t n_pairs) {
     // data instead of to buffer size.
     if (!tx_partial_unsupported_) {
         ssize_t r = iio_buffer_push_partial(tx_buf_, n);
-        if (r >= 0) return static_cast<int>(n);
+        if (r >= 0) {
+            // push_partial returns BYTES accepted, which is not necessarily
+            // what we asked for. Returning `n` unconditionally (as this did)
+            // reports a complete transmission whether or not one happened,
+            // so a systematically short push looks like a healthy link with
+            // an empty channel -- measured: 3128 frames "sent", 236 bursts
+            // actually on the air.
+            const size_t want_bytes = n * 2 * sizeof(int16_t);
+            const size_t got_bytes  = static_cast<size_t>(r);
+            const size_t got_pairs  = got_bytes / (2 * sizeof(int16_t));
+
+            ++tx_pushes_;
+            tx_req_pairs_    += n;
+            tx_pushed_pairs_ += got_pairs;
+            if (got_bytes != want_bytes) {
+                ++tx_short_pushes_;
+                if (tx_short_pushes_ <= 5 || (tx_short_pushes_ % 1000) == 0)
+                    std::cerr << "[sdr] short TX push #" << tx_short_pushes_
+                              << ": requested " << want_bytes << " B ("
+                              << n << " samples), accepted " << got_bytes
+                              << " B (" << got_pairs << " samples)\n";
+            }
+            return static_cast<int>(got_pairs);
+        }
         // Some backends/kernels reject partial pushes; fall back permanently.
         tx_partial_unsupported_ = true;
         std::cerr << "[sdr] WARNING: iio_buffer_push_partial unsupported on "

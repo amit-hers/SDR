@@ -5,6 +5,7 @@
 #include "sdr/framing/Framer.hpp"
 #include "sdr/framing/Deframer.hpp"
 #include "sdr/framing/ArqWindow.hpp"
+#include "sdr/framing/Aggregate.hpp"
 #include "sdr/modem/SplitModem.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/dsp/AGC.hpp"
@@ -134,6 +135,32 @@ private:
     // TimingSync and AGC call counts by ~30%. Set to 1; raise to 3 to restore
     // the sweep if a future change makes the peak less reliable again.
     static constexpr size_t ALIGN_OFFSETS = 1;
+
+    // Carrier sense. The capture thread publishes "peer heard until"; the TX
+    // thread defers while that is in the future. Set from the capture thread
+    // rather than the DSP thread because the DSP queue can be up to
+    // CAPTURE_QUEUE_MAX buffers deep, which would make the signal stale by
+    // several hundred milliseconds -- far longer than a burst.
+    std::atomic<int64_t>  peer_busy_until_us_{0};
+    std::atomic<uint64_t> cs_defers_{0};
+    std::atomic<uint64_t> cs_overrides_{0};
+    double                cs_noise_floor_{0.0};   // capture thread only
+
+    // Airtime actually radiated, for verifying the duty limiter.
+    std::atomic<double> tx_air_seconds_{0.0};
+
+    // Frames modulated and staged but lost to a short or failed hardware
+    // push -- i.e. never radiated. Distinct from frames_tx, which now counts
+    // only frames the radio actually accepted.
+    std::atomic<uint64_t> tx_frames_lost_{0};
+
+    // Aggregation receive accounting: records seen inside decoded frames vs
+    // records the TAP actually accepted. A decoded frame counts as good if
+    // any one record lands, so without these a silent per-record loss looks
+    // like a radio problem rather than a local write problem.
+    std::atomic<uint64_t> rx_records_{0};
+    std::atomic<uint64_t> rx_rec_written_{0};
+    std::atomic<uint64_t> rx_rec_failed_{0};
 
     // Which of the three alignment neighbours actually yielded the decode.
     // PreambleSync's peak was historically a sample or two off what
