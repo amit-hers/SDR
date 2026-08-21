@@ -62,6 +62,28 @@ struct Config {
     // This node receives on the frequency the peer transmits on, so its own
     // energy detector is already a peer-activity sensor; nothing new has to
     // be measured.
+    // Samples pulled per capture buffer, and how many may queue for the DSP
+    // thread.
+    //
+    // These set the real-time deadline: the DSP thread must finish a buffer
+    // within buffer_samples / sample_rate. At 2 MHz (8 MSPS) a 256K buffer is
+    // only 32.8 ms, against a measured ~21 ms of DSP work -- too little
+    // margin, and 28% of buffers were dropped. Smaller buffers spread the
+    // same work across more, shorter deadlines; a deeper queue absorbs
+    // bursts at the cost of latency.
+    //
+    // The trade-off is that a burst near the end of a buffer cannot be
+    // extended past it, so smaller buffers truncate more frames.
+    // Analog filter width as a multiple of the symbol rate. RRC at rolloff
+    // 0.35 occupies 1.35x in theory; too narrow clips the pulse skirts the
+    // matched filter needs, too wide admits extra noise. Swept on hardware
+    // because the AD9363's filter is not ideal and the best point is not
+    // necessarily the theoretical one.
+    double      rx_bw_factor {1.4};
+
+    int         rx_buffer_samples {262144};
+    int         rx_queue_depth    {8};
+
     bool        carrier_sense       {true};
     int         carrier_sense_hold_ms {25};   // stay off after hearing energy
     int         carrier_sense_max_defer_ms {60}; // never starve the transmitter

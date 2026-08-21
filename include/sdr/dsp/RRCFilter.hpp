@@ -7,6 +7,12 @@ namespace sdr {
 
 static constexpr int   RRC_SPS     = 4;
 static constexpr float RRC_ROLLOFF = 0.35f;
+
+// Fraction of the symbol rate the shaped signal actually occupies, with a
+// little margin above the theoretical (1 + rolloff). The radio's analog
+// filter must be set from this, not from the symbol rate: filtering at the
+// symbol rate removes the pulse skirts that the matched filter needs.
+static constexpr double RRC_OCCUPIED_BW_FACTOR = 1.4;
 static constexpr int   RRC_TAPS    = 32;
 
 class RRCInterp {

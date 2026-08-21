@@ -49,6 +49,9 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
                        << "' is not one of ls|costas|ls+costas|none; "
                           "using ls+costas\n";
     }
+    std::cerr << "[sdr] rx buffer " << cfg_.rx_buffer_samples << " samples ("
+              << (cfg_.rx_buffer_samples / (cfg_.bw_mhz * 4.0e6) * 1000.0)
+              << " ms deadline), queue depth " << cfg_.rx_queue_depth << "\n";
     std::cerr << "[sdr] carrier sense: "
               << (cfg_.carrier_sense ? "ON" : "OFF")
               << " (hold " << cfg_.carrier_sense_hold_ms << " ms, max defer "
@@ -383,12 +386,12 @@ void BridgeMode::txThread() {
 // the receiver going deaf mid-burst (see CAPTURE_QUEUE_MAX in the header).
 void BridgeMode::captureThread() {
     while (running_.load()) {
-        std::vector<int16_t> buf(IQ_SAMPLES * 2);
+        std::vector<int16_t> buf(static_cast<size_t>(cfg_.rx_buffer_samples) * 2);
 
         auto t0 = std::chrono::steady_clock::now();
         int n;
-        { StageProfiler::Scope sc(prof_, StageProfiler::RX_PULL, IQ_SAMPLES);
-          n = radio_.rxPull(buf.data(), IQ_SAMPLES); }
+        { StageProfiler::Scope sc(prof_, StageProfiler::RX_PULL, (uint64_t)cfg_.rx_buffer_samples);
+          n = radio_.rxPull(buf.data(), static_cast<size_t>(cfg_.rx_buffer_samples)); }
         auto t1 = std::chrono::steady_clock::now();
 
         auto us = [](auto a, auto b) {
@@ -451,7 +454,7 @@ void BridgeMode::captureThread() {
 
         {
             std::lock_guard<std::mutex> lk(capture_mu_);
-            if (capture_queue_.size() >= CAPTURE_QUEUE_MAX) {
+            if (capture_queue_.size() >= static_cast<size_t>(cfg_.rx_queue_depth)) {
                 capture_queue_.pop_front();          // DSP can't keep up
                 stats_.dropped.fetch_add(1, std::memory_order_relaxed);
             }

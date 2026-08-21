@@ -83,6 +83,9 @@ Config Config::fromFile(const std::string& path) {
     c.tx_atten_db      = jsonDouble(json, "tx_atten_db",       c.tx_atten_db);
     c.gain_mode        = jsonStr   (json, "gain_mode",         c.gain_mode);
     c.tx_duty_max      = jsonDouble(json, "tx_duty_max",       c.tx_duty_max);
+    c.rx_bw_factor     = jsonDouble(json, "rx_bw_factor",      c.rx_bw_factor);
+    c.rx_buffer_samples= jsonInt   (json, "rx_buffer_samples", c.rx_buffer_samples);
+    c.rx_queue_depth   = jsonInt   (json, "rx_queue_depth",    c.rx_queue_depth);
     c.carrier_sense    = jsonBool  (json, "carrier_sense",     c.carrier_sense);
     c.carrier_sense_hold_ms = jsonInt(json, "carrier_sense_hold_ms", c.carrier_sense_hold_ms);
     c.carrier_sense_max_defer_ms = jsonInt(json, "carrier_sense_max_defer_ms", c.carrier_sense_max_defer_ms);
@@ -145,6 +148,12 @@ void Config::validate() {
     if (arq_max_retries < 0) arq_max_retries = 0;
     if (tx_duty_max < 0.0) tx_duty_max = 0.0;
     if (tx_duty_max > 1.0) tx_duty_max = 1.0;
+    if (rx_buffer_samples < 4096)   rx_buffer_samples = 4096;
+    if (rx_buffer_samples > 262144) rx_buffer_samples = 262144;  // hardware buffer
+    if (rx_queue_depth < 2)   rx_queue_depth = 2;
+    if (rx_queue_depth > 256) rx_queue_depth = 256;
+    if (rx_bw_factor < 1.0) rx_bw_factor = 1.0;
+    if (rx_bw_factor > 3.0) rx_bw_factor = 3.0;
 
     // Above ~2 MHz the IQ stream exceeds what USB 2.0 sustains, so the
     // receiver spends most of its time not listening and silently misses

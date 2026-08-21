@@ -4,11 +4,13 @@
   "node_id": "0x00000002",
   "freq_tx_mhz": 439.0,
   "freq_rx_mhz": 434.0,
-  "bw_mhz": 1,
+  "bw_mhz": 2,
   "tx_atten_db": 89.0,
   "modulation": "QPSK",
   "tap_iface": "sdr1",
   "bridge_iface": "",
   "stats_path": "/tmp/sdr_stats_B.json",
-  "tx_duty_max": 0.65
+  "tx_duty_max": 0.65,
+  "rx_buffer_samples": 262144,
+  "rx_queue_depth": 8
 }

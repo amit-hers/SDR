@@ -1,4 +1,5 @@
 #include "Controller.hpp"
+#include "sdr/dsp/RRCFilter.hpp"
 #include "modes/BridgeMode.hpp"
 #include "modes/MeshMode.hpp"
 #include "modes/P2PMode.hpp"
@@ -26,8 +27,23 @@ Controller::Controller(Config cfg) : cfg_(std::move(cfg)) {
     radio_->setTxFrequency(cfg_.freq_tx_mhz * 1e6);
     radio_->setRxFrequency(cfg_.freq_rx_mhz * 1e6);
     radio_->setTxAttenuation(cfg_.tx_atten_db);
-    radio_->setBandwidth(static_cast<long long>(cfg_.bw_mhz) * 1'000'000LL);
-    radio_->setSampleRate(static_cast<long long>(cfg_.bw_mhz) * 1'000'000LL * 4);
+    // The analog filter has to pass the *occupied* bandwidth, not the symbol
+    // rate. Root-raised-cosine shaping at rolloff 0.35 spreads the signal
+    // over 1.35x the symbol rate, so setting the filter to the symbol rate
+    // (as this did) clips roughly a quarter of the spectrum -- the pulse
+    // skirts, which is exactly the energy the matched filter needs to
+    // reconstruct symbol shape. 1.4x leaves a little margin above 1.35.
+    //
+    // cfg_.bw_mhz is the symbol rate in MHz; the sample rate is RRC_SPS(4)
+    // times that.
+    const double symbol_rate = static_cast<double>(cfg_.bw_mhz) * 1e6;
+    const double analog_bw   = symbol_rate * cfg_.rx_bw_factor;
+    radio_->setBandwidth(static_cast<long long>(analog_bw));
+    radio_->setSampleRate(static_cast<long long>(symbol_rate) * 4);
+    std::cerr << "[sdr] symbol rate " << symbol_rate / 1e6 << " MHz -> analog "
+                 "bandwidth " << analog_bw / 1e6 << " MHz (RRC rolloff "
+              << RRC_ROLLOFF << " occupies " << (1.0 + RRC_ROLLOFF)
+              << "x; factor=" << cfg_.rx_bw_factor << ")\n";
     radio_->setGainMode(cfg_.gain_mode);
 
     mode_     = makeMode();
