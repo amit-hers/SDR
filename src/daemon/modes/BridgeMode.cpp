@@ -382,8 +382,19 @@ void BridgeMode::rxThread() {
             // range) pull-in range. Collapse it to a small residual before
             // AGC/Costas. Cheaper and more accurate now that it runs on an
             // isolated window instead of the whole batch.
-            { StageProfiler::Scope sc(prof_, StageProfiler::RX_CFO, window_buf.size());
-              CoarseFreqCorrect::apply(window_buf, sample_rate); }
+            // Estimate from the region the detector actually flagged as
+            // energy, but correct the whole extended window. The extension
+            // exists so a clipped detection cannot truncate a real frame --
+            // those extra samples are almost all noise and only dilute the
+            // estimate, while costing search time proportional to their
+            // number.
+            const size_t est_lo = 0;
+            const size_t est_hi = std::min(window_buf.size(),
+                                           (win.end > win.start)
+                                               ? (win.end - win.start)
+                                               : window_buf.size());
+            { StageProfiler::Scope sc(prof_, StageProfiler::RX_CFO, est_hi - est_lo);
+              CoarseFreqCorrect::apply(window_buf, sample_rate, est_lo, est_hi); }
 
             // TimingSync cannot reliably acquire symbol timing from an
             // arbitrary start offset: whether it locks is a brittle function
