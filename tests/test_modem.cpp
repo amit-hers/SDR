@@ -15,6 +15,13 @@ static void test_mod_demod(sdr::ModScheme scheme, const char* name) {
 
     std::vector<uint8_t> rx;
     modem.demodulate(iq.data(), static_cast<int>(iq.size()), rx);
+    // When bits/symbol does not divide the bit count, the last symbol carries
+    // padding bits that demodulate into a trailing byte the transmitter never
+    // sent -- 64 bits at 6 bits/symbol is 11 symbols, i.e. 66 bits. Callers
+    // trim to the length they framed (SplitModem sizes the payload section
+    // from the header), so compare on that same basis.
+    assert(rx.size() >= tx.size());
+    rx.resize(tx.size());
     assert(rx == tx);
     std::cout << "  [modem] " << name << " roundtrip: PASS\n";
 }

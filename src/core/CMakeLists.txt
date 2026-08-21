@@ -2,6 +2,7 @@ add_library(sdr_core STATIC
     hardware/PlutoSDR.cpp
     modem/Modem.cpp
     modem/AdaptiveModem.cpp
+    modem/SplitModem.cpp
     framing/Framer.cpp
     framing/Deframer.cpp
     framing/ArqWindow.cpp

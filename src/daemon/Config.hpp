@@ -1,4 +1,5 @@
 #pragma once
+#include "sdr/framing/Frame.hpp"
 #include <string>
 #include <array>
 #include <cstdint>
@@ -27,7 +28,15 @@ struct Config {
     int         bw_mhz      {1};          // 1|2|5|10|20 (1-2 recommended)
     double      tx_atten_db {10.0};       // 0-89 dB, 0.25dB steps
     std::string gain_mode   {"fast_attack"};
-    std::string modulation  {"AUTO"};     // AUTO|BPSK|QPSK|16QAM|64QAM
+    // Payload modulation for TRANSMIT only; the receive side always takes the
+    // payload scheme from the frame header. Acquisition (preamble/sync/header)
+    // is fixed BPSK regardless -- see Frame.hpp.
+    //
+    // "AUTO" is NOT a wire scheme and is currently refused: link adaptation
+    // needs an explicit negotiation between the two nodes, and the previous
+    // implementation (each node picking from its own local RSSI) could not
+    // produce agreement. Defaults to BPSK, the validated configuration.
+    std::string modulation  {"BPSK"};     // BPSK|QPSK (16QAM|64QAM untested on air)
 
     // ── Bridge / mesh interface ──────────────────────────────────────────────
     std::string tap_iface    {"sdr0"};
@@ -59,6 +68,10 @@ struct Config {
 
     // ── System ───────────────────────────────────────────────────────────────
     int         stats_interval_ms {1000};
+    // Where the JSON stats snapshot is written. Configurable because two
+    // nodes run on one host during link testing and would otherwise
+    // overwrite each other's file.
+    std::string stats_path        {"/tmp/sdr_stats.json"};
     int         monitor_port      {8080};
     std::string node_id           {"0x00000001"};
 
@@ -76,6 +89,10 @@ struct Config {
 
     // Parse / validate fields. Throws std::invalid_argument on bad values.
     void validate();
+
+    // Transmit payload modulation, resolved from `modulation`. Always a wire
+    // scheme -- validate() rejects or downgrades anything else first.
+    ModCode txModCode() const;
 };
 
 } // namespace sdr

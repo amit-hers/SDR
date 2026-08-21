@@ -32,9 +32,17 @@ static void test_rrc_shape() {
 
 static void test_agc_settles() {
     sdr::AGC agc;
-    std::vector<std::complex<float>> sig(512, {0.5f, 0.0f});
-    for (int iter = 0; iter < 20; ++iter)
+    std::vector<std::complex<float>> sig;
+
+    // Re-prime the buffer each pass. AGC::process works in place, so reusing
+    // the previous output as the next input feeds the loop its own gain --
+    // the level then compounds instead of settling (measured: it reaches
+    // ~20x by the 20th pass). A receiver always hands the AGC fresh samples,
+    // so that is what convergence has to be measured against.
+    for (int iter = 0; iter < 20; ++iter) {
+        sig.assign(512, {0.5f, 0.0f});
         agc.process(sig);
+    }
 
     float mag = std::abs(sig[256]);
     assert(mag > 0.5f && mag < 2.0f);

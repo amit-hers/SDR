@@ -4,7 +4,8 @@
 #include "sdr/hardware/PlutoSDR.hpp"
 #include "sdr/framing/Framer.hpp"
 #include "sdr/framing/Deframer.hpp"
-#include "sdr/modem/AdaptiveModem.hpp"
+#include "sdr/modem/SplitModem.hpp"
+#include "sdr/dsp/DataAidedSync.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/dsp/AGC.hpp"
 #include "sdr/dsp/TimingSync.hpp"
@@ -40,7 +41,7 @@ private:
     LinkStats     stats_;
 
     std::unique_ptr<TUNTAPDevice>  tun_;
-    std::unique_ptr<AdaptiveModem> amod_;
+    ModCode tx_mod_{ModCode::BPSK};   // TX only; RX follows each frame header
     std::unique_ptr<ReedSolomon>   fec_;
     std::unique_ptr<AESCipher>     aes_;
 

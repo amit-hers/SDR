@@ -10,7 +10,7 @@ MeshMode::MeshMode(const Config& cfg, PlutoSDR& radio)
 {
     tun_  = TUNTAPDevice::create(cfg_.tap_iface, /*tap=*/false);
     tun_->setMTU(cfg_.tap_mtu);
-    amod_ = std::make_unique<AdaptiveModem>();
+    tx_mod_ = cfg_.txModCode();
     if (cfg_.fec)     fec_ = std::make_unique<ReedSolomon>();
     if (cfg_.encrypt) aes_ = std::make_unique<AESCipher>(cfg_.aes_key_bytes.data());
 }
@@ -43,14 +43,16 @@ void MeshMode::txThread() {
         if (cfg_.fec)     flags |= FL_FEC;
         if (cfg_.encrypt) flags |= FL_ENCRYPT;
         uint32_t seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
-        ModCode  mod = amod_->currentModCode();
 
         Framer framer;
         auto frame = framer.encode(pkt.data(), static_cast<size_t>(n),
-                                   flags, mod, mhzToBw(cfg_.bw_mhz),
+                                   flags, tx_mod_, mhzToBw(cfg_.bw_mhz),
                                    cfg_.node_id_u32, seq, fec_.get(), aes_.get());
 
-        amod_->modulate(frame.data(), static_cast<int>(frame.size()), iq_syms);
+        // Acquisition in BPSK, payload in tx_mod_ -- see BridgeMode and
+        // Frame.hpp. Modulating the preamble with the payload scheme makes
+        // the burst invisible to the receiver's BPSK correlator.
+        SplitModem::modulate(frame, tx_mod_, iq_syms);
         interp.process(iq_syms, iq_shaped);
 
         iq_hw.resize(iq_shaped.size() * 2);
@@ -67,7 +69,7 @@ void MeshMode::txThread() {
 void MeshMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
-    AGC agc; TimingSync tsync; CostasLoop costas;
+    AGC agc; TimingSync tsync; CostasLoop costas; DataAidedSync dasync;
     BurstDetector detector;
     const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
 
@@ -109,16 +111,24 @@ void MeshMode::rxThread() {
                 // NOTE: TimingSync is itself an RRC matched-filter + decimator
                 // (symsync_crcf expects oversampled input); do not RRCDecim first.
                 tsync.process(offset_buf, iq_timed);
-                costas.process(iq_timed, iq_syms);
 
-                std::vector<uint8_t> bits;
-                amod_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
-                amod_->updateSNR(agc.rssi_dbm() + 95.f);
+                // Least-squares carrier estimate from the known BPSK
+                // acquisition symbols, then one open-loop derotation. See
+                // BridgeMode::rxThread for the measurements behind this.
+                iq_syms = iq_timed;
+                auto est = dasync.estimate(iq_timed, 64);
+                if (est.ok) DataAidedSync::derotate(iq_syms, est);
+
+                // Payload modulation comes from the frame header, never from
+                // local state.
+                auto sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
+                                                 PREAMBLE_LEN * 8 + 128);
+                if (!sm.complete) continue;
 
                 // Fresh per attempt: a misaligned attempt's garbage would
                 // poison a shared Deframer's state machine.
                 Deframer deframer;
-                for (uint8_t byte : bits) {
+                for (uint8_t byte : sm.bytes) {
                     auto res = deframer.push(byte, fec_.get(), aes_.get());
                     if (!res) continue;
                     decoded_any = true;

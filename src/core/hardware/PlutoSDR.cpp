@@ -1,3 +1,4 @@
+#include <iostream>
 #include "sdr/hardware/PlutoSDR.hpp"
 #include <stdexcept>
 #include <cstring>
@@ -177,6 +178,21 @@ void PlutoSDR::setSampleRate(long long sps) {
             " tx=" + std::to_string(tx_ret) +
             ") -- requested rate likely exceeds this board's digital "
             "interface ceiling (CMOS-mode boards: ~30.72 MSPS, not 61.44)");
+
+    // A write can succeed and still land on a different rate: the driver
+    // quantises to what the clock tree can synthesise. RRC_SPS assumes the
+    // sample rate is exactly 4x the symbol rate, so report the applied value
+    // and complain if it is not what we asked for.
+    long long rx_now = 0, tx_now = 0;
+    iio_channel_attr_read_longlong(rx_ch_, "sampling_frequency", &rx_now);
+    iio_channel_attr_read_longlong(tx_ch_, "sampling_frequency", &tx_now);
+    std::cerr << "[sdr] sample rate requested " << sps
+              << " -> applied rx=" << rx_now << " tx=" << tx_now << "\n";
+    if (rx_now != sps || tx_now != sps)
+        std::cerr << "[sdr] WARNING: applied sample rate differs from the "
+                     "request; the DSP chain assumes exactly "
+                  << sps << " (RRC_SPS oversampling), so timing recovery will "
+                     "be off by the ratio.\n";
 }
 
 void PlutoSDR::setBandwidth(long long hz) {

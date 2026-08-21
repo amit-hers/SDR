@@ -7,21 +7,11 @@
 #include <vector>
 #include <complex>
 #include <algorithm>
+#include <iostream>
 
 namespace sdr {
 
 static constexpr int STAT_TICK = 100;   // ms
-
-// "AUTO" (default) keeps SNR-based auto-switching; anything else locks the
-// modem to that fixed scheme (e.g. to test a link whose frequency offset is
-// too wide for high-order QAM to hold lock).
-static std::optional<ModScheme> parseForcedModulation(const std::string& s) {
-    if (s == "BPSK")  return ModScheme::BPSK;
-    if (s == "QPSK")  return ModScheme::QPSK;
-    if (s == "16QAM") return ModScheme::QAM16;
-    if (s == "64QAM") return ModScheme::QAM64;
-    return std::nullopt;   // "AUTO" or unrecognized
-}
 
 BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
     : cfg_(cfg), radio_(radio)
@@ -31,7 +21,12 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
     if (!cfg_.bridge_iface.empty())
         tap_->addToBridge(cfg_.bridge_iface, cfg_.lan_iface);
 
-    amod_ = std::make_unique<AdaptiveModem>(parseForcedModulation(cfg_.modulation));
+    tx_mod_ = cfg_.txModCode();
+    std::cerr << "[sdr] TX payload modulation: " << modCodeName(tx_mod_)
+              << " (" << modCodeBits(tx_mod_) << " bit/symbol); "
+                 "acquisition is always BPSK. RX payload modulation is taken "
+                 "from each frame header.\n";
+
     if (cfg_.fec)     fec_ = std::make_unique<ReedSolomon>();
     if (cfg_.encrypt) aes_ = std::make_unique<AESCipher>(cfg_.aes_key_bytes.data());
     fft_ = std::make_unique<FFTSpectrum>();
@@ -42,6 +37,23 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
         acfg.max_retries = cfg_.arq_max_retries;
         arq_ = std::make_unique<ArqWindow>(acfg);
     }
+
+    if (const char* m = std::getenv("SDR_RX_CARRIER"); m && *m) {
+        std::string s(m);
+        if      (s == "ls")        carrier_mode_ = CarrierMode::LS;
+        else if (s == "costas")    carrier_mode_ = CarrierMode::COSTAS;
+        else if (s == "ls+costas") carrier_mode_ = CarrierMode::LS_COSTAS;
+        else if (s == "none")      carrier_mode_ = CarrierMode::NONE;
+        else std::cerr << "[sdr] WARNING: SDR_RX_CARRIER='" << s
+                       << "' is not one of ls|costas|ls+costas|none; "
+                          "using ls+costas\n";
+    }
+    std::cerr << "[sdr] RX carrier recovery: "
+              << (carrier_mode_ == CarrierMode::LS        ? "LS (data-aided, open loop)"
+                : carrier_mode_ == CarrierMode::COSTAS    ? "Costas loop (cold start)"
+                : carrier_mode_ == CarrierMode::LS_COSTAS ? "Costas loop seeded by LS estimate"
+                                                          : "none")
+              << "\n";
 
     if (const char* path = std::getenv("SDR_FRAME_LOG"); path && *path)
         frame_log_.open(path, std::ios::trunc);
@@ -91,7 +103,10 @@ void BridgeMode::txThread() {
     };
 
     auto transmit = [&](const std::vector<uint8_t>& frame) {
-        amod_->modulate(frame.data(), static_cast<int>(frame.size()), iq_syms);
+        // Acquisition section in BPSK, payload in tx_mod_. Never modulate the
+        // preamble with the payload scheme: the receiver correlates against a
+        // fixed BPSK reference and would not see the burst at all.
+        SplitModem::modulate(frame, tx_mod_, iq_syms);
         interp.process(iq_syms, iq_shaped);
 
         iq_hw.resize(iq_shaped.size() * 2);
@@ -149,13 +164,17 @@ void BridgeMode::txThread() {
             if (cfg_.fec)     flags |= FL_FEC;
             if (cfg_.encrypt) flags |= FL_ENCRYPT;
             pending_seq = tx_seq_.fetch_add(1, std::memory_order_relaxed);
-            ModCode mod = amod_->currentModCode();
 
             Framer framer;
             pending_frame = framer.encode(pkt.data(), static_cast<size_t>(n),
-                                          flags, mod, mhzToBw(cfg_.bw_mhz),
+                                          flags, tx_mod_, mhzToBw(cfg_.bw_mhz),
                                           cfg_.node_id_u32, pending_seq,
                                           fec_.get(), aes_.get());
+            if (frame_log_.is_open())
+                frame_log_ << "[TX] seq=" << pending_seq
+                           << " payload=" << n
+                           << " mod=" << modCodeName(tx_mod_)
+                           << " wire=" << pending_frame.size() << "B\n";
             pending_payload_len = static_cast<size_t>(n);
             have_pending = true;
         }
@@ -218,7 +237,8 @@ void BridgeMode::rxThread() {
     bcfg.merge_gap   = static_cast<size_t>(cfg_.burst_merge_gap);
     bcfg.noise_quantile = static_cast<float>(cfg_.burst_noise_q);
     BurstDetector detector(bcfg);
-    PreambleSync psync(RRC_SPS);
+    PreambleSync  psync(RRC_SPS);
+    DataAidedSync dasync;
     uint64_t logged_crc_errors = 0;
     const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
     // The detector keeps burst_margin samples of context before the burst,
@@ -344,43 +364,110 @@ void BridgeMode::rxThread() {
                 // NOTE: TimingSync is itself an RRC matched-filter + decimator
                 // (symsync_crcf expects oversampled input); do not RRCDecim first.
                 tsync.process(offset_buf, iq_timed);      // matched filter + symbol timing
-                costas.process(iq_timed, iq_syms);        // carrier recovery
 
-                std::vector<uint8_t> bits;
-                amod_->demodulate(iq_syms.data(), static_cast<int>(iq_syms.size()), bits);
-
-                if (raw_log_.is_open() && !bits.empty()) {
-                    static char hex[] = "0123456789abcdef";
-                    std::string line;
-                    line.reserve(bits.size() * 3);
-                    for (uint8_t b : bits) {
-                        line += hex[b >> 4]; line += hex[b & 0xF]; line += ' ';
+                // Carrier recovery. The default is a least-squares estimate
+                // taken from the known BPSK acquisition symbols, then a single
+                // open-loop derotation of the whole burst.
+                //
+                // A Costas loop has almost nothing to lock onto here: the
+                // preamble is 0xAA, a perfectly alternating pattern, which in
+                // BPSK is a suppressed carrier. Measured over a 472-frame
+                // capture, correcting the measured phase ramp instead lifted
+                // CRC-good from ~25% to ~65-77%, and cut mean corrupted
+                // payload bytes from 64.5 to 4.9.
+                //
+                // $SDR_RX_CARRIER selects the method so the comparison stays
+                // reproducible on hardware: ls (default) | costas | none.
+                switch (carrier_mode_) {
+                    case CarrierMode::COSTAS:
+                        costas.process(iq_timed, iq_syms);
+                        break;
+                    case CarrierMode::NONE:
+                        iq_syms = iq_timed;
+                        break;
+                    case CarrierMode::LS: {
+                        iq_syms = iq_timed;
+                        auto est = dasync.estimate(iq_timed, DAS_SEARCH_SYMS);
+                        // Deliberately open loop: no decision-directed
+                        // tracking, so the gain from the estimate alone stays
+                        // measurable in isolation.
+                        if (est.ok) DataAidedSync::derotate(iq_syms, est);
+                        break;
                     }
-                    raw_log_ << line << "\n";
-                    raw_log_.flush();
+                    case CarrierMode::LS_COSTAS: {
+                        // Seed the loop with the data-aided estimate instead
+                        // of starting it cold. The LS fit supplies absolute
+                        // phase and residual frequency measured on symbols the
+                        // receiver already knows; the loop then only has to
+                        // track what the open-loop extrapolation leaves behind,
+                        // which is where the residual errors were concentrated
+                        // (measured: 0% wrong in the first three eighths of the
+                        // payload, 10.6% in the last).
+                        auto est = dasync.estimate(iq_timed, DAS_SEARCH_SYMS);
+                        if (est.ok) costas.seed(est.phase, est.freq_per_sym);
+                        costas.process(iq_timed, iq_syms);
+                        break;
+                    }
                 }
 
                 float rssi = agc.rssi_dbm();
                 float snr  = rssi + 95.f;
                 stats_.rssi_dbm.store(rssi, std::memory_order_relaxed);
                 stats_.snr_db  .store(snr,  std::memory_order_relaxed);
-                amod_->updateSNR(snr);
-                stats_.cur_mod .store(static_cast<int>(amod_->currentModCode()),
-                                      std::memory_order_relaxed);
+                // NOTE: snr is reported only. It must never select a
+                // modulation -- see tx_mod_ in the header for why.
+
+                // Split demodulation: BPSK acquisition, then the payload in
+                // whatever scheme the header declares. The receiver holds no
+                // modulation state of its own.
+                auto sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
+                                                 SYNC_SEARCH_SYMS);
+                if (sm.header_ok) {
+                    stats_.cur_mod.store(static_cast<int>(sm.payload_mod),
+                                         std::memory_order_relaxed);
+                    if (frame_log_.is_open())
+                        frame_log_ << "[RX-HDR] mod=" << modCodeName(sm.payload_mod)
+                                   << " plen=" << sm.plen
+                                   << " flags=0x" << std::hex << int(sm.flags) << std::dec
+                                   << " sync_sym=" << sm.sync_sym
+                                   << (sm.inverted ? " inverted" : "")
+                                   << (sm.complete ? " complete" : " TRUNCATED") << "\n";
+                }
+                if (!sm.complete) continue;   // nothing decodable at this offset
+
+                if (raw_log_.is_open() && !sm.bytes.empty()) {
+                    static char hex[] = "0123456789abcdef";
+                    std::string line;
+                    line.reserve(sm.bytes.size() * 3);
+                    for (uint8_t b : sm.bytes) {
+                        line += hex[b >> 4]; line += hex[b & 0xF]; line += ' ';
+                    }
+                    raw_log_ << line << "\n";
+                    raw_log_.flush();
+                }
 
                 // A misaligned attempt produces garbage that would poison a
                 // shared Deframer's state machine -- use a fresh one per
                 // alignment attempt.
                 Deframer deframer;
-                for (uint8_t byte : bits) {
+                for (uint8_t byte : sm.bytes) {
                     auto result = deframer.push(byte, fec_.get(), aes_.get());
 
-                    if (deframer.crcErrors() > logged_crc_errors) {
-                        logged_crc_errors = deframer.crcErrors();
+                    // The Deframer is recreated per alignment attempt, so its
+                    // own error counter never exceeds 1. Comparing it against
+                    // a running total (as this did) therefore recorded exactly
+                    // one CRC failure for the entire process lifetime and made
+                    // the failure rate look ~0 no matter how bad the link was.
+                    // Count each fresh deframer's failure directly instead.
+                    if (deframer.crcErrors() > 0) {
+                        ++logged_crc_errors;
                         stats_.frames_rx_bad.fetch_add(1, std::memory_order_relaxed);
                         if (frame_log_.is_open())
                             frame_log_ << "[CRC-FAIL] total_so_far=" << logged_crc_errors
+                                       << " plen=" << sm.plen
+                                       << " mod=" << modCodeName(sm.payload_mod)
                                        << " rssi=" << rssi << " snr=" << snr << "\n";
+                        break;   // this attempt is spent; try the next alignment
                     }
 
                     if (!result) continue;
@@ -419,7 +506,7 @@ void BridgeMode::rxThread() {
                         Framer ackFramer;
                         auto ack = ackFramer.encode(std::vector<uint8_t>{},
                                                     FL_CTRL | FL_ACK,
-                                                    amod_->currentModCode(),
+                                                    tx_mod_,
                                                     mhzToBw(cfg_.bw_mhz),
                                                     cfg_.node_id_u32, result->seq);
                         ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));

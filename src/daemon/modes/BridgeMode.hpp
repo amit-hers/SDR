@@ -5,7 +5,7 @@
 #include "sdr/framing/Framer.hpp"
 #include "sdr/framing/Deframer.hpp"
 #include "sdr/framing/ArqWindow.hpp"
-#include "sdr/modem/AdaptiveModem.hpp"
+#include "sdr/modem/SplitModem.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/dsp/AGC.hpp"
 #include "sdr/dsp/TimingSync.hpp"
@@ -14,6 +14,7 @@
 #include "sdr/dsp/CoarseFreqCorrect.hpp"
 #include "sdr/dsp/BurstDetector.hpp"
 #include "sdr/dsp/PreambleSync.hpp"
+#include "sdr/dsp/DataAidedSync.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include "sdr/transport/TUNTAPDevice.hpp"
@@ -51,7 +52,6 @@ private:
     LinkStats     stats_;
 
     std::unique_ptr<TUNTAPDevice>  tap_;
-    std::unique_ptr<AdaptiveModem> amod_;
     std::unique_ptr<ReedSolomon>   fec_;
     std::unique_ptr<AESCipher>     aes_;
     std::unique_ptr<FFTSpectrum>   fft_;
@@ -61,6 +61,49 @@ private:
     // header+CRC, zero payload). RX thread must never call radio_.txPush
     // directly.
     SPSCRing<32, WIRE_FRAME_OVERHEAD> ctrl_ring_;
+
+    // ── Modulation state ──────────────────────────────────────────────────
+    // TX and RX modulation are deliberately *separate*. They used to share
+    // one AdaptiveModem, whose scheme was driven by this node's own RX SNR --
+    // so the receiver's local signal quality silently changed what the
+    // transmitter emitted, and two nodes adapting independently could never
+    // agree. Worse, the acquisition section inherited that scheme, which the
+    // BPSK-only PreambleSync could not correlate against at all.
+    //
+    // tx_mod_ is configured, fixed, and never touched by the RX path. The
+    // receive side takes its payload modulation from each frame's header
+    // (SplitModem::Result::payload_mod) and has no persistent state at all.
+    ModCode tx_mod_{ModCode::BPSK};
+
+    // Carrier-recovery method for the live RX path, from $SDR_RX_CARRIER.
+    // Kept selectable so the Costas-vs-LS comparison can be re-run on real
+    // hardware rather than only offline.
+    enum class CarrierMode { LS, COSTAS, LS_COSTAS, NONE };
+    CarrierMode carrier_mode_{CarrierMode::LS_COSTAS};
+
+    // How far past the aligned start the acquisition section may actually
+    // begin. PreambleSync computes the burst start from a correlation peak,
+    // and TimingSync's own group delay and settling push the first usable
+    // symbol later still: measured on the live link, the sync word lands at
+    // symbol ~344, i.e. the preamble starts at ~88, not 0.
+    //
+    // This bound was 64, which is *below* that. The consequence was subtle
+    // rather than fatal: the preamble is 0xAA, period-2 in BPSK, so the
+    // correlator could still lock at the edge of its range on an aliased
+    // offset and return a plausible-looking estimate anchored to the wrong
+    // symbol. Cover the real range instead of relying on that.
+    static constexpr size_t PREAMBLE_START_SLACK = 256;
+
+    // Symbols searched for the acquisition reference (preamble + sync word).
+    static constexpr size_t DAS_SEARCH_SYMS = PREAMBLE_START_SLACK;
+
+    // Symbols searched for the *sync word*. A different bound: the sync word
+    // does not sit at the frame start, it sits one whole preamble later
+    // (PREAMBLE_LEN*8 symbols at 1 bit/symbol). Passing the DAS bound here
+    // instead puts the sync word outside the window and no frame is ever
+    // found -- which looks exactly like a dead link.
+    static constexpr size_t SYNC_SEARCH_SYMS =
+        PREAMBLE_START_SLACK + PREAMBLE_LEN * 8;
 
     std::atomic<bool>  running_{false};
     std::thread        tx_thread_;

@@ -83,6 +83,7 @@ Config Config::fromFile(const std::string& path) {
     c.tx_atten_db      = jsonDouble(json, "tx_atten_db",       c.tx_atten_db);
     c.gain_mode        = jsonStr   (json, "gain_mode",         c.gain_mode);
     c.modulation       = jsonStr   (json, "modulation",        c.modulation);
+    c.stats_path       = jsonStr   (json, "stats_path",        c.stats_path);
     c.tap_iface        = jsonStr   (json, "tap_iface",         c.tap_iface);
     c.bridge_iface     = jsonStr   (json, "bridge_iface",      c.bridge_iface);
     c.lan_iface        = jsonStr   (json, "lan_iface",         c.lan_iface);
@@ -151,6 +152,45 @@ void Config::validate() {
                      "but only ~38% at 5). Use bw_mhz 1-2 for reliable "
                      "reception.\n";
     }
+
+    // Modulation. Acquisition is always BPSK; this selects the payload
+    // scheme for TRANSMIT only.
+    for (auto& ch : modulation) ch = static_cast<char>(std::toupper(ch));
+    if (modulation == "AUTO") {
+        std::cerr
+            << "[sdr] WARNING: modulation=AUTO is not supported and has been "
+               "forced to BPSK.\n"
+               "[sdr]          Link adaptation requires the two nodes to agree "
+               "on a scheme. The previous\n"
+               "[sdr]          implementation let each node pick from its own "
+               "local RSSI, which cannot\n"
+               "[sdr]          produce agreement, and it also modulated the "
+               "preamble with the payload\n"
+               "[sdr]          scheme -- making the burst invisible to the "
+               "BPSK correlator (measured:\n"
+               "[sdr]          0/216 preambles detected under AUTO vs 91/92 "
+               "under forced BPSK).\n"
+               "[sdr]          Set modulation to BPSK or QPSK explicitly.\n";
+        modulation = "BPSK";
+    } else if (modulation == "16QAM" || modulation == "64QAM") {
+        std::cerr << "[sdr] WARNING: modulation=" << modulation
+                  << " has not been validated over the air on this link. "
+                     "Acquisition stays BPSK, so the burst will still be "
+                     "detected, but payload demodulation is unproven. Use "
+                     "BPSK or QPSK for reliable operation.\n";
+    } else if (modulation != "BPSK" && modulation != "QPSK") {
+        throw std::invalid_argument(
+            "Config: modulation must be BPSK|QPSK|16QAM|64QAM (got '"
+            + modulation + "')");
+    }
+}
+
+ModCode Config::txModCode() const {
+    if (modulation == "BPSK")  return ModCode::BPSK;
+    if (modulation == "QPSK")  return ModCode::QPSK;
+    if (modulation == "16QAM") return ModCode::QAM16;
+    if (modulation == "64QAM") return ModCode::QAM64;
+    return ModCode::BPSK;   // validate() guarantees we never get here
 }
 
 } // namespace sdr

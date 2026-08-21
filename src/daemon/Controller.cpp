@@ -31,7 +31,8 @@ Controller::Controller(Config cfg) : cfg_(std::move(cfg)) {
     radio_->setGainMode(cfg_.gain_mode);
 
     mode_     = makeMode();
-    exporter_ = std::make_unique<StatsExporter>(mode_->stats(), cfg_.stats_interval_ms);
+    exporter_ = std::make_unique<StatsExporter>(mode_->stats(), cfg_.stats_interval_ms,
+                                                cfg_.stats_path);
 }
 
 std::unique_ptr<IMode> Controller::makeMode() {
