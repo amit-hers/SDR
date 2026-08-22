@@ -27,14 +27,24 @@ PreambleSync::PreambleSync(int sps) {
     std::vector<std::complex<float>> syms;
     modem.modulate(ref_bytes.data(), static_cast<int>(ref_bytes.size()), syms);
 
-    RRCInterp interp(sps);
-    interp.process(syms, ref_);
+    if (sps <= 1) {
+        // Symbol-domain use: the caller is correlating against a stream that
+        // is already one sample per symbol (post matched-filter/decimation),
+        // so there is nothing to interpolate and no filter transient to drop.
+        // liquid's firinterp rejects a factor of 1 outright, so this cannot
+        // just fall through to RRCInterp.
+        ref_ = syms;
+    } else {
+        RRCInterp interp(sps);
+        interp.process(syms, ref_);
 
-    // Drop the filter's start-up transient: those samples are shaped by taps
-    // that were still filling and don't match what arrives mid-burst.
-    const size_t skip = static_cast<size_t>(RRC_TAPS);
-    if (ref_.size() > skip * 2)
-        ref_.erase(ref_.begin(), ref_.begin() + static_cast<long>(skip));
+        // Drop the filter's start-up transient: those samples are shaped by
+        // taps that were still filling and don't match what arrives
+        // mid-burst.
+        const size_t skip = static_cast<size_t>(RRC_TAPS);
+        if (ref_.size() > skip * 2)
+            ref_.erase(ref_.begin(), ref_.begin() + static_cast<long>(skip));
+    }
 
     for (const auto& s : ref_)
         ref_energy_ += static_cast<double>(std::norm(s));

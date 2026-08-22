@@ -85,10 +85,10 @@ Edit `config.json` / `config_node2.json`.
 |---|---|---|
 | `pluto_ip` | — | IP or `usb:1.2.3` |
 | `freq_tx_mhz` / `freq_rx_mhz` | 434 / 439 | peer must mirror these |
-| `bw_mhz` | 1 | symbol rate in MHz; sample rate is 4× this. **Max 7** (AD9363 tops out at 30.72 MSPS) |
+| `bw_mhz` | 1 | integer symbol rate in MHz; sample rate is 4×. Config clamps at 20, hardware may reject high rates, and 1–2 is the practical RX range |
 | `tx_atten_db` | 10 | 0 = max power |
 | `rx_bw_factor` | 1.4 | analog filter as a multiple of symbol rate |
-| `modulation` | BPSK | `BPSK` or `QPSK`. `AUTO` is refused |
+| `modulation` | BPSK | `BPSK` or `QPSK` recommended. `AUTO` warns and is forced to BPSK |
 
 ### Link
 
@@ -157,10 +157,11 @@ SDR_IQ_DUMP=/tmp/rx.bin SDR_IQ_DUMP_MB=400 sudo -E ./build/src/daemon/sdr-datali
 
 ```bash
 sudo pip3 install --break-system-packages flask flask-sock
-sudo python3 src/monitor/app.py
+python3 src/monitor/server.py --host 127.0.0.1 --port 8080 --config config.json
 ```
 
-Then open `http://localhost:8080`.
+Then open `http://localhost:8080`. The server has unauthenticated control
+endpoints; do not bind it to an untrusted network.
 
 ## Troubleshooting
 

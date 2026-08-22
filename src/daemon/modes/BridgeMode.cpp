@@ -1,5 +1,6 @@
 #include "BridgeMode.hpp"
 #include "sdr/framing/Frame.hpp"
+#include "sdr/dsp/FixedTimingSync.hpp"
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
@@ -500,6 +501,39 @@ void BridgeMode::rxThread() {
     std::vector<int16_t>             iq_hw;
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
     AGC agc; TimingSync tsync; CostasLoop costas;
+
+    // Free-running fixed-point timing recovery (SDR_TSYNC=fixed).
+    //
+    // The windowed path resets the timing loop at every burst, so it
+    // re-acquires from cold each time. Measured on recorded captures, letting
+    // the loop run continuously instead lifts CRC 81.4% -> 96.9% on 1242-byte
+    // payloads and recovers 37% more complete frames, because the loop is
+    // already locked when a burst arrives. It is also 3.2x faster than
+    // symsync_crcf (20.9 vs 6.56 Msamp/s), which is why it can afford to run
+    // over every sample rather than only over detected bursts.
+    //
+    // This is the same arrangement the block would have in fabric: no CFO and
+    // no AGC ahead of it, never reset. CFO moves to the symbol domain, where
+    // it still helps (measured: symbol-rate CFO beat Costas-alone on all
+    // three captures), and AGC is dropped -- the Gardner error is
+    // power-normalised, so it does not need one.
+    const bool tsync_freerun = [] {
+        const char* e = std::getenv("SDR_TSYNC");
+        return e && std::string(e) == "fixed";
+    }();
+    FixedTimingSync::Config ftcfg;
+    ftcfg.sps      = RRC_SPS;
+    ftcfg.interp   = FixedTimingSync::Config::Interp::POLYPHASE;
+    ftcfg.n_phases = 32;
+    ftcfg.fixed_loop = true;
+    ftcfg.alpha_sh = 12;
+    ftcfg.beta_sh  = 22;
+    FixedTimingSync fts(ftcfg);
+    FixedTimingSync::Result fres;
+    const double symbol_rate = static_cast<double>(cfg_.bw_mhz) * 1e6;
+    if (tsync_freerun)
+        std::cerr << "[rx] timing recovery: FIXED-POINT free-running "
+                     "(symbol-domain CFO, no AGC)\n";
     BurstDetector::Config bcfg;
     bcfg.block_size  = static_cast<size_t>(cfg_.burst_block);
     bcfg.threshold_x = static_cast<float>(cfg_.burst_threshold);
@@ -508,6 +542,10 @@ void BridgeMode::rxThread() {
     bcfg.noise_quantile = static_cast<float>(cfg_.burst_noise_q);
     BurstDetector detector(bcfg);
     PreambleSync  psync(RRC_SPS);
+    // Symbol-rate twin of psync, for the free-running path. At 1 sample per
+    // symbol the RRC-shaped reference collapses to the preamble symbols
+    // themselves, which is the correct matched reference post-decimation.
+    PreambleSync  psym(1);
     DataAidedSync dasync;
     uint64_t logged_crc_errors = 0;
     const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
@@ -517,6 +555,123 @@ void BridgeMode::rxThread() {
     // whole window.
     const size_t preamble_search =
         static_cast<size_t>(cfg_.burst_margin) + static_cast<size_t>(cfg_.burst_block) * 4;
+
+
+    // Frame delivery, shared by both timing paths.
+    //
+    // Extracted verbatim from the windowed path so the free-running
+    // fixed-point path cannot accidentally measure a DIFFERENT decoder.
+    // The A/B is meant to isolate timing recovery; anything downstream of
+    // SplitModem must be byte-identical between the two.
+    bool ok_any = false;
+    auto deliver = [&](const SplitModem::Result& sm, float rssi, float snr,
+                       size_t oi) -> bool {
+        bool this_frame_ok = false;
+            if (raw_log_.is_open() && !sm.bytes.empty()) {
+                static char hex[] = "0123456789abcdef";
+                std::string line;
+                line.reserve(sm.bytes.size() * 3);
+                for (uint8_t b : sm.bytes) {
+                    line += hex[b >> 4]; line += hex[b & 0xF]; line += ' ';
+                }
+                raw_log_ << line << "\n";
+                raw_log_.flush();
+            }
+
+            // A misaligned attempt produces garbage that would poison a
+            // shared Deframer's state machine -- use a fresh one per
+            // alignment attempt.
+            Deframer deframer;
+            StageProfiler::Scope sc_df(prof_, StageProfiler::RX_DEFRAME, sm.bytes.size());
+            for (uint8_t byte : sm.bytes) {
+                auto result = deframer.push(byte, fec_.get(), aes_.get());
+
+                // The Deframer is recreated per alignment attempt, so its
+                // own error counter never exceeds 1. Comparing it against
+                // a running total (as this did) therefore recorded exactly
+                // one CRC failure for the entire process lifetime and made
+                // the failure rate look ~0 no matter how bad the link was.
+                // Count each fresh deframer's failure directly instead.
+                if (deframer.crcErrors() > 0) {
+                    ++logged_crc_errors;
+                    stats_.frames_rx_bad.fetch_add(1, std::memory_order_relaxed);
+                    if (frame_log_.is_open())
+                        frame_log_ << "[CRC-FAIL] total_so_far=" << logged_crc_errors
+                                   << " plen=" << sm.plen
+                                   << " mod=" << modCodeName(sm.payload_mod)
+                                   << " rssi=" << rssi << " snr=" << snr << "\n";
+                    break;   // this attempt is spent; try the next alignment
+                }
+
+                if (!result) continue;
+                ok_any = true;
+                if (!this_frame_ok)
+                align_hits_[oi].fetch_add(1, std::memory_order_relaxed);
+                this_frame_ok = true;
+                stats_.updatePeer(result->node_id, rssi, snr);
+
+                if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
+                    // Control frame: acknowledges our outgoing seq, no TAP payload.
+                    if (cfg_.arq && arq_) arq_->onAck(result->seq);
+                    continue;
+                }
+
+                if (frame_log_.is_open()) {
+                    std::string content;
+                    for (uint8_t b : result->payload)
+                        content += (b >= 32 && b < 127) ? static_cast<char>(b) : '.';
+                    frame_log_ << "[GOOD] seq=" << result->seq
+                               << " node=0x" << std::hex << result->node_id << std::dec
+                               << " len=" << result->payload.size()
+                               << " rssi=" << rssi << " snr=" << snr
+                               << " content=\"" << content << "\"\n";
+                    frame_log_.flush();
+                }
+
+                ssize_t w = 0;
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_TAPW, result->payload.size());
+                  if (result->flags & FL_AGGR) {
+                      // Codec lives in framing/Aggregate.hpp and is
+                      // covered by tests; here we only care how many
+                      // records the frame held and how many of those the
+                      // TAP actually accepted. A short/failed write is
+                      // silent otherwise -- the frame still counts as
+                      // good because the first record landed.
+                      size_t ok = 0, failed = 0;
+                      size_t recs = aggregate::split(
+                          result->payload.data(), result->payload.size(),
+                          [&](const uint8_t* d, size_t l) {
+                              ssize_t one = tap_->write(d, l);
+                              if (one > 0) { w += one; ++ok; }
+                              else         { ++failed; }
+                          });
+                      rx_records_.fetch_add(recs, std::memory_order_relaxed);
+                      rx_rec_written_.fetch_add(ok, std::memory_order_relaxed);
+                      rx_rec_failed_.fetch_add(failed, std::memory_order_relaxed);
+                  } else {
+                      w = tap_->write(result->payload.data(), result->payload.size());
+                  } }
+                if (w > 0) {
+                    stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
+                    stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
+                                              std::memory_order_relaxed);
+                    if (result->flags & FL_FEC)
+                        stats_.fec_corrected.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                if (cfg_.arq) {
+                    Framer ackFramer;
+                    auto ack = ackFramer.encode(std::vector<uint8_t>{},
+                                                FL_CTRL | FL_ACK,
+                                                tx_mod_,
+                                                mhzToBw(cfg_.bw_mhz),
+                                                cfg_.node_id_u32, result->seq);
+                    ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));
+                }
+            }
+
+        return this_frame_ok;
+    };
 
     while (running_.load()) {
         {
@@ -569,6 +724,15 @@ void BridgeMode::rxThread() {
         { StageProfiler::Scope sc(prof_, StageProfiler::RX_DETECT, iq_f.size());
           windows = detector.detect(iq_f); }
         if (windows.empty()) continue; // nothing here -- skip the DSP chain entirely
+
+        // One continuous pass over the WHOLE buffer, not per burst. Restarts
+        // once per capture buffer rather than once per burst -- still far
+        // fewer re-acquisitions, though true fabric would never restart at
+        // all. That makes this measurement slightly pessimistic.
+        if (tsync_freerun) {
+            StageProfiler::Scope sc(prof_, StageProfiler::RX_TSYNC, iq_f.size());
+            fres = fts.process(iq_f);
+        }
         stats_.bursts_detected.fetch_add(windows.size(), std::memory_order_relaxed);
 
         for (const auto& win : windows) {
@@ -585,6 +749,125 @@ void BridgeMode::rxThread() {
                                                         + static_cast<size_t>(cfg_.burst_margin)));
             window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
                               iq_f.begin() + static_cast<long>(win_end));
+
+            if (tsync_freerun) {
+                // res.idx[] holds the input sample index each symbol came
+                // from, so the sample-domain burst window maps onto the
+                // symbol stream exactly -- no second burst detector, and no
+                // assumption that the decimation is exactly 4:1.
+                auto lo = std::lower_bound(fres.idx.begin(), fres.idx.end(),
+                                           static_cast<int>(win.start));
+                auto hi = std::lower_bound(fres.idx.begin(), fres.idx.end(),
+                                           static_cast<int>(win_end));
+                if (lo >= hi) continue;
+                std::vector<std::complex<float>> sym(
+                    fres.syms.begin() + (lo - fres.idx.begin()),
+                    fres.syms.begin() + (hi - fres.idx.begin()));
+
+                { StageProfiler::Scope sc(prof_, StageProfiler::RX_CFO, sym.size());
+                  CoarseFreqCorrect::apply(sym, symbol_rate, 0, sym.size()); }
+
+                // No AGC runs in this path, so RSSI comes from the raw
+                // window power instead of the AGC's gain word.
+                double pw = 0.0;
+                for (size_t k = win.start; k < win_end; ++k) pw += std::norm(iq_f[k]);
+                pw = (win_end > win.start) ? pw / double(win_end - win.start) : 0.0;
+                float rssi = (pw > 0) ? float(10.0 * std::log10(pw)) - 10.f : -120.f;
+                float snr  = rssi + 95.f;
+                stats_.rssi_dbm.store(rssi, std::memory_order_relaxed);
+                stats_.snr_db  .store(snr,  std::memory_order_relaxed);
+
+                bool decoded_here = false;
+                size_t sfrom = 0;
+                for (int fn = 0; fn < MAX_FRAMES_PER_WINDOW; ++fn) {
+                    if (sfrom + HEADER_SYMS >= sym.size()) break;
+
+                    // Locate the preamble BEFORE estimating carrier.
+                    //
+                    // The burst detector keeps burst_margin (512 samples =
+                    // 128 symbols) of context ahead of the burst, so a slice
+                    // that starts at the window edge begins in noise.
+                    // DataAidedSync then computes its least-squares estimate
+                    // over DAS_SEARCH_SYMS = 256 symbols that are half noise,
+                    // half preamble, and derotates the whole burst by a wrong
+                    // phase and frequency -- after which the sync correlation
+                    // cannot match. Measured: 74% of detected bursts yielded
+                    // no sync word at all, and goodput sat 5x below the
+                    // windowed path.
+                    //
+                    // The windowed path never hits this because PreambleSync
+                    // makes its slice start exactly at the preamble. Do the
+                    // same one domain down.
+                    std::vector<std::complex<float>> stail(
+                        sym.begin() + static_cast<long>(sfrom), sym.end());
+                    PreambleSync::Match smatch = psym.find(stail, preamble_search / RRC_SPS);
+                    if (!smatch.found) break;
+                    const size_t fstart = sfrom + static_cast<size_t>(smatch.offset);
+                    if (fstart + HEADER_SYMS >= sym.size()) break;
+                    iq_syms.assign(sym.begin() + static_cast<long>(fstart), sym.end());
+
+                    // Same carrier recovery as the windowed path. The loop is
+                    // already symbol-rate here, so nothing changes but the
+                    // absence of a preceding AGC.
+                    bool track_payload = false;
+                    { StageProfiler::Scope sc(prof_, StageProfiler::RX_CARRIER, iq_syms.size());
+                      switch (carrier_mode_) {
+                        case CarrierMode::COSTAS: {
+                            std::vector<std::complex<float>> o;
+                            costas.reset(); costas.process(iq_syms, o); iq_syms.swap(o);
+                            break; }
+                        case CarrierMode::NONE: break;
+                        case CarrierMode::LS: {
+                            auto est = dasync.estimate(iq_syms, DAS_SEARCH_SYMS);
+                            if (est.ok) DataAidedSync::derotate(iq_syms, est);
+                            break; }
+                        case CarrierMode::LS_COSTAS: {
+                            auto est = dasync.estimate(iq_syms, DAS_SEARCH_SYMS);
+                            if (est.ok) DataAidedSync::derotate(iq_syms, est);
+                            track_payload = true;
+                            break; }
+                      } }
+
+                    SplitModem::PayloadTap tap;
+                    if (track_payload) {
+                        tap = [&](std::vector<std::complex<float>>& pp) {
+                            costas.reset();
+                            std::vector<std::complex<float>> o;
+                            costas.process(pp, o);
+                            pp.swap(o);
+                        };
+                    }
+
+                    SplitModem::Result sm;
+                    { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
+                      sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
+                                                  SYNC_SEARCH_SYMS, tap); }
+                    if (sm.header_ok) {
+                        stats_.cur_mod.store(static_cast<int>(sm.payload_mod),
+                                             std::memory_order_relaxed);
+                        if (frame_log_.is_open())
+                            frame_log_ << "[RX-HDR] mod=" << modCodeName(sm.payload_mod)
+                                       << " plen=" << sm.plen
+                                       << " sync_sym=" << sm.sync_sym
+                                       << (sm.complete ? " complete" : " TRUNCATED") << "\n";
+                    }
+                    if (sm.complete) {
+                        ok_any = false;
+                        if (deliver(sm, rssi, snr, 0)) decoded_here = true;
+                    }
+                    // Advance even when the frame did not complete: a
+                    // truncated frame at the tail of a window is routine, and
+                    // abandoning the window on it throws away every later
+                    // frame in a back-to-back burst. end_sym is relative to
+                    // iq_syms, which starts at fstart.
+                    size_t adv = (sm.complete && sm.end_sym > 0)
+                                     ? sm.end_sym : psym.referenceLength();
+                    sfrom = fstart + std::max<size_t>(adv, 1);
+                }
+                if (decoded_here)
+                    stats_.bursts_demodulated.fetch_add(1, std::memory_order_relaxed);
+                continue;   // free-running path done for this window
+            }
 
             // Blind coarse CFO correction: two independent free-running
             // TCXOs (no shared reference clock) can produce an offset well
@@ -760,108 +1043,9 @@ void BridgeMode::rxThread() {
                 }
                 if (!sm.complete) continue;   // nothing decodable at this offset
 
-                if (raw_log_.is_open() && !sm.bytes.empty()) {
-                    static char hex[] = "0123456789abcdef";
-                    std::string line;
-                    line.reserve(sm.bytes.size() * 3);
-                    for (uint8_t b : sm.bytes) {
-                        line += hex[b >> 4]; line += hex[b & 0xF]; line += ' ';
-                    }
-                    raw_log_ << line << "\n";
-                    raw_log_.flush();
-                }
-
-                // A misaligned attempt produces garbage that would poison a
-                // shared Deframer's state machine -- use a fresh one per
-                // alignment attempt.
-                Deframer deframer;
-                StageProfiler::Scope sc_df(prof_, StageProfiler::RX_DEFRAME, sm.bytes.size());
-                for (uint8_t byte : sm.bytes) {
-                    auto result = deframer.push(byte, fec_.get(), aes_.get());
-
-                    // The Deframer is recreated per alignment attempt, so its
-                    // own error counter never exceeds 1. Comparing it against
-                    // a running total (as this did) therefore recorded exactly
-                    // one CRC failure for the entire process lifetime and made
-                    // the failure rate look ~0 no matter how bad the link was.
-                    // Count each fresh deframer's failure directly instead.
-                    if (deframer.crcErrors() > 0) {
-                        ++logged_crc_errors;
-                        stats_.frames_rx_bad.fetch_add(1, std::memory_order_relaxed);
-                        if (frame_log_.is_open())
-                            frame_log_ << "[CRC-FAIL] total_so_far=" << logged_crc_errors
-                                       << " plen=" << sm.plen
-                                       << " mod=" << modCodeName(sm.payload_mod)
-                                       << " rssi=" << rssi << " snr=" << snr << "\n";
-                        break;   // this attempt is spent; try the next alignment
-                    }
-
-                    if (!result) continue;
-                    decoded_any = true;
-                    if (!this_frame_ok)
-                        align_hits_[oi].fetch_add(1, std::memory_order_relaxed);
-                    this_frame_ok = true;
-                    stats_.updatePeer(result->node_id, rssi, snr);
-
-                    if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
-                        // Control frame: acknowledges our outgoing seq, no TAP payload.
-                        if (cfg_.arq && arq_) arq_->onAck(result->seq);
-                        continue;
-                    }
-
-                    if (frame_log_.is_open()) {
-                        std::string content;
-                        for (uint8_t b : result->payload)
-                            content += (b >= 32 && b < 127) ? static_cast<char>(b) : '.';
-                        frame_log_ << "[GOOD] seq=" << result->seq
-                                   << " node=0x" << std::hex << result->node_id << std::dec
-                                   << " len=" << result->payload.size()
-                                   << " rssi=" << rssi << " snr=" << snr
-                                   << " content=\"" << content << "\"\n";
-                        frame_log_.flush();
-                    }
-
-                    ssize_t w = 0;
-                    { StageProfiler::Scope sc(prof_, StageProfiler::RX_TAPW, result->payload.size());
-                      if (result->flags & FL_AGGR) {
-                          // Codec lives in framing/Aggregate.hpp and is
-                          // covered by tests; here we only care how many
-                          // records the frame held and how many of those the
-                          // TAP actually accepted. A short/failed write is
-                          // silent otherwise -- the frame still counts as
-                          // good because the first record landed.
-                          size_t ok = 0, failed = 0;
-                          size_t recs = aggregate::split(
-                              result->payload.data(), result->payload.size(),
-                              [&](const uint8_t* d, size_t l) {
-                                  ssize_t one = tap_->write(d, l);
-                                  if (one > 0) { w += one; ++ok; }
-                                  else         { ++failed; }
-                              });
-                          rx_records_.fetch_add(recs, std::memory_order_relaxed);
-                          rx_rec_written_.fetch_add(ok, std::memory_order_relaxed);
-                          rx_rec_failed_.fetch_add(failed, std::memory_order_relaxed);
-                      } else {
-                          w = tap_->write(result->payload.data(), result->payload.size());
-                      } }
-                    if (w > 0) {
-                        stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
-                        stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
-                                                  std::memory_order_relaxed);
-                        if (result->flags & FL_FEC)
-                            stats_.fec_corrected.fetch_add(1, std::memory_order_relaxed);
-                    }
-
-                    if (cfg_.arq) {
-                        Framer ackFramer;
-                        auto ack = ackFramer.encode(std::vector<uint8_t>{},
-                                                    FL_CTRL | FL_ACK,
-                                                    tx_mod_,
-                                                    mhzToBw(cfg_.bw_mhz),
-                                                    cfg_.node_id_u32, result->seq);
-                        ctrl_ring_.push(ack.data(), static_cast<int>(ack.size()));
-                    }
-                }
+                ok_any = false;
+                this_frame_ok = deliver(sm, rssi, snr, oi);
+                if (ok_any) decoded_any = true;
                 }   // end alignment-neighbour loop
 
                 // Advance past this frame and look for the next one in the
