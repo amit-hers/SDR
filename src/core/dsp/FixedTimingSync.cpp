@@ -229,6 +229,8 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
         // suits a block that runs before carrier recovery.
         double last_raw_e = 0.0, last_pwr = 0.0;
         double last_mid_i = 0.0, last_mid_q = 0.0;
+        int64_t t_pos_before=pos_q, t_pos_after=pos_q, t_freq_before=freq_q,
+                t_freq_after=freq_q, t_freq_shift=0, t_e_alpha=0, t_e_beta=0;
         long long last_e_q = 0;
         double err = 0.0;
         if (have_prev) {
@@ -272,8 +274,15 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
             if (e_q >  lim) e_q =  lim;
             if (e_q < -lim) e_q = -lim;
             last_e_q = e_q;
-            freq_q -= (beta_sh >= 0) ? (e_q >> beta_sh) : (e_q << -beta_sh);
-            pos_q  += sps_q + (freq_q >> (FQ - LQ)) - (e_q >> alpha_sh);
+            t_pos_before  = pos_q;
+            t_freq_before = freq_q;
+            t_e_beta      = (beta_sh >= 0) ? (e_q >> beta_sh) : (e_q << -beta_sh);
+            freq_q       -= t_e_beta;
+            t_freq_after  = freq_q;
+            t_freq_shift  = freq_q >> (FQ - LQ);
+            t_e_alpha     = e_q >> alpha_sh;
+            pos_q        += sps_q + t_freq_shift - t_e_alpha;
+            t_pos_after   = pos_q;
         } else {
             freq -= beta * err;
             pos  += sps + freq - alpha * err;
@@ -292,6 +301,11 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
         r.cur_i.push_back(cur.real());   r.cur_q.push_back(cur.imag());
         r.prev_i.push_back(prev.real()); r.prev_q.push_back(prev.imag());
         r.mid_i.push_back(last_mid_i);   r.mid_q.push_back(last_mid_q);
+        r.pos_before.push_back(t_pos_before); r.pos_after.push_back(t_pos_after);
+        r.sps_term.push_back(sps_q);
+        r.freq_before.push_back(t_freq_before); r.freq_after.push_back(t_freq_after);
+        r.freq_shifted.push_back(t_freq_shift);
+        r.e_alpha.push_back(t_e_alpha); r.e_beta.push_back(t_e_beta);
         prev = cur;
         have_prev = true;
     }

@@ -5,21 +5,48 @@
 // fixed_loop=true, alpha_sh=12, beta_sh=22, phase_offset=0. That model was
 // validated at 94.2% CRC on recorded RF (symsync_crcf: 96.2%).
 //
-//   * 32-phase polyphase RRC bank, 32 taps/phase, Q1.15. The bank IS the
-//     matched filter -- no separate FIR stage.
+//   * 32-phase polyphase RRC bank, 32 taps/phase, Q1.15 coefficients over
+//     Q1.15 input. The bank IS the matched filter -- no separate FIR stage.
+//     Its OUTPUT is 20-bit, not Q1.15: the filter has processing gain.
 //   * Gardner TED: no symbol decisions, so this sits ahead of carrier
-//     recovery. Error power-normalised by a leading-one barrel shift.
+//     recovery. Error normalised by an exact divide, not a barrel shift --
+//     the shift approximation was off by up to 2x and pinned the error at
+//     its clamp on most symbols.
 //   * Q16.16 NCO; the loop integrator is Q16.32. Carrying the integrator at
 //     the NCO's precision truncates beta*err to zero for realistic errors and
 //     silently reduces the loop to proportional-only (measured: 0% CRC).
 //
+// Verified bit-exact against the golden model on 9990 symbols of recorded RF:
+// every datapath field (base, mu, phase, cur/prev/mid, raw_e, e_q, and all
+// eight NCO intermediates) matches on every symbol. Reproduce with
+//   iverilog -g2005 -o tb.vvp tb_polyphase_timing_sync.v polyphase_timing_sync.v
+//   vvp tb.vvp && python3 tdiff.py golden_trace.txt hdl_trace.txt
+//
 // Zynq-7020: 1 BRAM18 for the bank, 32 DSP48 for the MAC (or 8 at 4x
-// time-multiplexing, since the symbol rate is 1/4 the sample rate).
+// time-multiplexing, since the symbol rate is 1/4 the sample rate). The
+// exact divider is the one piece with no obvious cheap mapping; four sample
+// clocks per symbol leaves room for a pipelined divide or reciprocal LUT.
 
 `timescale 1ns / 1ps
 
 module polyphase_timing_sync #(
     parameter integer DW       = 16,
+    // Internal matched-filter output width. The bank has processing gain, so
+    // its output does NOT fit in Q1.15 even though its input does: on the
+    // validation capture 80% of the filtered I samples fall outside int16
+    // (peak |value| 86718, an 18-bit signed quantity).
+    //
+    // The C++ model never saturates here -- satQ15 is applied only in the
+    // FARROW path's separate FIR stage, which polyphase mode bypasses. Making
+    // mac() clamp to Q1.15 therefore fed the Gardner TED clipped samples and
+    // corrupted the loop; it first bit at symbol 554 (mid_q -33011 -> -32768)
+    // and diverged permanently from there.
+    //
+    // 20 bits gives ~7.5x headroom over the observed peak. The output PORT is
+    // still Q1.15 and saturates, which matches the reference vectors -- those
+    // are written through a clamping q15() -- but the clamp must not be in
+    // the feedback path.
+    parameter integer MW       = 20,
     parameter integer NPHASE   = 32,
     parameter integer NTAP     = 32,
     // Start position, in samples, of the first symbol instant. The C++ model
@@ -42,8 +69,14 @@ module polyphase_timing_sync #(
     input  wire signed [DW-1:0] s_i,
     input  wire signed [DW-1:0] s_q,
     output reg                  m_valid,
-    output reg  signed [DW-1:0] m_i,
-    output reg  signed [DW-1:0] m_q,
+    // Full-precision symbol output, NOT Q1.15. The matched filter has
+    // processing gain and 88% of symbols on the validation capture exceed
+    // int16; narrowing this port to DW would clamp nearly every symbol and
+    // destroy the constellation downstream. The reference vector file is
+    // Q1.15 only because its exporter clamps on write, so the testbench
+    // applies that same clamp when comparing -- the datapath must not.
+    output reg  signed [MW-1:0] m_i,
+    output reg  signed [MW-1:0] m_q,
     // Verification taps: the fields the C++ model also records, so the two
     // can be diffed field-by-field instead of inferring the mapping from
     // output values. Synthesis prunes these when unconnected.
@@ -55,7 +88,9 @@ module polyphase_timing_sync #(
     output reg  signed [63:0]   t_raw_e,
     output reg  signed [63:0]   t_pwr,
     output reg  signed [63:0]   t_e_q,
-    output reg  signed [63:0]   t_ci, t_cq, t_pi, t_pq, t_mi, t_mq
+    output reg  signed [63:0]   t_ci, t_cq, t_pi, t_pq, t_mi, t_mq,
+    output reg  signed [63:0]   t_posb, t_spsq, t_freqb, t_ebeta,
+                                t_freqa, t_freqsh, t_ealpha, t_posa
 );
     localparam integer PHW = 5;   // log2(NPHASE)
     reg [PHW-1:0] mid_phase_r;
@@ -71,7 +106,7 @@ module polyphase_timing_sync #(
     reg signed [63:0] pos_q;   // Q16.16 absolute index of next symbol
     reg signed [63:0] freq_q;  // Q16.32 loop integrator
 
-    reg signed [DW-1:0] prev_i, prev_q, mid_i, mid_q;
+    reg signed [MW-1:0] prev_i, prev_q, mid_i, mid_q;
     reg have_prev, have_mid;
 
     // The history must be primed before any output is meaningful. In C++ the
@@ -85,13 +120,25 @@ module polyphase_timing_sync #(
     wire signed [63:0] hp_q  = pos_q - (SPS <<< (LQ-1));
     wire signed [63:0] base  = pos_q >>> LQ;
     wire signed [63:0] hbase = hp_q  >>> LQ;
-    // Truncating shift. Rounding was tried (adding half an LSB before the
-    // shift, to mirror the model's llround) and measured WORSE: bit-exact
-    // agreement fell 60.6% -> 22.9% and rms error rose 437 -> 1045. So the
-    // model's effective phase is not simply llround(mu*NPHASE); the mapping
-    // is being determined by direct trace comparison rather than inferred.
-    wire [PHW-1:0] ph_cur = (pos_q >>> (LQ-PHW)) & (NPHASE-1);
-    wire [PHW-1:0] ph_mid = (hp_q  >>> (LQ-PHW)) & (NPHASE-1);
+    // The model picks the phase NEAREST mu, and lets it wrap without carrying
+    // into base:
+    //     p = llround(mu * NPHASE) % NPHASE;
+    // so mu = 0.9888 gives llround(31.64) = 32 -> phase 0, while base stays
+    // put. Truncating instead picked phase 31 there and sampled the wrong
+    // sub-filter on ~6% of symbols.
+    //
+    // The rounding must be applied to the FRACTIONAL field on its own. An
+    // earlier attempt added the half-LSB to the whole of pos_q before the
+    // split, which let the carry reach base as well -- that advances the
+    // sample index by one on top of the phase wrap, and measured far worse
+    // than plain truncation (60.6% -> 22.9%). Masking the sum to PHW bits
+    // both wraps the phase and discards the carry, which is exactly the
+    // model's `% NPHASE` with base untouched.
+    localparam integer PH_HALF = 1 << (LQ-PHW-1);
+    wire [LQ-1:0] frac_cur = pos_q[LQ-1:0];
+    wire [LQ-1:0] frac_mid = hp_q [LQ-1:0];
+    wire [PHW-1:0] ph_cur = ((frac_cur + PH_HALF) >> (LQ-PHW)) & (NPHASE-1);
+    wire [PHW-1:0] ph_mid = ((frac_mid + PH_HALF) >> (LQ-PHW)) & (NPHASE-1);
 
     // Tap 0 is the sample arriving THIS cycle, not hist[0].
     //
@@ -103,7 +150,7 @@ module polyphase_timing_sync #(
     // and emitting cur=(0,0) where the model produced (-411,615). Every
     // later divergence (prev, mid, raw_e, and finally the NCO at symbol 2)
     // followed from that single value.
-    function signed [DW-1:0] mac;
+    function signed [MW-1:0] mac;
         input [PHW-1:0] ph;
         input integer   sel;
         integer t;
@@ -117,9 +164,24 @@ module polyphase_timing_sync #(
                 a = a + $signed(coeff[ph*NTAP + t]) * $signed(x);
             end
             a = a >>> 15;
-            if (a >  32767) a =  32767;
-            if (a < -32768) a = -32768;
-            mac = a[DW-1:0];
+            // Saturate at the internal width, not at Q1.15. This bound is
+            // never reached on the validation capture; it exists so the
+            // fabric behaviour is defined on abnormally hot input rather
+            // than wrapping sign.
+            if (a >  ((64'sd1 <<< (MW-1)) - 1)) a =  (64'sd1 <<< (MW-1)) - 1;
+            if (a < -(64'sd1 <<< (MW-1)))       a = -(64'sd1 <<< (MW-1));
+            mac = a[MW-1:0];
+        end
+    endfunction
+
+    // Q1.15 output port: the reference vectors are written through a clamping
+    // q15(), so the port clamps identically.
+    function signed [DW-1:0] sat16;
+        input signed [MW-1:0] v;
+        begin
+            if (v >  32767) sat16 =  16'sd32767;
+            else if (v < -32768) sat16 = -16'sd32768;
+            else sat16 = v[DW-1:0];
         end
     endfunction
 
@@ -128,7 +190,7 @@ module polyphase_timing_sync #(
     // arguments change -- it is not sensitive to the hist arrays it reads --
     // so the filter output would freeze at whatever it held when the phase
     // index last moved. Symptom: every emitted symbol reads 0.
-    reg signed [DW-1:0] cur_i, cur_q;
+    reg signed [MW-1:0] cur_i, cur_q;
     reg signed [63:0] di, dq, raw_e, pwr, psum;
 
     function integer msb_pos;
@@ -141,7 +203,14 @@ module polyphase_timing_sync #(
     endfunction
 
     integer pm, k;
-    reg signed [63:0] e_q, lim, fnext;
+    reg signed [63:0] e_q, lim, fnext, ebeta, fsh, ealpha, pnext;
+
+    // Held in a 64-bit signed localparam rather than written inline as
+    // (SPS <<< LQ). Verilog makes a whole expression unsigned if any operand
+    // is, and an unsigned SPS_Q would turn the pos_q update -- which must
+    // track negative corrections -- into modular arithmetic on a 64-bit
+    // magnitude. The C++ model does this in int64_t throughout.
+    localparam signed [63:0] SPS_Q = SPS * (1 << LQ);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -161,6 +230,8 @@ module polyphase_timing_sync #(
             t_hbase   <= 0;  t_hphase <= 0;
             t_raw_e   <= 0;  t_pwr    <= 0;  t_e_q    <= 0;
             t_ci <= 0; t_cq <= 0; t_pi <= 0; t_pq <= 0; t_mi <= 0; t_mq <= 0;
+            t_posb <= 0; t_spsq <= 0; t_freqb <= 0; t_ebeta <= 0;
+            t_freqa <= 0; t_freqsh <= 0; t_ealpha <= 0; t_posa <= 0;
             for (k = 0; k < NTAP; k = k + 1) begin
                 hist_i[k] <= 0;
                 hist_q[k] <= 0;
@@ -194,6 +265,13 @@ module polyphase_timing_sync #(
                     t_phase  <= ph_cur;
                     t_hbase  <= mid_base_r;
                     t_hphase <= mid_phase_r;
+                    // Driven on every emitted symbol, not just the ones where
+                    // the loop runs. Gating these behind have_prev made symbol
+                    // 0 report its reset value (0,0) against the model's
+                    // (-411,615) and looked for a while like a MAC fault.
+                    t_ci <= cur_i;  t_cq <= cur_q;
+                    t_pi <= prev_i; t_pq <= prev_q;
+                    t_mi <= mid_i;  t_mq <= mid_q;
 
                     // The loop only runs once prev and mid are real samples.
                     // Updating it earlier feeds the NCO an error derived from
@@ -216,18 +294,40 @@ module polyphase_timing_sync #(
                         lim = (64'sd1 <<< EQ);
                         if (e_q >  lim) e_q =  lim;
                         if (e_q < -lim) e_q = -lim;
-                        fnext  = freq_q - (e_q >>> BETA_SH);
-                        t_ci <= cur_i;  t_cq <= cur_q;
-                        t_pi <= prev_i; t_pq <= prev_q;
-                        t_mi <= mid_i;  t_mq <= mid_q;
+                        // Same statement order as the C++ model: beta is
+                        // applied to freq FIRST, and the freq that feeds the
+                        // position update is the POST-beta value. Shifting the
+                        // pre-beta freq instead leaves the integrator one
+                        // symbol stale and shows up as a slow mu drift.
+                        ebeta  = e_q >>> BETA_SH;
+                        fnext  = freq_q - ebeta;
+                        fsh    = fnext >>> (FQ-LQ);
+                        ealpha = e_q >>> ALPHA_SH;
+                        pnext  = pos_q + SPS_Q + fsh - ealpha;
+
                         t_raw_e <= raw_e;
                         t_pwr   <= pwr;
                         t_e_q   <= e_q;
+                        t_posb  <= pos_q;   t_spsq   <= SPS_Q;
+                        t_freqb <= freq_q;  t_ebeta  <= ebeta;
+                        t_freqa <= fnext;   t_freqsh <= fsh;
+                        t_ealpha<= ealpha;  t_posa   <= pnext;
+
                         freq_q <= fnext;
-                        pos_q  <= pos_q + (SPS <<< LQ) + (fnext >>> (FQ-LQ))
-                                        - (e_q >>> ALPHA_SH);
+                        pos_q  <= pnext;
                     end else begin
-                        pos_q <= pos_q + (SPS <<< LQ) + (freq_q >>> (FQ-LQ));
+                        // The model has no such branch -- it runs the update
+                        // unconditionally with e_q = 0, which reduces to this.
+                        // Taps are still driven so the trace lines up symbol
+                        // for symbol with the model's, which records these
+                        // fields on every symbol.
+                        fsh   = freq_q >>> (FQ-LQ);
+                        pnext = pos_q + SPS_Q + fsh;
+                        t_posb  <= pos_q;   t_spsq   <= SPS_Q;
+                        t_freqb <= freq_q;  t_ebeta  <= 64'sd0;
+                        t_freqa <= freq_q;  t_freqsh <= fsh;
+                        t_ealpha<= 64'sd0;  t_posa   <= pnext;
+                        pos_q <= pnext;
                     end
 
                     prev_i    <= cur_i;

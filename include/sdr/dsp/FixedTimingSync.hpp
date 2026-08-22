@@ -87,6 +87,9 @@ public:
         std::vector<long long>           e_q;    // normalised error, Q(EQ)
         // TED inputs, in Q15 integer units, for HDL comparison.
         std::vector<double> cur_i, cur_q, prev_i, prev_q, mid_i, mid_q;
+        // NCO update intermediates, all int64 as computed.
+        std::vector<long long> pos_before, pos_after, sps_term,
+                               freq_before, freq_after, freq_shifted, e_alpha, e_beta;
         uint64_t                         sat_count{0};  // accumulator saturations
     };
 
