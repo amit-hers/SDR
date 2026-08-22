@@ -15,6 +15,7 @@ add_library(sdr_core STATIC
     dsp/BurstDetector.cpp
     dsp/PreambleSync.cpp
     dsp/DataAidedSync.cpp
+    dsp/FixedTimingSync.cpp
     fec/ReedSolomon.cpp
     crypto/AESCipher.cpp
     transport/TUNTAPDevice.cpp
