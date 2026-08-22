@@ -22,6 +22,12 @@ module polyphase_timing_sync #(
     parameter integer DW       = 16,
     parameter integer NPHASE   = 32,
     parameter integer NTAP     = 32,
+    // Start position, in samples, of the first symbol instant. The C++ model
+    // derives this from the RRC *prototype* length, which is sps*span+1 = 33,
+    // while sizing its polyphase bank from RRC_TAPS = 32. Mirroring only the
+    // bank size here started the NCO one sample early and biased `base` by +1
+    // on 93% of symbols -- the first and largest divergence in the traces.
+    parameter integer START_OFF = 33,
     parameter integer LQ       = 16,
     parameter integer EQ       = 24,
     parameter integer FQ       = 32,
@@ -109,7 +115,7 @@ module polyphase_timing_sync #(
     // so the filter output would freeze at whatever it held when the phase
     // index last moved. Symptom: every emitted symbol reads 0.
     reg signed [DW-1:0] cur_i, cur_q;
-    reg signed [63:0] di, dq, raw_e, pwr;
+    reg signed [63:0] di, dq, raw_e, pwr, psum;
 
     function integer msb_pos;
         input signed [63:0] v;
@@ -126,7 +132,7 @@ module polyphase_timing_sync #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             sidx      <= 0;
-            pos_q     <= (NTAP <<< LQ) + (SPS <<< LQ);
+            pos_q     <= (START_OFF <<< LQ) + (SPS <<< LQ);
             freq_q    <= 0;
             have_prev <= 1'b0;
             have_mid  <= 1'b0;
@@ -161,8 +167,9 @@ module polyphase_timing_sync #(
                     di    = cur_i - prev_i;
                     dq    = cur_q - prev_q;
                     raw_e = $signed(mid_i)*di + $signed(mid_q)*dq;
-                    pwr   = ($signed(cur_i)*$signed(cur_i) + $signed(cur_q)*$signed(cur_q)
-                           + $signed(prev_i)*$signed(prev_i) + $signed(prev_q)*$signed(prev_q)) >>> 1;
+                    psum  = $signed(cur_i)*$signed(cur_i) + $signed(cur_q)*$signed(cur_q)
+                          + $signed(prev_i)*$signed(prev_i) + $signed(prev_q)*$signed(prev_q);
+                    pwr   = psum >>> 1;
 
                     m_i     <= cur_i;
                     m_q     <= cur_q;
@@ -177,9 +184,20 @@ module polyphase_timing_sync #(
                     // Updating it earlier feeds the NCO an error derived from
                     // reset values, which biases the very first correction and
                     // takes many symbols to wash out.
-                    if (have_prev && have_mid && pwr != 0) begin
-                        pm  = msb_pos(pwr);
-                        e_q = (pm > EQ) ? (raw_e >>> (pm - EQ)) : (raw_e <<< (EQ - pm));
+                    if (have_prev && have_mid && psum > 2) begin
+                        // Exact division, not a power-of-two barrel shift.
+                        // The shift approximated raw_e/pwr by raw_e >> msb(pwr),
+                        // which is off by up to 2x per symbol and pinned e_q at
+                        // the +-1.0 clamp on most symbols (measured ratio to the
+                        // reference: median 1.29, range -25.9 .. +18.7).
+                        //
+                        // psum is 2*pwr, so dividing by it with one extra bit of
+                        // shift avoids the >>1 truncation the model does not do
+                        // (its power is a double, 0.5*sum).
+                        //
+                        // Four sample-clocks per symbol leaves room for a
+                        // pipelined divider or a reciprocal-LUT multiply.
+                        e_q = (raw_e <<< (EQ+1)) / psum;
                         lim = (64'sd1 <<< EQ);
                         if (e_q >  lim) e_q =  lim;
                         if (e_q < -lim) e_q = -lim;
