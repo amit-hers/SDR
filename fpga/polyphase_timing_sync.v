@@ -54,7 +54,8 @@ module polyphase_timing_sync #(
     output reg         [PHW-1:0] t_hphase,
     output reg  signed [63:0]   t_raw_e,
     output reg  signed [63:0]   t_pwr,
-    output reg  signed [63:0]   t_e_q
+    output reg  signed [63:0]   t_e_q,
+    output reg  signed [63:0]   t_ci, t_cq, t_pi, t_pq, t_mi, t_mq
 );
     localparam integer PHW = 5;   // log2(NPHASE)
     reg [PHW-1:0] mid_phase_r;
@@ -92,16 +93,29 @@ module polyphase_timing_sync #(
     wire [PHW-1:0] ph_cur = (pos_q >>> (LQ-PHW)) & (NPHASE-1);
     wire [PHW-1:0] ph_mid = (hp_q  >>> (LQ-PHW)) & (NPHASE-1);
 
+    // Tap 0 is the sample arriving THIS cycle, not hist[0].
+    //
+    // hist is written with a non-blocking assignment at the end of the same
+    // clocked block that evaluates this MAC, so hist[0] still holds the
+    // PREVIOUS sample when the MAC runs. Reading taps straight out of hist
+    // therefore convolves a window one sample behind the model's
+    // wi[base-k] -- which at the first symbol meant MACing over reset zeros
+    // and emitting cur=(0,0) where the model produced (-411,615). Every
+    // later divergence (prev, mid, raw_e, and finally the NCO at symbol 2)
+    // followed from that single value.
     function signed [DW-1:0] mac;
         input [PHW-1:0] ph;
         input integer   sel;
         integer t;
         reg signed [63:0] a;
+        reg signed [DW-1:0] x;
         begin
             a = 0;
-            for (t = 0; t < NTAP; t = t + 1)
-                a = a + $signed(coeff[ph*NTAP + t]) *
-                        (sel ? $signed(hist_q[t]) : $signed(hist_i[t]));
+            for (t = 0; t < NTAP; t = t + 1) begin
+                x = (t == 0) ? (sel ? s_q : s_i)
+                             : (sel ? hist_q[t-1] : hist_i[t-1]);
+                a = a + $signed(coeff[ph*NTAP + t]) * $signed(x);
+            end
             a = a >>> 15;
             if (a >  32767) a =  32767;
             if (a < -32768) a = -32768;
@@ -146,6 +160,7 @@ module polyphase_timing_sync #(
             t_base    <= 0;  t_mu     <= 0;  t_phase  <= 0;
             t_hbase   <= 0;  t_hphase <= 0;
             t_raw_e   <= 0;  t_pwr    <= 0;  t_e_q    <= 0;
+            t_ci <= 0; t_cq <= 0; t_pi <= 0; t_pq <= 0; t_mi <= 0; t_mq <= 0;
             for (k = 0; k < NTAP; k = k + 1) begin
                 hist_i[k] <= 0;
                 hist_q[k] <= 0;
@@ -202,6 +217,9 @@ module polyphase_timing_sync #(
                         if (e_q >  lim) e_q =  lim;
                         if (e_q < -lim) e_q = -lim;
                         fnext  = freq_q - (e_q >>> BETA_SH);
+                        t_ci <= cur_i;  t_cq <= cur_q;
+                        t_pi <= prev_i; t_pq <= prev_q;
+                        t_mi <= mid_i;  t_mq <= mid_q;
                         t_raw_e <= raw_e;
                         t_pwr   <= pwr;
                         t_e_q   <= e_q;

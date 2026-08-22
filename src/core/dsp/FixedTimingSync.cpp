@@ -228,6 +228,7 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
         // the previous one, and needs no symbol decisions -- which is why it
         // suits a block that runs before carrier recovery.
         double last_raw_e = 0.0, last_pwr = 0.0;
+        double last_mid_i = 0.0, last_mid_q = 0.0;
         long long last_e_q = 0;
         double err = 0.0;
         if (have_prev) {
@@ -240,6 +241,7 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
                                                 : std::complex<double>{ farrow(wi, hb, hmu),
                                                                         farrow(wq, hb, hmu) };
                 last_hphase = last_phase;
+                last_mid_i = mid.real(); last_mid_q = mid.imag();
                 err = mid.real() * (cur.real() - prev.real()) +
                       mid.imag() * (cur.imag() - prev.imag());
                 // Normalise by signal power, not by a fixed constant. The raw
@@ -287,6 +289,9 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
         r.raw_e.push_back(last_raw_e);
         r.pwr.push_back(last_pwr);
         r.e_q.push_back(last_e_q);
+        r.cur_i.push_back(cur.real());   r.cur_q.push_back(cur.imag());
+        r.prev_i.push_back(prev.real()); r.prev_q.push_back(prev.imag());
+        r.mid_i.push_back(last_mid_i);   r.mid_q.push_back(last_mid_q);
         prev = cur;
         have_prev = true;
     }

@@ -85,6 +85,8 @@ public:
         std::vector<double>              raw_e;  // Gardner product, pre-normalisation
         std::vector<double>              pwr;    // power used to normalise it
         std::vector<long long>           e_q;    // normalised error, Q(EQ)
+        // TED inputs, in Q15 integer units, for HDL comparison.
+        std::vector<double> cur_i, cur_q, prev_i, prev_q, mid_i, mid_q;
         uint64_t                         sat_count{0};  // accumulator saturations
     };
 
