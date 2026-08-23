@@ -112,6 +112,17 @@ Edit `config.json` / `config_node2.json`.
 | `spectrum_interval_ms` | 200 | 0 disables the FFT display |
 
 **Validated setup: 1 MHz, QPSK, `rx_bw_factor` 1.35 — ~800 kbps at 99% CRC.**
+
+Timing recovery defaults to the fixed-point path (`SDR_TSYNC=fixed`). Live A/B
+over coax: CRC 99.3% vs 55.3% for symsync_crcf, 1.9x the frames, CPU 31% vs 38.5%.
+
+Over coax, set `tx_atten_db` around 25 with a 40 dB pad — at 10 dB the receiver
+overloads and CRC collapses to 25%.
+
+RF test harness lives in `scripts/rf/`: `datalink.sh` (two-node link test, `TCP=1`
+for iperf3), `ab.sh` (alternating A/B), `plutoip.sh` (resolve radios by serial).
+The radios need a route to 169.254.0.0/16 on the interface their RJ45 ports use;
+put the address in the NetworkManager profile or it gets flushed.
 2 MHz is unstable (identical runs vary ~4×).
 
 ## Logs
@@ -153,6 +164,7 @@ SDR_IQ_DUMP=/tmp/rx.bin SDR_IQ_DUMP_MB=400 sudo -E ./build/src/daemon/sdr-datali
 | `SDR_RAW_LOG` | path — demodulated bytes as hex |
 | `SDR_IQ_DUMP` / `SDR_IQ_DUMP_MB` | path / size cap |
 | `SDR_RX_CARRIER` | `ls+costas` (default), `ls`, `costas`, `none` |
+| `SDR_TSYNC` | `fixed` (default) — fixed-point timing recovery; `liquid` — symsync_crcf; `freerun` — continuous, experimental |
 
 ## Web monitor
 
