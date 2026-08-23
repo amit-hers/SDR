@@ -529,20 +529,29 @@ void BridgeMode::rxThread() {
     // three captures), and AGC is dropped -- the Gardner error is
     // power-normalised, so it does not need one.
     // SDR_TSYNC selects the timing-recovery implementation:
-    //   liquid  (default) symsync_crcf, the validated path
-    //   fixed             FixedTimingSync as a DROP-IN inside the existing
+    //   liquid            symsync_crcf, the previous default. Measured on a
+    //                     clean coax link at 52-58% CRC where the fixed path
+    //                     managed 99%, on near-identical channels seconds
+    //                     apart (846 vs 842 bursts). It holds up over the air
+    //                     -- 98.8% CRC earlier -- so it degrades specifically
+    //                     with a strong, non-fading signal.
+    //   fixed   (default) FixedTimingSync as a DROP-IN inside the existing
     //                     per-burst pipeline -- CFO, AGC, per-burst reset and
     //                     preamble alignment all unchanged, only the matched
     //                     filter + symbol timing swapped. This is where the
-    //                     measured 3.2x speedup (20.9 vs 6.56 Msamp/s) pays
-    //                     off without disturbing anything that works.
+    //                     measured ~5x speedup (34 vs 6.9 Msamp/s on short
+    //                     calls) pays off without disturbing anything that
+    //                     works. Live A/B, two alternating trials at matched
+    //                     offered load: CRC 99.3% vs 55.3%, 1.9x the frames,
+    //                     acquisition 90.7% vs 51.2%, and CPU 31% vs 38.5%.
+    //                     Better on reliability AND cost at the same time.
     //   freerun           the continuous, never-reset architecture. Measured
     //                     live at 19-20% burst acquisition against liquid's
     //                     69-72%, so it is NOT the default; kept for further
     //                     investigation of why the offline replay disagreed.
     const std::string tsync_sel = [] {
         const char* e = std::getenv("SDR_TSYNC");
-        return std::string(e ? e : "liquid");
+        return std::string(e ? e : "fixed");
     }();
     const bool tsync_freerun = (tsync_sel == "freerun");
     const bool tsync_dropin  = (tsync_sel == "fixed");
@@ -560,8 +569,10 @@ void BridgeMode::rxThread() {
         std::cerr << "[rx] timing recovery: FIXED-POINT free-running "
                      "(symbol-domain CFO, no AGC)\n";
     else if (tsync_dropin)
-        std::cerr << "[rx] timing recovery: FIXED-POINT drop-in "
-                     "(per-burst pipeline unchanged)\n";
+        std::cerr << "[rx] timing recovery: FIXED-POINT drop-in (default; "
+                     "SDR_TSYNC=liquid for symsync_crcf)\n";
+    else
+        std::cerr << "[rx] timing recovery: liquid symsync_crcf\n";
     BurstDetector::Config bcfg;
     bcfg.block_size  = static_cast<size_t>(cfg_.burst_block);
     bcfg.threshold_x = static_cast<float>(cfg_.burst_threshold);
