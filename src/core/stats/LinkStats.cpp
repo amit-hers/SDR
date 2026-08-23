@@ -42,6 +42,10 @@ std::string LinkStats::toJSON() const {
              ? 100.f * static_cast<float>(rx_pull_us.load())
                      / static_cast<float>(rx_total_us.load())
              : 0.f)                                            << ","
+      << "\"rx_occupancy_pct\":" << f(rx_seen_samples.load()
+             ? 100.f * static_cast<float>(rx_burst_samples.load())
+                     / static_cast<float>(rx_seen_samples.load())
+             : 0.f)                                            << ","
       << "\"bytes_tx\":"          << bytes_tx.load()           << ","
       << "\"bytes_rx\":"          << bytes_rx.load()           << ","
       << "\"rssi_dbm\":"          << f(rssi_dbm.load())        << ","

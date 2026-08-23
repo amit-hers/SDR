@@ -91,9 +91,12 @@ An explicit `usb:` URI is preferred when available. A plain IP is accepted;
 the radio layer attempts to resolve it to an unambiguous USB device.
 
 `bw_mhz` is the symbol rate, not the I/Q sample rate. The daemon samples at
-four times that value, so 1 MHz means 4 MSPS and approximately 16 MB/s of raw
-I/Q traffic. Values above 2 MHz commonly exceed reliable USB 2.0 receive
-throughput.
+`bw_mhz * samples_per_symbol`; each sample is four bytes of interleaved I/Q.
+The default 1 MHz and 4 samples/symbol therefore means 4 MSPS and 16 MB/s.
+Two samples/symbol is available for throughput experiments, while four remains
+the validated compatibility setting. Sustained traffic much above 32 MB/s
+commonly exceeds reliable USB 2.0 reception; the boards' real Ethernet backend
+may sustain more.
 
 `AUTO` is not supported. If configured, it is deliberately changed to BPSK at
 runtime. BPSK and QPSK are the recommended choices; 16QAM and 64QAM exist in

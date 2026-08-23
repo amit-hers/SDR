@@ -188,6 +188,9 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
     const int alpha_sh = cfg_.alpha_sh;
     const int beta_sh  = cfg_.beta_sh;
 
+    r.syms.reserve(N / static_cast<size_t>(sps) + 8);
+    r.idx .reserve(N / static_cast<size_t>(sps) + 8);
+
     double pos  = static_cast<double>(L) + sps;   // past the filter transient
     double freq = 0.0;
     std::complex<double> prev{0.0, 0.0};
@@ -290,22 +293,24 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
 
         r.syms.push_back({ static_cast<float>(out.real() / ONE_Q15),
                            static_cast<float>(out.imag() / ONE_Q15) });
-        r.mu.push_back(mu);
-        r.idx.push_back(base);
-        r.phase.push_back(cur_phase);
-        r.hidx.push_back(last_hb);
-        r.hphase.push_back(last_hphase);
-        r.raw_e.push_back(last_raw_e);
-        r.pwr.push_back(last_pwr);
-        r.e_q.push_back(last_e_q);
-        r.cur_i.push_back(cur.real());   r.cur_q.push_back(cur.imag());
-        r.prev_i.push_back(prev.real()); r.prev_q.push_back(prev.imag());
-        r.mid_i.push_back(last_mid_i);   r.mid_q.push_back(last_mid_q);
-        r.pos_before.push_back(t_pos_before); r.pos_after.push_back(t_pos_after);
-        r.sps_term.push_back(sps_q);
-        r.freq_before.push_back(t_freq_before); r.freq_after.push_back(t_freq_after);
-        r.freq_shifted.push_back(t_freq_shift);
-        r.e_alpha.push_back(t_e_alpha); r.e_beta.push_back(t_e_beta);
+        r.idx.push_back(base);            // functional: used to map windows
+        if (cfg_.trace) {
+            r.mu.push_back(mu);
+            r.phase.push_back(cur_phase);
+            r.hidx.push_back(last_hb);
+            r.hphase.push_back(last_hphase);
+            r.raw_e.push_back(last_raw_e);
+            r.pwr.push_back(last_pwr);
+            r.e_q.push_back(last_e_q);
+            r.cur_i.push_back(cur.real());   r.cur_q.push_back(cur.imag());
+            r.prev_i.push_back(prev.real()); r.prev_q.push_back(prev.imag());
+            r.mid_i.push_back(last_mid_i);   r.mid_q.push_back(last_mid_q);
+            r.pos_before.push_back(t_pos_before); r.pos_after.push_back(t_pos_after);
+            r.sps_term.push_back(sps_q);
+            r.freq_before.push_back(t_freq_before); r.freq_after.push_back(t_freq_after);
+            r.freq_shifted.push_back(t_freq_shift);
+            r.e_alpha.push_back(t_e_alpha); r.e_beta.push_back(t_e_beta);
+        }
         prev = cur;
         have_prev = true;
     }

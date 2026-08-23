@@ -1,5 +1,6 @@
 #pragma once
 #include "sdr/framing/Frame.hpp"
+#include "sdr/dsp/RRCFilter.hpp"
 #include <string>
 #include <array>
 #include <cstdint>
@@ -18,7 +19,7 @@ struct Config {
     std::string pluto_ip    {"192.168.2.1"};
     double      freq_tx_mhz {434.0};
     double      freq_rx_mhz {439.0};
-    // Sample rate is bw_mhz * 4 (RRC_SPS), and every sample is 4 bytes over
+    // Sample rate is bw_mhz * samples_per_symbol, and every sample is 4 bytes over
     // USB. USB 2.0 tops out near 35 MB/s in practice, so anything above
     // ~2 MHz here starves the receiver of listening time: measured RX duty
     // cycle is 99% at 1 MHz, 95% at 2 MHz (USB backend), but only 38% at
@@ -26,6 +27,9 @@ struct Config {
     // the receiver isn't listening are simply never seen, so a "faster"
     // setting here yields *fewer* delivered frames, not more.
     int         bw_mhz      {1};          // 1|2|5|10|20 (1-2 recommended)
+    // Two samples/symbol halves host-interface traffic and is intended for
+    // high-throughput links. Four remains the validated compatibility mode.
+    int         samples_per_symbol {RRC_SPS}; // 2|4
     double      tx_atten_db {10.0};       // 0-89 dB, 0.25dB steps
     std::string gain_mode   {"fast_attack"};
     // Payload modulation for TRANSMIT only; the receive side always takes the

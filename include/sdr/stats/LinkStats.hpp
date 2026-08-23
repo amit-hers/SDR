@@ -45,6 +45,15 @@ struct LinkStats {
     // frame delivery no matter how good the DSP is.
     std::atomic<uint64_t> rx_pull_us   {0};
     std::atomic<uint64_t> rx_total_us  {0};
+    // Channel occupancy: samples inside a detected burst, over samples seen.
+    //
+    // This is what "duty" was always meant to convey and never did --
+    // rx_duty_pct is capture-thread utilisation, and was moreover computed
+    // from two timestamps bracketing the same code, so it read ~100%
+    // unconditionally. Conclusions of the form "duty is 100%, the channel is
+    // saturated" were reading a constant.
+    std::atomic<uint64_t> rx_burst_samples {0};
+    std::atomic<uint64_t> rx_seen_samples  {0};
 
     // Byte counters
     std::atomic<uint64_t> bytes_tx {0};

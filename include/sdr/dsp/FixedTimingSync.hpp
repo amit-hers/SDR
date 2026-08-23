@@ -73,6 +73,21 @@ public:
         // flat in beta_sh, so the proportional gain is what matters.
         int    alpha_sh   {12};
         int    beta_sh    {22};
+
+        // Record the per-symbol verification traces (mu, phase, TED inputs,
+        // NCO intermediates -- 20 vectors, one push_back each per symbol).
+        //
+        // These exist for the HDL bit-exact comparison and are dead weight in
+        // the live receiver. Leaving them on cost more CPU than symsync_crcf
+        // in the per-burst pipeline, which calls process() once per short
+        // burst: twenty vector allocations plus twenty push_backs per symbol
+        // swamp the arithmetic when the call is short. The 3.2x throughput
+        // advantage was measured on one contiguous 8.1M-sample call, where
+        // that overhead amortises away.
+        //
+        // `idx` is NOT gated -- the free-running path uses it to map sample
+        // windows onto the symbol stream, so it is functional, not tracing.
+        bool   trace      {false};
     };
 
     struct Result {

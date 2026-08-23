@@ -9,11 +9,14 @@
 #   --side-b  HOST    IP/hostname of PC-B (TX=439MHz / RX=434MHz)
 #   --user    USER    SSH user (default: $USER)
 #   --lan     IFACE   LAN interface to bridge (default: eth0)
-#   --bw      MHZ     Channel bandwidth MHz (default: 10)
+#   --bw      MHZ     Symbol rate in MHz (default: 1)
+#   --sps     N       Samples per symbol: 2 or 4 (default: 4)
+#   --mod     SCHEME  BPSK or QPSK (default: QPSK)
 #   --key     HEX     AES-256 key, 64 hex chars (enables encryption)
 #   --fec             Enable Reed-Solomon FEC
 #   --service         Install + enable systemd services on remote hosts
-#   --pluto-ip IP     PlutoSDR IP (default: 192.168.2.1)
+#   --pluto-a URI     Side-A Pluto IP/URI (default: 192.168.2.1)
+#   --pluto-b URI     Side-B Pluto IP/URI (default: 192.168.2.1)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,11 +27,14 @@ SIDE_A=""
 SIDE_B=""
 SSH_USER="${USER}"
 LAN_IFACE="eth0"
-BW_MHZ=10
+BW_MHZ=1
+SAMPLES_PER_SYMBOL=4
+MODULATION="QPSK"
 AES_KEY=""
 FEC=false
 INSTALL_SERVICE=false
-PLUTO_IP="192.168.2.1"
+PLUTO_A="192.168.2.1"
+PLUTO_B="192.168.2.1"
 REMOTE_DIR="~/sdr-datalink"
 
 while [[ $# -gt 0 ]]; do
@@ -38,10 +44,14 @@ while [[ $# -gt 0 ]]; do
         --user)     SSH_USER="$2";  shift 2 ;;
         --lan)      LAN_IFACE="$2"; shift 2 ;;
         --bw)       BW_MHZ="$2";    shift 2 ;;
+        --sps)      SAMPLES_PER_SYMBOL="$2"; shift 2 ;;
+        --mod)      MODULATION="$2"; shift 2 ;;
         --key)      AES_KEY="$2";   shift 2 ;;
         --fec)      FEC=true;       shift   ;;
         --service)  INSTALL_SERVICE=true; shift ;;
-        --pluto-ip) PLUTO_IP="$2";  shift 2 ;;
+        --pluto-ip) PLUTO_A="$2"; PLUTO_B="$2"; shift 2 ;;
+        --pluto-a)  PLUTO_A="$2"; shift 2 ;;
+        --pluto-b)  PLUTO_B="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -50,16 +60,25 @@ if [[ -z "$SIDE_A" || -z "$SIDE_B" ]]; then
     echo "Usage: $0 --side-a HOST_A --side-b HOST_B [OPTIONS]"
     exit 1
 fi
+if [[ "$SAMPLES_PER_SYMBOL" != "2" && "$SAMPLES_PER_SYMBOL" != "4" ]]; then
+    echo "--sps must be 2 or 4" >&2
+    exit 1
+fi
+case "$MODULATION" in
+    BPSK|QPSK) ;;
+    *) echo "--mod must be BPSK or QPSK" >&2; exit 1 ;;
+esac
 
 # ── Build ─────────────────────────────────────────────────────────────────
 echo "[deploy] Building..."
 cmake -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -S "$ROOT" -G Ninja
 cmake --build "$BUILD" -j"$(nproc)"
-echo "[deploy] Build OK: $BUILD/sdr-datalink"
+DAEMON="$BUILD/src/daemon/sdr-datalink"
+echo "[deploy] Build OK: $DAEMON"
 
 # ── Generate config JSON ───────────────────────────────────────────────────
 make_config() {
-    local freq_tx=$1 freq_rx=$2
+    local freq_tx=$1 freq_rx=$2 pluto=$3 node_id=$4 stats_path=$5
     local encrypt_flag="false"
     local aes_field=''
     if [[ -n "$AES_KEY" ]]; then
@@ -72,13 +91,14 @@ make_config() {
     cat <<JSON
 {
   "mode":             "bridge",
-  "pluto_ip":         "${PLUTO_IP}",
+  "pluto_ip":         "${pluto}",
   "freq_tx_mhz":      ${freq_tx},
   "freq_rx_mhz":      ${freq_rx},
   "bw_mhz":           ${BW_MHZ},
+  "samples_per_symbol": ${SAMPLES_PER_SYMBOL},
   "tx_atten_db":      10,
   "gain_mode":        "fast_attack",
-  "modulation":       "AUTO",
+  "modulation":       "${MODULATION}",
   "tap_iface":        "sdr0",
   "bridge_iface":     "br0",
   "lan_iface":        "${LAN_IFACE}",
@@ -88,7 +108,8 @@ make_config() {
   ${aes_field}
   "stats_interval_ms": 1000,
   "monitor_port":     8080,
-  "node_id":          "0x00000001",
+  "node_id":          "${node_id}",
+  "stats_path":       "${stats_path}",
   "scan_start_mhz":   430.0,
   "scan_step_mhz":    1.0,
   "scan_n":           20
@@ -96,8 +117,8 @@ make_config() {
 JSON
 }
 
-CONFIG_A=$(make_config 434.0 439.0)
-CONFIG_B=$(make_config 439.0 434.0)
+CONFIG_A=$(make_config 434.0 439.0 "$PLUTO_A" "0x00000001" "/tmp/sdr_stats_A.json")
+CONFIG_B=$(make_config 439.0 434.0 "$PLUTO_B" "0x00000002" "/tmp/sdr_stats_B.json")
 
 # ── Deploy to a single host ────────────────────────────────────────────────
 deploy_host() {
@@ -108,19 +129,20 @@ deploy_host() {
     ssh "$SSH" "mkdir -p $REMOTE_DIR/monitor"
 
     # Binary
-    scp -q "$BUILD/sdr-datalink" "${SSH}:${REMOTE_DIR}/"
+    scp -q "$DAEMON" "${SSH}:${REMOTE_DIR}/"
 
     # Config
     echo "$CONFIG" | ssh "$SSH" "cat > ${REMOTE_DIR}/config.json"
 
     # Monitor
-    scp -qr "$ROOT/src/monitor/" "${SSH}:${REMOTE_DIR}/monitor/"
+    scp -qr "$ROOT/src/monitor/." "${SSH}:${REMOTE_DIR}/monitor/"
 
     # Scripts
     scp -q "$ROOT/scripts/setup-service.sh" "${SSH}:${REMOTE_DIR}/"
 
     if $INSTALL_SERVICE; then
         ssh "$SSH" "cd $REMOTE_DIR && sudo bash setup-service.sh \
+            --binary ${REMOTE_DIR}/sdr-datalink \
             --config ${REMOTE_DIR}/config.json"
     else
         # Just restart daemon

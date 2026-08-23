@@ -33,7 +33,7 @@ void P2PMode::txThread() {
     std::vector<uint8_t>             pkt(MAX_PAYLOAD);
     std::vector<std::complex<float>> iq_syms, iq_shaped;
     std::vector<int16_t>             iq_hw;
-    RRCInterp interp;
+    RRCInterp interp(cfg_.samples_per_symbol);
 
     while (running_.load()) {
         ssize_t n = udp_->read(pkt.data(), pkt.size());
@@ -66,7 +66,8 @@ void P2PMode::txThread() {
 void P2PMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
     std::vector<std::complex<float>> iq_f, iq_dec, iq_timed, iq_syms;
-    AGC agc; RRCDecim decim; TimingSync tsync; CostasLoop costas;
+    AGC agc; RRCDecim decim(cfg_.samples_per_symbol);
+    TimingSync tsync(cfg_.samples_per_symbol); CostasLoop costas;
     Deframer deframer;
 
     while (running_.load()) {

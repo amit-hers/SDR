@@ -80,6 +80,7 @@ Config Config::fromFile(const std::string& path) {
     c.freq_tx_mhz      = jsonDouble(json, "freq_tx_mhz",       c.freq_tx_mhz);
     c.freq_rx_mhz      = jsonDouble(json, "freq_rx_mhz",       c.freq_rx_mhz);
     c.bw_mhz           = jsonInt   (json, "bw_mhz",            c.bw_mhz);
+    c.samples_per_symbol = jsonInt (json, "samples_per_symbol", c.samples_per_symbol);
     c.tx_atten_db      = jsonDouble(json, "tx_atten_db",       c.tx_atten_db);
     c.gain_mode        = jsonStr   (json, "gain_mode",         c.gain_mode);
     c.tx_duty_max      = jsonDouble(json, "tx_duty_max",       c.tx_duty_max);
@@ -146,6 +147,10 @@ void Config::validate() {
     if (tx_atten_db > 89.0) tx_atten_db = 89.0;
     if (bw_mhz < 1)       bw_mhz = 1;
     if (bw_mhz > 20)      bw_mhz = 20;
+    if (samples_per_symbol != 2 && samples_per_symbol != 4)
+        throw std::invalid_argument(
+            "Config: samples_per_symbol must be 2 or 4 (got " +
+            std::to_string(samples_per_symbol) + ")");
     if (arq_window < 1)     arq_window = 1;
     if (arq_timeout_ms < 1) arq_timeout_ms = 1;
     if (arq_max_retries < 0) arq_max_retries = 0;
@@ -160,18 +165,18 @@ void Config::validate() {
     if (rt_priority < 0) rt_priority = 0;
     if (rt_priority > 90) rt_priority = 90;
 
-    // Above ~2 MHz the IQ stream exceeds what USB 2.0 sustains, so the
-    // receiver spends most of its time not listening and silently misses
-    // most bursts. Warn rather than clamp: a high rate is legitimate for
-    // TX-only or scan use, it just cripples reception.
-    if (bw_mhz > 2) {
+    // Warn based on actual host traffic rather than symbol rate. Interleaved
+    // int16 I/Q costs four bytes/sample. Around 32 MB/s is the measured edge
+    // for sustained USB reception; real Gigabit Ethernet may go higher.
+    const int sample_rate_msps = bw_mhz * samples_per_symbol;
+    const int stream_rate_mbs  = sample_rate_msps * 4;
+    if (stream_rate_mbs > 32) {
         std::cerr << "[sdr] WARNING: bw_mhz=" << bw_mhz << " => "
-                  << (bw_mhz * 4) << " MSPS => " << (bw_mhz * 16)
+                  << sample_rate_msps << " MSPS => " << stream_rate_mbs
                   << " MB/s over USB, which exceeds USB 2.0's practical "
-                     "throughput. Expect the receiver to miss most frames "
-                     "(measured RX duty cycle: 99% at bw_mhz=1, 95% at 2, "
-                     "but only ~38% at 5). Use bw_mhz 1-2 for reliable "
-                     "reception.\n";
+                     "sustained receive throughput. Prefer the board's real "
+                     "Gigabit Ethernet backend or reduce bw_mhz / "
+                     "samples_per_symbol.\n";
     }
 
     // Modulation. Acquisition is always BPSK; this selects the payload

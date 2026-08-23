@@ -13,7 +13,8 @@ characters in values.
 | `pluto_ip` | `192.168.2.1` | Plain device IP or explicit libiio URI such as `usb:1.2.3` |
 | `freq_tx_mhz` | `434.0` | TX center frequency in MHz |
 | `freq_rx_mhz` | `439.0` | RX center frequency in MHz; must match the peer's TX frequency |
-| `bw_mhz` | `1` | Integer symbol rate in MHz, clamped to 1–20; sample rate is 4x. Use 1–2 for sustained RX |
+| `bw_mhz` | `1` | Integer symbol rate in MHz, clamped to 1–20; sample rate is `bw_mhz * samples_per_symbol` MSPS |
+| `samples_per_symbol` | `4` | Host I/Q samples per symbol; `2` or `4`. Two reduces transport and DSP load but requires validation on both peers |
 | `tx_atten_db` | `10.0` | TX attenuation, clamped to 0–89 dB; 0 is maximum transmit power |
 | `gain_mode` | `fast_attack` | Passed to the AD936x RX gain-control attribute |
 | `modulation` | `BPSK` | `BPSK`, `QPSK`, `16QAM`, or `64QAM`; `AUTO` warns and becomes BPSK |

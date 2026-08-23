@@ -35,16 +35,18 @@ Controller::Controller(Config cfg) : cfg_(std::move(cfg)) {
     // skirts, which is exactly the energy the matched filter needs to
     // reconstruct symbol shape. 1.4x leaves a little margin above 1.35.
     //
-    // cfg_.bw_mhz is the symbol rate in MHz; the sample rate is RRC_SPS(4)
-    // times that.
+    // cfg_.bw_mhz is the symbol rate in MHz; samples_per_symbol controls the
+    // host-side I/Q rate. Both ends must use the same value.
     const double symbol_rate = static_cast<double>(cfg_.bw_mhz) * 1e6;
     const double analog_bw   = symbol_rate * cfg_.rx_bw_factor;
     radio_->setBandwidth(static_cast<long long>(analog_bw));
-    radio_->setSampleRate(static_cast<long long>(symbol_rate) * 4);
+    radio_->setSampleRate(static_cast<long long>(symbol_rate) *
+                          cfg_.samples_per_symbol);
     std::cerr << "[sdr] symbol rate " << symbol_rate / 1e6 << " MHz -> analog "
                  "bandwidth " << analog_bw / 1e6 << " MHz (RRC rolloff "
               << RRC_ROLLOFF << " occupies " << (1.0 + RRC_ROLLOFF)
-              << "x; factor=" << cfg_.rx_bw_factor << ")\n";
+              << "x; factor=" << cfg_.rx_bw_factor << "); "
+              << cfg_.samples_per_symbol << " samples/symbol\n";
     radio_->setGainMode(cfg_.gain_mode);
 
     CoarseFreqCorrect::setMethod(cfg_.cfo_method == "grid"

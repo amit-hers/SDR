@@ -45,7 +45,7 @@ double CoarseFreqCorrect::estimateFft(const std::vector<std::complex<double>>& s
     while (N < sq.size()) N <<= 1;          // radix-2 for liquid's planner
 
     std::vector<liquid_float_complex> in(N), out(N);
-    std::memset(in.data(), 0, N * sizeof(liquid_float_complex));
+    std::fill(in.begin(), in.end(), liquid_float_complex{});
     for (size_t i = 0; i < sq.size(); ++i) {
         std::complex<float> v(static_cast<float>(sq[i].real()),
                               static_cast<float>(sq[i].imag()));

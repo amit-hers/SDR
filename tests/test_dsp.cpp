@@ -13,21 +13,21 @@
 #include <numeric>
 
 static void test_rrc_shape() {
-    sdr::RRCInterp interp;
-    sdr::RRCDecim  decim;
-
     // QPSK symbols
     std::vector<std::complex<float>> syms = {
         {.707f,.707f},{-.707f,.707f},{-.707f,-.707f},{.707f,-.707f},
         {.707f,.707f},{.707f,-.707f}
     };
 
-    std::vector<std::complex<float>> up, down;
-    interp.process(syms, up);
-    assert(up.size() == syms.size() * static_cast<size_t>(sdr::RRC_SPS));
-
-    decim.process(up, down);
-    assert(!down.empty());
+    for (int sps : {2, sdr::RRC_SPS}) {
+        sdr::RRCInterp interp(sps);
+        sdr::RRCDecim  decim(sps);
+        std::vector<std::complex<float>> up, down;
+        interp.process(syms, up);
+        assert(up.size() == syms.size() * static_cast<size_t>(sps));
+        decim.process(up, down);
+        assert(!down.empty());
+    }
     std::cout << "  [dsp] RRC interp/decim size OK: PASS\n";
 }
 

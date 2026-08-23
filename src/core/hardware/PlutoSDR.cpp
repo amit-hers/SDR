@@ -168,7 +168,7 @@ void PlutoSDR::setSampleRate(long long sps) {
     // out well below the 61.44 MSPS LVDS spec) and silently keeps the prior
     // rate on rejection — these calls previously ignored that, so a request
     // for an unachievable rate left the whole DSP chain's oversampling-ratio
-    // assumption (RRC_SPS) silently wrong. Fail loudly instead.
+    // configured oversampling assumption silently wrong. Fail loudly instead.
     int rx_ret = iio_channel_attr_write_longlong(rx_ch_, "sampling_frequency", sps);
     int tx_ret = iio_channel_attr_write_longlong(tx_ch_, "sampling_frequency", sps);
     if (rx_ret < 0 || tx_ret < 0)
@@ -180,9 +180,8 @@ void PlutoSDR::setSampleRate(long long sps) {
             "interface ceiling (CMOS-mode boards: ~30.72 MSPS, not 61.44)");
 
     // A write can succeed and still land on a different rate: the driver
-    // quantises to what the clock tree can synthesise. RRC_SPS assumes the
-    // sample rate is exactly 4x the symbol rate, so report the applied value
-    // and complain if it is not what we asked for.
+    // quantises to what the clock tree can synthesise. The DSP assumes the
+    // applied rate exactly matches the configured rate, so report readback.
     long long rx_now = 0, tx_now = 0;
     iio_channel_attr_read_longlong(rx_ch_, "sampling_frequency", &rx_now);
     iio_channel_attr_read_longlong(tx_ch_, "sampling_frequency", &tx_now);
@@ -191,7 +190,7 @@ void PlutoSDR::setSampleRate(long long sps) {
     if (rx_now != sps || tx_now != sps)
         std::cerr << "[sdr] WARNING: applied sample rate differs from the "
                      "request; the DSP chain assumes exactly "
-                  << sps << " (RRC_SPS oversampling), so timing recovery will "
+                  << sps << ", so timing recovery will "
                      "be off by the ratio.\n";
 }
 

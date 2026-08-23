@@ -85,7 +85,8 @@ Edit `config.json` / `config_node2.json`.
 |---|---|---|
 | `pluto_ip` | — | IP or `usb:1.2.3` |
 | `freq_tx_mhz` / `freq_rx_mhz` | 434 / 439 | peer must mirror these |
-| `bw_mhz` | 1 | integer symbol rate in MHz; sample rate is 4×. Config clamps at 20, hardware may reject high rates, and 1–2 is the practical RX range |
+| `bw_mhz` | 1 | integer symbol rate in MHz; sample rate is `bw_mhz * samples_per_symbol` MSPS |
+| `samples_per_symbol` | 4 | `2` for throughput experiments or `4` for validated compatibility |
 | `tx_atten_db` | 10 | 0 = max power |
 | `rx_bw_factor` | 1.4 | analog filter as a multiple of symbol rate |
 | `modulation` | BPSK | `BPSK` or `QPSK` recommended. `AUTO` warns and is forced to BPSK |

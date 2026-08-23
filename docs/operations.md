@@ -99,6 +99,30 @@ Binding the dashboard to `127.0.0.1` is recommended unless remote access is
 required. The server has control endpoints and no authentication; do not
 expose it to an untrusted network.
 
+## 7 Mbit/s experimental benchmark
+
+The repository includes a one-host/two-radio A-to-B benchmark. It uses a
+separate network namespace for node B so the kernel cannot bypass RF, fixed
+QPSK at 5 Msym/s, two samples/symbol, and an 85% one-way duty cap:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+sudo ./scripts/benchmark-local.sh --duration 30
+```
+
+Review `configs/throughput_a.json` and `configs/throughput_b.json` first,
+especially radio addresses, frequencies, and attenuation. The provided files
+match the currently discovered lab radios and keep node B at 89 dB TX
+attenuation for a one-way test.
+
+For a 1200-byte aggregate, QPSK carries roughly 1.82 payload bits per symbol
+after acquisition, frame, CRC, and postamble overhead. At 5 Msym/s and 85%
+duty the resulting theoretical ceiling is approximately 7.7 Mbit/s before
+loss and host-side overhead. Therefore a measured 7 Mbit/s is plausible but
+not guaranteed. This profile is experimental; the compatibility profile
+remains 1 Msym/s and four samples/symbol.
+
 ## Logging and profiling
 
 ```bash

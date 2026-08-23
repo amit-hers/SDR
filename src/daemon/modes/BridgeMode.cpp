@@ -53,7 +53,8 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
                           "using ls+costas\n";
     }
     std::cerr << "[sdr] rx buffer " << cfg_.rx_buffer_samples << " samples ("
-              << (cfg_.rx_buffer_samples / (cfg_.bw_mhz * 4.0e6) * 1000.0)
+              << (cfg_.rx_buffer_samples /
+                  (cfg_.bw_mhz * cfg_.samples_per_symbol * 1.0e6) * 1000.0)
               << " ms deadline), queue depth " << cfg_.rx_queue_depth << "\n";
     std::cerr << "[sdr] carrier sense: "
               << (cfg_.carrier_sense ? "ON" : "OFF")
@@ -187,7 +188,7 @@ void BridgeMode::txThread() {
     std::vector<uint8_t>             pkt(MAX_PAYLOAD);
     std::vector<std::complex<float>> iq_syms, iq_shaped;
     std::vector<int16_t>             iq_hw;
-    RRCInterp interp;
+    RRCInterp interp(cfg_.samples_per_symbol);
 
     // A txPush costs the full tx-buffer length in airtime no matter how few
     // samples were written, so frames are staged here and flushed together.
@@ -205,7 +206,8 @@ void BridgeMode::txThread() {
     // quiet until `air / duty` has elapsed, so a gap of air*(1/duty - 1)
     // opens between bursts. Without this the transmitter fills the channel
     // solid and the peer's burst detector has nothing to acquire in.
-    const double sample_rate_tx = static_cast<double>(cfg_.bw_mhz) * 4e6;
+    const double sample_rate_tx = static_cast<double>(cfg_.bw_mhz) * 1e6 *
+                                  cfg_.samples_per_symbol;
     const double duty = (cfg_.tx_duty_max > 0.0 && cfg_.tx_duty_max < 1.0)
                       ? cfg_.tx_duty_max : 1.0;
     std::chrono::steady_clock::time_point next_tx_allowed{};
@@ -429,8 +431,17 @@ void BridgeMode::captureThread() {
                 std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
         };
         stats_.rx_pull_us .fetch_add(us(t0, t1), std::memory_order_relaxed);
-        stats_.rx_total_us.fetch_add(us(t0, std::chrono::steady_clock::now()),
-                                     std::memory_order_relaxed);
+        // Span the whole iteration, measured from the END of the previous
+        // one. Taking it from t0 to "now" bracketed the same code as
+        // rx_pull_us and made the ratio ~1 by construction.
+        {
+            static thread_local std::chrono::steady_clock::time_point prev_iter{};
+            auto now2 = std::chrono::steady_clock::now();
+            if (prev_iter.time_since_epoch().count() != 0)
+                stats_.rx_total_us.fetch_add(us(prev_iter, now2),
+                                             std::memory_order_relaxed);
+            prev_iter = now2;
+        }
 
         if (n <= 0) continue;
         buf.resize(static_cast<size_t>(n) * 2);
@@ -500,7 +511,7 @@ void BridgeMode::rxThread() {
     applyRealtime("dsp", 3);
     std::vector<int16_t>             iq_hw;
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
-    AGC agc; TimingSync tsync; CostasLoop costas;
+    AGC agc; TimingSync tsync(cfg_.samples_per_symbol); CostasLoop costas;
 
     // Free-running fixed-point timing recovery (SDR_TSYNC=fixed).
     //
@@ -517,12 +528,26 @@ void BridgeMode::rxThread() {
     // it still helps (measured: symbol-rate CFO beat Costas-alone on all
     // three captures), and AGC is dropped -- the Gardner error is
     // power-normalised, so it does not need one.
-    const bool tsync_freerun = [] {
+    // SDR_TSYNC selects the timing-recovery implementation:
+    //   liquid  (default) symsync_crcf, the validated path
+    //   fixed             FixedTimingSync as a DROP-IN inside the existing
+    //                     per-burst pipeline -- CFO, AGC, per-burst reset and
+    //                     preamble alignment all unchanged, only the matched
+    //                     filter + symbol timing swapped. This is where the
+    //                     measured 3.2x speedup (20.9 vs 6.56 Msamp/s) pays
+    //                     off without disturbing anything that works.
+    //   freerun           the continuous, never-reset architecture. Measured
+    //                     live at 19-20% burst acquisition against liquid's
+    //                     69-72%, so it is NOT the default; kept for further
+    //                     investigation of why the offline replay disagreed.
+    const std::string tsync_sel = [] {
         const char* e = std::getenv("SDR_TSYNC");
-        return e && std::string(e) == "fixed";
+        return std::string(e ? e : "liquid");
     }();
+    const bool tsync_freerun = (tsync_sel == "freerun");
+    const bool tsync_dropin  = (tsync_sel == "fixed");
     FixedTimingSync::Config ftcfg;
-    ftcfg.sps      = RRC_SPS;
+    ftcfg.sps      = cfg_.samples_per_symbol;
     ftcfg.interp   = FixedTimingSync::Config::Interp::POLYPHASE;
     ftcfg.n_phases = 32;
     ftcfg.fixed_loop = true;
@@ -534,6 +559,9 @@ void BridgeMode::rxThread() {
     if (tsync_freerun)
         std::cerr << "[rx] timing recovery: FIXED-POINT free-running "
                      "(symbol-domain CFO, no AGC)\n";
+    else if (tsync_dropin)
+        std::cerr << "[rx] timing recovery: FIXED-POINT drop-in "
+                     "(per-burst pipeline unchanged)\n";
     BurstDetector::Config bcfg;
     bcfg.block_size  = static_cast<size_t>(cfg_.burst_block);
     bcfg.threshold_x = static_cast<float>(cfg_.burst_threshold);
@@ -541,7 +569,7 @@ void BridgeMode::rxThread() {
     bcfg.merge_gap   = static_cast<size_t>(cfg_.burst_merge_gap);
     bcfg.noise_quantile = static_cast<float>(cfg_.burst_noise_q);
     BurstDetector detector(bcfg);
-    PreambleSync  psync(RRC_SPS);
+    PreambleSync  psync(cfg_.samples_per_symbol);
     // Symbol-rate twin of psync, for the free-running path. At 1 sample per
     // symbol the RRC-shaped reference collapses to the preamble symbols
     // themselves, which is the correct matched reference post-decimation.
@@ -734,6 +762,12 @@ void BridgeMode::rxThread() {
             fres = fts.process(iq_f);
         }
         stats_.bursts_detected.fetch_add(windows.size(), std::memory_order_relaxed);
+        {
+            uint64_t occ = 0;
+            for (const auto& w : windows) occ += (w.end > w.start) ? (w.end - w.start) : 0;
+            stats_.rx_burst_samples.fetch_add(occ, std::memory_order_relaxed);
+            stats_.rx_seen_samples .fetch_add(iq_f.size(), std::memory_order_relaxed);
+        }
 
         for (const auto& win : windows) {
             // The detector marks where energy is, which is not the same as
@@ -743,7 +777,8 @@ void BridgeMode::rxThread() {
             // at least one maximum-size frame (plus slack for the alignment
             // search) so a located frame is always complete.
             const size_t max_frame_samples =
-                (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 * static_cast<size_t>(RRC_SPS);
+                (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 *
+                static_cast<size_t>(cfg_.samples_per_symbol);
             size_t win_end = std::min(iq_f.size(),
                                       std::max(win.end, win.start + max_frame_samples
                                                         + static_cast<size_t>(cfg_.burst_margin)));
@@ -800,7 +835,9 @@ void BridgeMode::rxThread() {
                     // same one domain down.
                     std::vector<std::complex<float>> stail(
                         sym.begin() + static_cast<long>(sfrom), sym.end());
-                    PreambleSync::Match smatch = psym.find(stail, preamble_search / RRC_SPS);
+                    PreambleSync::Match smatch = psym.find(
+                        stail, preamble_search /
+                               static_cast<size_t>(cfg_.samples_per_symbol));
                     if (!smatch.found) break;
                     const size_t fstart = sfrom + static_cast<size_t>(smatch.offset);
                     if (fstart + HEADER_SYMS >= sym.size()) break;
@@ -949,7 +986,17 @@ void BridgeMode::rxThread() {
                 // NOTE: TimingSync is itself an RRC matched-filter + decimator
                 // (symsync_crcf expects oversampled input); do not RRCDecim first.
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_TSYNC, offset_buf.size());
-                  tsync.process(offset_buf, iq_timed); }     // matched filter + symbol timing
+                  if (tsync_dropin) {
+                      // Constructed fresh per attempt for the same reason
+                      // tsync.reset() is called above: no state may carry
+                      // over from a failed alignment. FixedTimingSync holds
+                      // all loop state inside process(), so a fresh call is
+                      // already a cold start.
+                      auto fr = fts.process(offset_buf);
+                      iq_timed = std::move(fr.syms);
+                  } else {
+                      tsync.process(offset_buf, iq_timed); // matched filter + symbol timing
+                  } }
 
                 // Carrier recovery. The default is a least-squares estimate
                 // taken from the known BPSK acquisition symbols, then a single

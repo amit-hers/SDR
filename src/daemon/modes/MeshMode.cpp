@@ -33,7 +33,7 @@ void MeshMode::txThread() {
     std::vector<uint8_t>             pkt(MAX_PAYLOAD);
     std::vector<std::complex<float>> iq_syms, iq_shaped;
     std::vector<int16_t>             iq_hw;
-    RRCInterp interp;
+    RRCInterp interp(cfg_.samples_per_symbol);
 
     while (running_.load()) {
         ssize_t n = tun_->read(pkt.data(), pkt.size());
@@ -69,9 +69,11 @@ void MeshMode::txThread() {
 void MeshMode::rxThread() {
     std::vector<int16_t>             iq_hw(IQ_SAMPLES * 2);
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
-    AGC agc; TimingSync tsync; CostasLoop costas; DataAidedSync dasync;
+    AGC agc; TimingSync tsync(cfg_.samples_per_symbol); CostasLoop costas;
+    DataAidedSync dasync;
     BurstDetector detector;
-    const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 4e6;
+    const double sample_rate = static_cast<double>(cfg_.bw_mhz) * 1e6 *
+                               cfg_.samples_per_symbol;
 
     while (running_.load()) {
         int n = radio_.rxPull(iq_hw.data(), IQ_SAMPLES);
