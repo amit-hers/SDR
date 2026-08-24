@@ -167,6 +167,49 @@ void BridgeMode::stop() {
                       << " hit_max_frames=" << walk_exit_maxframes_.load()
                       << " (cap=" << MAX_FRAMES_PER_WINDOW << ")\n";
         }
+        {
+            uint64_t n = q_n_.load(), en = q_evm_n_.load();
+            std::cerr << "RX-QUAL das_n=" << n
+                      << " |resid_cfo|=" << (n ? double(q_freq_abs_ur_.load()) / double(n) / 1e6 : 0.0)
+                      << " rad/sym"
+                      << " das_quality=" << (n ? double(q_qual_milli_.load()) / double(n) / 1000.0 : 0.0)
+                      << " | EVM acq=" << (en ? double(q_evm_acq_pct_.load()) / double(en) : 0.0) << "%"
+                      << " payload=" << (en ? double(q_evm_pay_pct_.load()) / double(en) : 0.0) << "%"
+                      << " (n=" << en << ")\n";
+            uint64_t pn = q_pass_n_.load(), fn = q_fail_n_.load();
+            auto avg = [](uint64_t sum, uint64_t k){ return k ? double(sum)/double(k) : 0.0; };
+            std::cerr << "RX-QUAL  CRC-PASS n=" << pn
+                      << " EVM acq=" << avg(q_pass_acq_.load(), pn) << "%"
+                      << " pay=" << avg(q_pass_pay_.load(), pn) << "%"
+                      << " |cfo|=" << avg(q_pass_cfo_ur_.load(), pn)/1e6 << " rad/sym\n";
+            auto pc=[&](uint64_t v,uint64_t k){ return k ? 100.0*double(v)/double(k) : 0.0; };
+            std::cerr << "RX-STRUCT PASS n=" << pn
+                      << " mean_plen=" << avg(st_pass_plen_.load(), pn)
+                      << " inverted=" << pc(st_pass_inv_.load(), pn) << "%"
+                      << " short_bytes=" << pc(st_pass_short_.load(), pn) << "%"
+                      << " aggr=" << pc(st_pass_aggr_.load(), pn) << "%\n";
+            std::cerr << "RX-STRUCT FAIL n=" << fn
+                      << " mean_plen=" << avg(st_fail_plen_.load(), fn)
+                      << " inverted=" << pc(st_fail_inv_.load(), fn) << "%"
+                      << " short_bytes=" << pc(st_fail_short_.load(), fn) << "%"
+                      << " aggr=" << pc(st_fail_aggr_.load(), fn) << "%"
+                      << " wrong_mod=" << pc(st_fail_modbad_.load(), fn) << "%\n";
+            uint64_t tp = t_pass_n_.load(), tf = t_fail_n_.load();
+            std::cerr << "RX-TAIL  PASS n=" << tp
+                      << " p95=" << avg(t_pass_p95_.load(), tp) << "%"
+                      << " p99=" << avg(t_pass_p99_.load(), tp) << "%"
+                      << " max=" << avg(t_pass_max_.load(), tp) << "%"
+                      << " weak_syms/frame=" << avg(t_pass_weak_.load(), tp) << "\n";
+            std::cerr << "RX-TAIL  FAIL n=" << tf
+                      << " p95=" << avg(t_fail_p95_.load(), tf) << "%"
+                      << " p99=" << avg(t_fail_p99_.load(), tf) << "%"
+                      << " max=" << avg(t_fail_max_.load(), tf) << "%"
+                      << " weak_syms/frame=" << avg(t_fail_weak_.load(), tf) << "\n";
+            std::cerr << "RX-QUAL  CRC-FAIL n=" << fn
+                      << " EVM acq=" << avg(q_fail_acq_.load(), fn) << "%"
+                      << " pay=" << avg(q_fail_pay_.load(), fn) << "%"
+                      << " |cfo|=" << avg(q_fail_cfo_ur_.load(), fn)/1e6 << " rad/sym\n";
+        }
         std::cerr << "TX-BLOCK duty_defers=" << tx_duty_defers_.load()
                   << " duty_slept=" << (tx_duty_waits_us_.load() / 1e6) << " s"
                   << " (" << (wall > 0 ? 100.0 * (tx_duty_waits_us_.load() / 1e6) / wall : 0.0)
@@ -579,6 +622,71 @@ void BridgeMode::captureThread() {
         capture_cv_.notify_one();
     }
     capture_cv_.notify_all();   // release a waiting DSP thread on shutdown
+}
+
+// Scale-normalised EVM against the decided constellation, in percent.
+// Measured on the symbols actually handed to the demodulator, so it reflects
+// everything upstream: timing recovery, CFO correction and carrier tracking.
+// Per-symbol error statistics against the decided constellation.
+//
+// The mean alone cannot see what breaks frames: one bad symbol in ~55,000
+// fails an 8352-bit frame, which is a 7% frame-error rate while shifting mean
+// EVM by under 2%. Frame errors live in the tail, so record p95/p99/max and
+// count symbols whose decision margin is small enough to be a likely bit
+// error.
+struct EvmStats {
+    double rms{0}, p95{0}, p99{0}, max{0};
+    uint32_t weak{0};      // symbols decided with little margin
+    uint32_t n{0};
+};
+
+// Scaling note: symbols are normalised so their MEAN MAGNITUDE matches the
+// constellation's. QPSK decisions sit at (+-1,+-1), mean magnitude sqrt(2);
+// BPSK at (+-1,0), mean magnitude 1. Normalising both to radius 1 (as this
+// did) inflated QPSK error by sqrt(2) and made the acquisition/payload split
+// incomparable -- the very comparison it existed to support.
+static EvmStats evmStats(const std::vector<std::complex<float>>& s,
+                         size_t a, size_t b, bool qpsk) {
+    EvmStats st;
+    if (b <= a || b > s.size()) return st;
+    double amp = 0.0;
+    for (size_t i = a; i < b; ++i) amp += std::abs(s[i]);
+    amp /= double(b - a);
+    if (amp <= 0.0) return st;
+    const double scale = (qpsk ? std::sqrt(2.0) : 1.0) / amp;
+
+    std::vector<double> e;
+    e.reserve(b - a);
+    double sum2 = 0.0;
+    for (size_t i = a; i < b; ++i) {
+        const double re = s[i].real() * scale, im = s[i].imag() * scale;
+        const double dr = (re >= 0 ? 1.0 : -1.0);
+        const double di = qpsk ? (im >= 0 ? 1.0 : -1.0) : 0.0;
+        const double d2 = (re - dr) * (re - dr) + (im - di) * (im - di);
+        sum2 += d2;
+        e.push_back(std::sqrt(d2));
+        // Decision margin: distance to the nearest decision boundary. QPSK
+        // decides on both axes, BPSK only on the real one.
+        const double margin = qpsk ? std::min(std::fabs(re), std::fabs(im))
+                                   : std::fabs(re);
+        if (margin < 0.35) ++st.weak;
+    }
+    st.n   = static_cast<uint32_t>(e.size());
+    st.rms = 100.0 * std::sqrt(sum2 / double(e.size()));
+    std::sort(e.begin(), e.end());
+    auto pick = [&](double q) {
+        size_t k = static_cast<size_t>(q * double(e.size() - 1));
+        return 100.0 * e[k];
+    };
+    st.p95 = pick(0.95);
+    st.p99 = pick(0.99);
+    st.max = 100.0 * e.back();
+    return st;
+}
+
+static double evmPct(const std::vector<std::complex<float>>& s,
+                     size_t a, size_t b, bool qpsk) {
+    return evmStats(s, a, b, qpsk).rms;
 }
 
 // ── RX thread ────────────────────────────────────────────────────────────────
@@ -1109,6 +1217,7 @@ void BridgeMode::rxThread() {
                 // $SDR_RX_CARRIER selects the method so the comparison stays
                 // reproducible on hardware: ls (default) | costas | none.
                 bool track_payload = false;
+                float cur_cfo = 0.f;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_CARRIER, iq_timed.size());
                 switch (carrier_mode_) {
                     case CarrierMode::COSTAS:
@@ -1138,7 +1247,17 @@ void BridgeMode::rxThread() {
                         // below. See SplitModem::PayloadTap.
                         iq_syms = iq_timed;
                         auto est = dasync.estimate(iq_timed, DAS_SEARCH_SYMS);
-                        if (est.ok) DataAidedSync::derotate(iq_syms, est);
+                        if (est.ok) {
+                            DataAidedSync::derotate(iq_syms, est);
+                            cur_cfo = est.freq_per_sym;
+                            q_n_.fetch_add(1, std::memory_order_relaxed);
+                            q_freq_abs_ur_.fetch_add(
+                                static_cast<uint64_t>(std::fabs(est.freq_per_sym) * 1e6),
+                                std::memory_order_relaxed);
+                            q_qual_milli_.fetch_add(
+                                static_cast<uint64_t>(est.quality * 1000.f),
+                                std::memory_order_relaxed);
+                        }
                         track_payload = true;
                         break;
                     }
@@ -1160,6 +1279,16 @@ void BridgeMode::rxThread() {
                 // roughly zero phase and frequency, so the loop begins from
                 // rest and only has to follow the drift that open-loop
                 // extrapolation accumulates towards the end of a frame.
+                // Payload quality must be measured HERE, not on iq_syms.
+                //
+                // demodulate() applies this tap to an internal copy of the
+                // payload symbols, so iq_syms still holds them BEFORE residual
+                // carrier tracking -- still rotating. Measuring there reported
+                // ~68% payload EVM with p95 over 100% on frames that passed
+                // CRC cleanly, because it was scoring symbols the demodulator
+                // never decides on. After the swap below, `p` holds exactly
+                // what the bit decisions are taken from.
+                double cur_evm_acq2 = 0.0;
                 SplitModem::PayloadTap tap;
                 if (track_payload) {
                     tap = [&](std::vector<std::complex<float>>& p) {
@@ -1167,14 +1296,42 @@ void BridgeMode::rxThread() {
                         std::vector<std::complex<float>> out;
                         costas.process(p, out);
                         p.swap(out);
+                        if (!p.empty()) {
+                            const bool q = (tx_mod_ != ModCode::BPSK);
+                            cur_tail = evmStats(p, 0, p.size(), q);
+                            cur_evm_pay_post = cur_tail.rms;
+                        }
                     };
                 }
+                (void)cur_evm_acq2;
 
+                double cur_evm_acq = 0.0, cur_evm_pay = 0.0;
+                bool   cur_evm_ok = false;
+                EvmStats cur_tail{};
+                double cur_evm_pay_post = 0.0;
                 SplitModem::Result sm;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
                   sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
                                               SYNC_SEARCH_SYMS, tap); }
                 if (sm.header_ok) {
+                    // Acquisition is always BPSK; payload is whatever the
+                    // header declared. Splitting the two separates a carrier
+                    // fault (both degrade) from a payload-only fault.
+                    size_t a0 = sm.sync_sym;
+                    size_t a1 = std::min(a0 + HEADER_SYMS, iq_syms.size());
+                    size_t p1 = std::min(sm.end_sym, iq_syms.size());
+                    if (a1 > a0 && p1 > a1) {
+                        cur_evm_acq = evmPct(iq_syms, a0, a1, false);
+                        // Payload figure comes from the tap (post-tracking);
+                        // falls back to 0 when no tap ran (carrier_mode NONE).
+                        cur_evm_pay = cur_evm_pay_post;
+                        cur_evm_ok  = true;
+                        q_evm_acq_pct_.fetch_add(static_cast<uint64_t>(cur_evm_acq),
+                                                 std::memory_order_relaxed);
+                        q_evm_pay_pct_.fetch_add(static_cast<uint64_t>(cur_evm_pay),
+                                                 std::memory_order_relaxed);
+                        q_evm_n_.fetch_add(1, std::memory_order_relaxed);
+                    }
                     stats_.cur_mod.store(static_cast<int>(sm.payload_mod),
                                          std::memory_order_relaxed);
                     if (frame_log_.is_open())
@@ -1189,6 +1346,43 @@ void BridgeMode::rxThread() {
 
                 ok_any = false;
                 this_frame_ok = deliver(sm, rssi, snr, oi);
+                {
+                    // Structural attribution, independent of EVM.
+                    const size_t need = HEADER_SIZE + sm.plen + 4;
+                    auto& plen  = this_frame_ok ? st_pass_plen_  : st_fail_plen_;
+                    auto& inv   = this_frame_ok ? st_pass_inv_   : st_fail_inv_;
+                    auto& shrt  = this_frame_ok ? st_pass_short_ : st_fail_short_;
+                    auto& aggr  = this_frame_ok ? st_pass_aggr_  : st_fail_aggr_;
+                    plen.fetch_add(sm.plen, std::memory_order_relaxed);
+                    if (cur_tail.n) {
+                        auto& p95  = this_frame_ok ? t_pass_p95_  : t_fail_p95_;
+                        auto& p99  = this_frame_ok ? t_pass_p99_  : t_fail_p99_;
+                        auto& mx   = this_frame_ok ? t_pass_max_  : t_fail_max_;
+                        auto& wk   = this_frame_ok ? t_pass_weak_ : t_fail_weak_;
+                        auto& tn   = this_frame_ok ? t_pass_n_    : t_fail_n_;
+                        p95.fetch_add(static_cast<uint64_t>(cur_tail.p95), std::memory_order_relaxed);
+                        p99.fetch_add(static_cast<uint64_t>(cur_tail.p99), std::memory_order_relaxed);
+                        mx .fetch_add(static_cast<uint64_t>(cur_tail.max), std::memory_order_relaxed);
+                        wk .fetch_add(cur_tail.weak, std::memory_order_relaxed);
+                        tn .fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (sm.inverted)                 inv .fetch_add(1, std::memory_order_relaxed);
+                    if (sm.bytes.size() < need)      shrt.fetch_add(1, std::memory_order_relaxed);
+                    if (sm.flags & FL_AGGR)          aggr.fetch_add(1, std::memory_order_relaxed);
+                    if (!this_frame_ok && sm.payload_mod != tx_mod_)
+                        st_fail_modbad_.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (cur_evm_ok) {
+                    auto& n   = this_frame_ok ? q_pass_n_   : q_fail_n_;
+                    auto& acq = this_frame_ok ? q_pass_acq_ : q_fail_acq_;
+                    auto& pay = this_frame_ok ? q_pass_pay_ : q_fail_pay_;
+                    auto& cfo = this_frame_ok ? q_pass_cfo_ur_ : q_fail_cfo_ur_;
+                    n  .fetch_add(1, std::memory_order_relaxed);
+                    acq.fetch_add(static_cast<uint64_t>(cur_evm_acq), std::memory_order_relaxed);
+                    pay.fetch_add(static_cast<uint64_t>(cur_evm_pay), std::memory_order_relaxed);
+                    cfo.fetch_add(static_cast<uint64_t>(std::fabs(cur_cfo) * 1e6),
+                                  std::memory_order_relaxed);
+                }
                 if (ok_any) decoded_any = true;
                 if (this_frame_ok) {
                     // Remember where this frame ENDED so the walk can skip it.

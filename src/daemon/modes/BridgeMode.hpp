@@ -183,7 +183,42 @@ private:
     std::atomic<uint64_t> walk_exit_nosync_{0};
     std::atomic<uint64_t> walk_exit_maxframes_{0};
     std::atomic<uint64_t> walk_exit_eow_{0};
-    std::atomic<uint64_t> walk_frames_in_window_{0}; // sum, for frames/window   // ARQ window full
+    std::atomic<uint64_t> walk_frames_in_window_{0}; // sum, for frames/window
+
+    // Post-TimingSync demodulation quality. Truncation and sync acquisition
+    // are identical at 1 and 2 MHz (254 vs 253 truncated, 67.2 vs 66.7%
+    // sync), but CRC failures rise 20x (13 -> 264), so the loss is in
+    // demodulation quality rather than framing. These separate a carrier
+    // problem from a timing problem.
+    std::atomic<uint64_t> q_n_{0};
+    std::atomic<uint64_t> q_freq_abs_ur_{0};  // |freq_per_sym|, micro-radians/sym
+    std::atomic<uint64_t> q_qual_milli_{0};   // DAS correlation quality x1000
+    std::atomic<uint64_t> q_evm_acq_pct_{0};  // EVM over acquisition symbols, %
+    std::atomic<uint64_t> q_evm_pay_pct_{0};  // EVM over payload symbols, %
+    std::atomic<uint64_t> q_evm_n_{0};
+    // Split by CRC outcome. Whether a frame's EVM was already bad at the
+    // acquisition section, or only went bad across the payload, is what
+    // separates a carrier-estimate fault from a tracking fault -- and
+    // comparing pass against fail separates either from plain SNR loss,
+    // which would raise both buckets together.
+    std::atomic<uint64_t> q_pass_n_{0}, q_pass_acq_{0}, q_pass_pay_{0}, q_pass_cfo_ur_{0};
+    std::atomic<uint64_t> q_fail_n_{0}, q_fail_acq_{0}, q_fail_pay_{0}, q_fail_cfo_ur_{0};
+
+    // Structural parsing. At 2 MHz, CRC-failed frames are indistinguishable
+    // from passed ones in EVM (69.69 vs 69.67%) and residual CFO (0.00205 vs
+    // 0.00201), so the corruption is not in the symbols. These look at what
+    // the header claimed and whether the byte stream matched it.
+    std::atomic<uint64_t> st_pass_plen_{0}, st_fail_plen_{0};
+    std::atomic<uint64_t> st_pass_inv_{0},  st_fail_inv_{0};   // BPSK 180-deg ambiguity
+    std::atomic<uint64_t> st_pass_short_{0}, st_fail_short_{0};// bytes < header+plen+crc
+    std::atomic<uint64_t> st_pass_aggr_{0},  st_fail_aggr_{0}; // FL_AGGR set
+    std::atomic<uint64_t> st_fail_modbad_{0};                  // payload mod != tx_mod_
+
+    // Per-frame error TAIL. A frame dies on its worst symbols, not its mean.
+    std::atomic<uint64_t> t_pass_n_{0}, t_pass_p95_{0}, t_pass_p99_{0},
+                          t_pass_max_{0}, t_pass_weak_{0};
+    std::atomic<uint64_t> t_fail_n_{0}, t_fail_p95_{0}, t_fail_p99_{0},
+                          t_fail_max_{0}, t_fail_weak_{0};   // ARQ window full
 
     // Aggregation receive accounting: records seen inside decoded frames vs
     // records the TAP actually accepted. A decoded frame counts as good if
