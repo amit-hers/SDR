@@ -243,7 +243,14 @@ private:
     // timing-loop state dumped for the symbols it occupied.
     std::ofstream slip_trace_;
     FixedTimingSync::Result last_fts_;
-    int slip_frames_dumped_{0};   // ARQ window full
+    int slip_frames_dumped_{0};
+    int slip_pass_dumped_{0};   // control group: frames that PASSED CRC
+    // Per-symbol carrier rotation applied by the Costas loop, recovered as
+    // arg(out * conj(in)) so no change to CostasLoop is needed. A QPSK Costas
+    // has four-fold phase ambiguity; a mid-frame slip of ~pi/2 re-maps every
+    // subsequent symbol's bits while leaving each symbol perfectly on a
+    // constellation point -- which is exactly the observed signature.
+    std::vector<float> last_carrier_phase_;   // ARQ window full
 
     // Aggregation receive accounting: records seen inside decoded frames vs
     // records the TAP actually accepted. A decoded frame counts as good if

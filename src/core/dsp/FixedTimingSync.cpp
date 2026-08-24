@@ -285,6 +285,32 @@ FixedTimingSync::process(const std::vector<std::complex<float>>& in) {
             t_freq_shift  = freq_q >> (FQ - LQ);
             t_e_alpha     = e_q >> alpha_sh;
             pos_q        += sps_q + t_freq_shift - t_e_alpha;
+
+            // Bound the per-symbol advance to [sps-1, sps+1] samples.
+            //
+            // Defensive only: this was added chasing a "zero advance
+            // duplicates a symbol" theory that turned out to be an artifact
+            // of the diagnostic tool, not a real event. Traces show the loop
+            // only ever steps 3, 4 or 5 samples, and the 3s and 5s are
+            // balanced (285 vs 280 at 2 MHz), i.e. mu dithering across the
+            // wrap boundary with no net drift. This clamp therefore fixes no
+            // measured defect and changed no measured result.
+            //
+            // It is kept because +-1 sample per symbol is already far more
+            // correction authority than any real clock offset needs, so
+            // bounding it costs nothing and makes a pathological jump
+            // unrepresentable. Do not read it as a fix for anything observed.
+            //
+            // Worth noting separately: the loop locks with mu pinned at
+            // 0.94-0.99, hard against the wrap boundary. That is a genuine
+            // fragility and is not addressed here.
+            {
+                const int64_t adv     = pos_q - t_pos_before;
+                const int64_t min_adv = (static_cast<int64_t>(sps) - 1) << LQ;
+                const int64_t max_adv = (static_cast<int64_t>(sps) + 1) << LQ;
+                if      (adv < min_adv) pos_q = t_pos_before + min_adv;
+                else if (adv > max_adv) pos_q = t_pos_before + max_adv;
+            }
             t_pos_after   = pos_q;
         } else {
             freq -= beta * err;

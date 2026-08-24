@@ -892,8 +892,7 @@ void BridgeMode::rxThread() {
                     // slip rather than bit errors -- so dump mu, the timing
                     // error, the loop integrator and the per-symbol step to
                     // find the update where the loop jumps.
-                    if (slip_trace_.is_open() && !last_fts_.mu.empty()
-                        && sm.bytes.size() >= 16 && slip_frames_dumped_ < 12) {
+                    if (false) {
                         const uint8_t* b = sm.bytes.data();
                         uint32_t sq = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
                                     | (uint32_t(b[14]) <<  8) |  uint32_t(b[15]);
@@ -902,8 +901,14 @@ void BridgeMode::rxThread() {
                         const size_t s1 = std::min(n, sm.end_sym ? sm.end_sym : n);
                         slip_trace_ << "FRAME seq=" << sq << " sync_sym=" << s0
                                     << " end_sym=" << s1 << " nsym=" << n << "\n";
-                        slip_trace_ << "# k idx mu e_q freq_after step_pos d_idx\n";
-                        long prev_idx = (s0 < n) ? last_fts_.idx[s0] : 0;
+                        slip_trace_ << "# k idx mu e_q freq_after step_pos d_idx carrier_dphi\n";
+                        // Seed from the symbol BEFORE the frame, or the
+                        // first row reports a self-difference of zero and
+                        // looks like a duplicated symbol. That artifact cost
+                        // a wrong root-cause diagnosis once already.
+                        long prev_idx = (s0 > 0 && s0 <= n)
+                                      ? long(last_fts_.idx[s0 - 1])
+                                      : (s0 < n ? long(last_fts_.idx[s0]) - int(cfg_.samples_per_symbol) : 0);
                         for (size_t k = s0; k < s1 && k < n; ++k) {
                             long didx = long(last_fts_.idx[k]) - prev_idx;
                             prev_idx = last_fts_.idx[k];
@@ -912,7 +917,23 @@ void BridgeMode::rxThread() {
                                         << (k < last_fts_.e_q.size() ? last_fts_.e_q[k] : 0) << ' '
                                         << (k < last_fts_.freq_after.size() ? last_fts_.freq_after[k] : 0) << ' '
                                         << (k < last_fts_.pos_after.size() ? last_fts_.pos_after[k] : 0) << ' '
-                                        << didx << '\n';
+                                        << didx << ' ';
+                            // Change in applied carrier phase between
+                            // consecutive payload symbols. A cycle slip shows
+                            // as a step near +-pi/2 (1.571 rad).
+                            {
+                                const size_t pi_ = (k >= s0) ? (k - s0) : 0;
+                                float dphi = 0.f;
+                                if (pi_ > 0 && pi_ < last_carrier_phase_.size()) {
+                                    float a = last_carrier_phase_[pi_];
+                                    float b = last_carrier_phase_[pi_ - 1];
+                                    dphi = a - b;
+                                    while (dphi >  3.14159265f) dphi -= 6.28318531f;
+                                    while (dphi < -3.14159265f) dphi += 6.28318531f;
+                                }
+                                slip_trace_ << dphi;
+                            }
+                            slip_trace_ << '\n';
                         }
                         ++slip_frames_dumped_;
                     }
@@ -1440,10 +1461,21 @@ void BridgeMode::rxThread() {
                         double ia1=0, ia2=0, ip1=0, ip2=0;
                         probe(p, ia1, ia2, ip1, ip2);
 
+                        std::vector<std::complex<float>> pre;
+                        if (slip_trace_.is_open()) pre = p;
+
                         costas.reset();
                         std::vector<std::complex<float>> out;
                         costas.process(p, out);
                         p.swap(out);
+
+                        // Rotation the loop actually applied, per symbol.
+                        if (!pre.empty() && pre.size() == p.size()) {
+                            last_carrier_phase_.resize(p.size());
+                            for (size_t i = 0; i < p.size(); ++i)
+                                last_carrier_phase_[i] =
+                                    std::arg(p[i] * std::conj(pre[i]));
+                        }
 
                         double oa1=0, oa2=0, op1=0, op2=0;
                         probe(p, oa1, oa2, op1, op2);
@@ -1504,6 +1536,81 @@ void BridgeMode::rxThread() {
 
                 ok_any = false;
                 this_frame_ok = deliver(sm, rssi, snr, oi);
+
+                // Carrier-phase trace, dumped for BOTH outcomes.
+                //
+                // The control group is the point: if frames that PASS CRC
+                // show the same +-pi/2 jumps as frames that fail, the
+                // detector is measuring noise and proves nothing. A previous
+                // "smoking gun" here turned out to be an artifact of the
+                // diagnostic tool, so the tool now carries its own control.
+                if (slip_trace_.is_open() && sm.header_ok
+                    && !last_carrier_phase_.empty()) {
+                    // Size-match the control group. Failures are ~4192-symbol
+                    // frames and passes ~900, so an unmatched comparison of
+                    // any "maximum over the frame" statistic is confounded by
+                    // sample count alone.
+                    const bool size_ok = (last_carrier_phase_.size() > 3000);
+                    int& cap = this_frame_ok ? slip_pass_dumped_ : slip_frames_dumped_;
+                    if (this_frame_ok && !size_ok) { /* skip short controls */ } else
+                    if (cap < 10) {
+                        const uint8_t* bb = sm.bytes.data();
+                        uint32_t sq = sm.bytes.size() >= 16
+                            ? ((uint32_t(bb[12])<<24)|(uint32_t(bb[13])<<16)
+                              |(uint32_t(bb[14])<< 8)| uint32_t(bb[15])) : 0;
+                        const size_t n = last_carrier_phase_.size();
+                        // Largest single-symbol phase step, and how many steps
+                        // land near +-pi/2 (a QPSK ambiguity slip).
+                        float mx = 0.f; size_t mx_at = 0; int near90 = 0;
+                        for (size_t i = 1; i < n; ++i) {
+                            float d = last_carrier_phase_[i] - last_carrier_phase_[i-1];
+                            while (d >  3.14159265f) d -= 6.28318531f;
+                            while (d < -3.14159265f) d += 6.28318531f;
+                            const float ad = std::fabs(d);
+                            if (ad > mx) { mx = ad; mx_at = i; }
+                            if (ad > 1.2f && ad < 1.95f) ++near90;
+                        }
+                        // Per-symbol steps ruled out a cycle slip (max 0.57
+                        // rad, never near pi/2). The remaining carrier
+                        // mechanism is smooth DRIFT: phase creeping past 45
+                        // degrees flips every subsequent QPSK symbol without
+                        // ever producing a large single-symbol delta.
+                        //
+                        // Measure the accumulated rotation relative to the
+                        // frame start, unwrapped, and how far it strays from
+                        // the straight line through it -- a residual
+                        // frequency error shows as a ramp, a wander as
+                        // curvature. 0.785 rad (45 deg) is the decision
+                        // boundary where QPSK bits start flipping.
+                        double cum = 0.0, cum_max = 0.0, cum_end = 0.0;
+                        size_t cum_at = 0; int past45 = 0;
+                        {
+                            double acc = 0.0;
+                            for (size_t i = 1; i < n; ++i) {
+                                float d = last_carrier_phase_[i] - last_carrier_phase_[i-1];
+                                while (d >  3.14159265f) d -= 6.28318531f;
+                                while (d < -3.14159265f) d += 6.28318531f;
+                                acc += d;
+                                if (std::fabs(acc) > cum_max) { cum_max = std::fabs(acc); cum_at = i; }
+                                if (std::fabs(acc) > 0.785398) ++past45;
+                            }
+                            cum = acc; cum_end = acc;
+                        }
+                        (void)cum;
+                        slip_trace_ << (this_frame_ok ? "PASS" : "FAIL")
+                                    << " seq=" << sq
+                                    << " nsym=" << n
+                                    << " max_dphi=" << mx
+                                    << " at_sym=" << mx_at
+                                    << " frac=" << (n ? double(mx_at)/double(n) : 0.0)
+                                    << " near90_steps=" << near90
+                                    << " cum_end=" << cum_end
+                                    << " cum_max=" << cum_max
+                                    << " cum_at=" << (n ? double(cum_at)/double(n) : 0.0)
+                                    << " syms_past45=" << past45 << "\n";
+                        ++cap;
+                    }
+                }
                 {
                     // Structural attribution, independent of EVM.
                     const size_t need = HEADER_SIZE + sm.plen + 4;
