@@ -142,6 +142,38 @@ void BridgeMode::stop() {
                   << " frames_lost_in_push=" << tx_frames_lost_.load() << "\n";
         std::cerr << "carrier sense: defers=" << cs_defers_.load()
                   << " forced_overrides=" << cs_overrides_.load() << "\n";
+        // TX pipeline, stage by stage. Read left to right: each stage should
+        // account for the one before it. Whichever column collapses first is
+        // where offered load is being shed.
+        std::cerr << "TX-PIPE tap_pkts=" << tx_tap_pkts_.load()
+                  << " tap_bytes=" << tx_tap_bytes_.load()
+                  << " tap_empty_polls=" << tx_tap_empty_.load()
+                  << " -> sealed=" << tx_frames_sealed_.load()
+                  << " -> staged=" << tx_frames_staged_.load()
+                  << " -> pushes_ok=" << tx_pushes_ok_.load()
+                  << " pushes_short=" << tx_pushes_short_.load() << "\n";
+        {
+            uint64_t it = walk_iters_.load(), sf = walk_sync_found_.load();
+            uint64_t fo = walk_frames_ok_.load(), win = stats_.bursts_detected.load();
+            std::cerr << "RX-WALK iters=" << it
+                      << " sync_found=" << sf
+                      << " (" << (it ? 100.0 * double(sf) / double(it) : 0.0) << "% of iters)"
+                      << " frames_ok=" << fo
+                      << " frames/window=" << (win ? double(fo) / double(win) : 0.0)
+                      << " adv_past_frame=" << walk_adv_frame_.load()
+                      << " adv_by_template=" << walk_adv_ref_.load() << "\n";
+            std::cerr << "RX-WALK exits: no_sync=" << walk_exit_nosync_.load()
+                      << " end_of_window=" << walk_exit_eow_.load()
+                      << " hit_max_frames=" << walk_exit_maxframes_.load()
+                      << " (cap=" << MAX_FRAMES_PER_WINDOW << ")\n";
+        }
+        std::cerr << "TX-BLOCK duty_defers=" << tx_duty_defers_.load()
+                  << " duty_slept=" << (tx_duty_waits_us_.load() / 1e6) << " s"
+                  << " (" << (wall > 0 ? 100.0 * (tx_duty_waits_us_.load() / 1e6) / wall : 0.0)
+                  << "% of wall)"
+                  << " cs_defers=" << cs_defers_.load()
+                  << " stage_forced_flushes=" << tx_stage_forces_.load()
+                  << " arq_blocked=" << tx_arq_blocked_.load() << "\n";
         std::cerr << "aggregation rx: records=" << rx_records_.load()
                   << " written=" << rx_rec_written_.load()
                   << " write_failed=" << rx_rec_failed_.load() << "\n";
@@ -212,13 +244,33 @@ void BridgeMode::txThread() {
                       ? cfg_.tx_duty_max : 1.0;
     std::chrono::steady_clock::time_point next_tx_allowed{};
 
+    // When everything pushed so far will have finished being radiated.
+    //
+    // The gap used to be measured from the moment txPush RETURNED, but that
+    // call hands samples to a DMA buffer and returns immediately -- long
+    // before the radio has put them on the air. The gap was therefore timed
+    // against work that had not happened yet, and the cap did not bind:
+    // measured peak duty 125.6% against a configured 65%, i.e. more airtime
+    // committed per tick than there is time in the tick. The transmitter
+    // filled the channel solid and the peer's burst detector had no gaps to
+    // acquire in (acquisition fell 85% -> 31% under load).
+    //
+    // Pacing against this air clock instead makes the gap start where the
+    // burst actually ends, so the duty cap holds regardless of how deeply
+    // the radio buffers. When idle it catches up to now, so quiet periods
+    // are not banked as credit for a later over-long burst.
+    std::chrono::steady_clock::time_point air_clock{};
+
     // `force` waits out the gap instead of deferring -- used when the stage
     // is full and deferring would overflow it.
     auto flush = [&](bool force) {
         if (stage.empty()) return;
         auto now = std::chrono::steady_clock::now();
         if (now < next_tx_allowed) {
-            if (!force) return;                 // try again on a later poll
+            if (!force) { tx_duty_defers_.fetch_add(1, std::memory_order_relaxed); return; }
+            tx_duty_waits_us_.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    next_tx_allowed - now).count()), std::memory_order_relaxed);
             std::this_thread::sleep_for(next_tx_allowed - now);
         }
 
@@ -250,7 +302,15 @@ void BridgeMode::txThread() {
         const double air = static_cast<double>(want) / sample_rate_tx;
         tx_air_seconds_.store(tx_air_seconds_.load(std::memory_order_relaxed) + air,
                               std::memory_order_relaxed);
-        next_tx_allowed = std::chrono::steady_clock::now() +
+
+        // Advance the air clock from wherever the previous burst ends, not
+        // from now. If the radio has already drained (we were idle), the
+        // clock catches up first so idle time is not banked as credit.
+        auto after_push = std::chrono::steady_clock::now();
+        if (air_clock < after_push) air_clock = after_push;
+        air_clock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(air));
+        next_tx_allowed = air_clock +
             std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(air / duty - air));
 
@@ -259,8 +319,10 @@ void BridgeMode::txThread() {
         // counting them anyway is what made the transmitter look healthy
         // while the channel was empty.
         if (pushed >= 0 && static_cast<size_t>(pushed) == want) {
+            tx_pushes_ok_.fetch_add(1, std::memory_order_relaxed);
             stats_.frames_tx.fetch_add(staged_frames, std::memory_order_relaxed);
         } else {
+            tx_pushes_short_.fetch_add(1, std::memory_order_relaxed);
             tx_frames_lost_.fetch_add(staged_frames, std::memory_order_relaxed);
             if (frame_log_.is_open())
                 frame_log_ << "[TX-SHORT] wanted=" << want << " pushed=" << pushed
@@ -288,7 +350,10 @@ void BridgeMode::txThread() {
 
         // Flush first if this frame wouldn't fit, then stage it. A frame
         // larger than the whole buffer is pushed on its own (txPush clamps).
-        if (stage.size() / 2 + iq_shaped.size() > tx_capacity) flush(/*force=*/true);
+        if (stage.size() / 2 + iq_shaped.size() > tx_capacity) {
+            tx_stage_forces_.fetch_add(1, std::memory_order_relaxed);
+            flush(/*force=*/true);
+        }
         if (iq_shaped.size() > tx_capacity) {
             int pushed = radio_.txPush(iq_hw.data(), iq_shaped.size());
             if (pushed >= 0 && static_cast<size_t>(pushed) == iq_shaped.size())
@@ -298,6 +363,7 @@ void BridgeMode::txThread() {
             return;
         }
         ++staged_frames;
+        tx_frames_staged_.fetch_add(1, std::memory_order_relaxed);
         if (stage.empty()) stage_started_ = std::chrono::steady_clock::now();
         stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
     };
@@ -337,6 +403,7 @@ void BridgeMode::txThread() {
                        << " mod=" << modCodeName(tx_mod_)
                        << " wire=" << pending_frame.size() << "B\n";
         pending_payload_len = aggr_payload_bytes;
+        tx_frames_sealed_.fetch_add(1, std::memory_order_relaxed);
         aggr.clear();
         aggr_count = 0;
         aggr_payload_bytes = 0;
@@ -364,6 +431,12 @@ void BridgeMode::txThread() {
             ssize_t n;
             { StageProfiler::Scope sc(prof_, StageProfiler::TX_TAPR);
               n = tap_->read(pkt.data(), pkt.size()); }
+            if (n > 0) {
+                tx_tap_pkts_ .fetch_add(1, std::memory_order_relaxed);
+                tx_tap_bytes_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+            } else {
+                tx_tap_empty_.fetch_add(1, std::memory_order_relaxed);
+            }
             if (n <= 0) {
                 // TAP is empty right now. Seal whatever has accumulated once
                 // it has waited long enough, then push whatever is staged.
@@ -402,8 +475,10 @@ void BridgeMode::txThread() {
             }
         }
 
-        if (cfg_.arq && !arq_->trySend(pending_seq, pending_frame))
+        if (cfg_.arq && !arq_->trySend(pending_seq, pending_frame)) {
+            tx_arq_blocked_.fetch_add(1, std::memory_order_relaxed);
             continue; // window full — hold the packet, retry next loop
+        }
 
         transmit(pending_frame);   // stages only; frames_tx is credited on push
         stats_.bytes_tx .fetch_add(static_cast<uint64_t>(pending_payload_len),
@@ -956,8 +1031,15 @@ void BridgeMode::rxThread() {
             // first frame per window would throw away most of a busy channel.
             bool decoded_any = false;
             size_t search_from = 0;
-            for (int frame_no = 0; frame_no < MAX_FRAMES_PER_WINDOW; ++frame_no) {
-                if (search_from >= window_buf.size()) break;
+            size_t last_end_sym = 0, last_offset = 0;
+            size_t frames_this_window = 0;
+            int    frame_no = 0;
+            for (; frame_no < MAX_FRAMES_PER_WINDOW; ++frame_no) {
+                if (search_from >= window_buf.size()) {
+                    walk_exit_eow_.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+                walk_iters_.fetch_add(1, std::memory_order_relaxed);
 
                 std::vector<std::complex<float>> tail(
                     window_buf.begin() + static_cast<long>(search_from), window_buf.end());
@@ -969,7 +1051,11 @@ void BridgeMode::rxThread() {
                 PreambleSync::Match match;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_PSYNC, tail.size());
                   match = psync.find(tail, preamble_search); }
-                if (!match.found) break;
+                if (!match.found) {
+                    walk_exit_nosync_.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+                walk_sync_found_.fetch_add(1, std::memory_order_relaxed);
 
                 const size_t base = search_from + static_cast<size_t>(match.offset);
                 const size_t offsets[] = {
@@ -1104,13 +1190,50 @@ void BridgeMode::rxThread() {
                 ok_any = false;
                 this_frame_ok = deliver(sm, rssi, snr, oi);
                 if (ok_any) decoded_any = true;
+                if (this_frame_ok) {
+                    // Remember where this frame ENDED so the walk can skip it.
+                    last_end_sym = sm.end_sym;
+                    last_offset  = offset;
+                }
                 }   // end alignment-neighbour loop
 
-                // Advance past this frame and look for the next one in the
-                // same window. Even if the decode failed, step forward so a
-                // stubborn correlation peak can't spin us in place.
-                search_from = base + psync.referenceLength();
+                // Advance past the frame that was just decoded.
+                //
+                // This used to step forward by psync.referenceLength() -- the
+                // length of the preamble+sync correlation template, 704
+                // samples. A full frame is ~18300 samples, so the walk moved
+                // 1/26th of a frame per iteration and spent the next 25
+                // iterations re-correlating inside data it had already
+                // consumed. With MAX_FRAMES_PER_WINDOW = 64 it could not
+                // traverse more than ~2.4 frames of a window at all.
+                //
+                // Node A aggregates ~2 frames per burst and node B recovered
+                // ~0.83 of them; the decoded frame rate sat at ~55/s whether
+                // the channel was 1 MHz or 2 MHz, because the limit was this
+                // loop rather than the air.
+                //
+                // end_sym is the symbol index one past the decoded frame,
+                // relative to the symbol stream that began at `offset`, so
+                // offset + end_sym*sps is where the next frame can start.
+                if (this_frame_ok && last_end_sym > 0) {
+                    const size_t adv = last_offset +
+                        static_cast<size_t>(last_end_sym) * static_cast<size_t>(RRC_SPS);
+                    // Never go backwards, and always make progress.
+                    search_from = (adv > search_from) ? adv
+                                : search_from + psync.referenceLength();
+                    walk_adv_frame_.fetch_add(1, std::memory_order_relaxed);
+                    ++frames_this_window;
+                    walk_frames_ok_.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    // No decode here: step by the template so a stubborn
+                    // correlation peak cannot spin us in place.
+                    search_from = base + psync.referenceLength();
+                    walk_adv_ref_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
+            if (frame_no >= MAX_FRAMES_PER_WINDOW)
+                walk_exit_maxframes_.fetch_add(1, std::memory_order_relaxed);
+            walk_frames_in_window_.fetch_add(frames_this_window, std::memory_order_relaxed);
             if (decoded_any)
                 stats_.bursts_demodulated.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1124,6 +1247,8 @@ void BridgeMode::statThread() {
     auto last  = start;
     uint64_t prev_tx = 0, prev_rx = 0;
     int temp_tick = 0;
+    double prev_air = 0.0;
+    int duty_ticks = 0;
 
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(STAT_TICK));
@@ -1138,6 +1263,22 @@ void BridgeMode::statThread() {
         stats_.rx_kbps.store(static_cast<float>((rx - prev_rx) * 8 / dt / 1e3),
                              std::memory_order_relaxed);
         prev_tx = tx; prev_rx = rx;
+
+        // Duty over this tick only. tx_air_seconds_ is cumulative, so the
+        // delta divided by elapsed time is the real occupancy the limiter is
+        // meant to cap -- and the one the peer's burst detector experiences.
+        {
+            double air = tx_air_seconds_.load(std::memory_order_relaxed);
+            double d   = (dt > 0) ? 100.0 * (air - prev_air) / dt : 0.0;
+            prev_air = air;
+            if (d < 0) d = 0;
+            stats_.tx_duty_now.store(static_cast<float>(d), std::memory_order_relaxed);
+            // Peak ignores the first few ticks: nothing is queued yet at
+            // startup and the ratio is meaningless there.
+            if (++duty_ticks > 5 &&
+                d > stats_.tx_duty_peak.load(std::memory_order_relaxed))
+                stats_.tx_duty_peak.store(static_cast<float>(d), std::memory_order_relaxed);
+        }
 
         stats_.uptime_s.store(
             static_cast<uint64_t>(

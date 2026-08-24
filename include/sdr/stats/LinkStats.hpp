@@ -52,6 +52,13 @@ struct LinkStats {
     // from two timestamps bracketing the same code, so it read ~100%
     // unconditionally. Conclusions of the form "duty is 100%, the channel is
     // saturated" were reading a constant.
+    // Instantaneous TX duty, measured over the last stat tick rather than
+    // over process lifetime. The lifetime average is diluted by startup and
+    // teardown -- it read 47.8% while the transmitter was actually on air
+    // ~92% of the time during the active window, which is the number the
+    // duty LIMIT is supposed to bound.
+    std::atomic<float>    tx_duty_now {0.f};
+    std::atomic<float>    tx_duty_peak{0.f};
     std::atomic<uint64_t> rx_burst_samples {0};
     std::atomic<uint64_t> rx_seen_samples  {0};
 

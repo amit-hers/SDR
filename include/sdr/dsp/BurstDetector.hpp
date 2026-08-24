@@ -36,6 +36,27 @@ public:
         // lands in the gaps between frames, so the estimate stays anchored to
         // real noise up to roughly (1 - noise_quantile) channel occupancy.
         float  noise_quantile {0.20f};
+
+        // How fast the retained noise floor may RISE, per batch (0..1).
+        //
+        // The quantile above is computed within one rxPull batch (~65 ms), so
+        // it only holds while that batch contains enough silence. Real traffic
+        // is bursty: the transmitter force-flushes a full stage buffer and
+        // occupies an entire batch back to back, even when its average airtime
+        // is only ~48%. In such a batch every block contains signal, the 20th
+        // percentile lands ON the signal, and the threshold rises above the
+        // burst -- detection collapses for that whole batch.
+        //
+        // Measured: node A on air 48% of the time, node B reporting 13%
+        // occupancy and 12x fewer bursts (236 vs 2950), while the frames it
+        // did find still decoded at 99.4%.
+        //
+        // The noise floor is a property of the receiver and its environment,
+        // not of one 65 ms window, so it is carried across batches: it falls
+        // immediately (a genuinely quieter floor is believed at once) and
+        // rises only slowly, so a saturated batch cannot drag it up onto the
+        // signal. Gain changes still track, just over several batches.
+        float  floor_rise {0.05f};
     };
 
     BurstDetector() = default;
@@ -43,9 +64,15 @@ public:
 
     // Returns candidate burst regions in `buf` (empty if nothing crosses the
     // threshold — the common case, since most batches are pure silence/noise).
-    std::vector<Window> detect(const std::vector<std::complex<float>>& buf) const;
+    // Not const: the noise floor is retained across batches (see
+    // Config::floor_rise).
+    std::vector<Window> detect(const std::vector<std::complex<float>>& buf);
+
+    // Current retained noise floor, or -1 before the first batch.
+    float noiseFloor() const { return noise_floor_; }
 
 private:
+    float noise_floor_{-1.0f};   // retained across batches
     Config cfg_;
 };
 

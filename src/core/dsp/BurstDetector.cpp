@@ -4,7 +4,7 @@
 namespace sdr {
 
 std::vector<BurstDetector::Window>
-BurstDetector::detect(const std::vector<std::complex<float>>& buf) const {
+BurstDetector::detect(const std::vector<std::complex<float>>& buf) {
     std::vector<Window> windows;
     const size_t block = cfg_.block_size;
     if (buf.size() < block * 4) return windows; // too short to bother
@@ -31,8 +31,20 @@ BurstDetector::detect(const std::vector<std::complex<float>>& buf) const {
     if (qi >= sorted_power.size()) qi = sorted_power.size() - 1;
     std::nth_element(sorted_power.begin(), sorted_power.begin() + static_cast<long>(qi),
                      sorted_power.end());
-    float noise_floor = sorted_power[qi];
-    float threshold   = noise_floor * cfg_.threshold_x;
+    const float batch_floor = sorted_power[qi];
+
+    // Carry the floor across batches: believe a lower estimate at once, admit
+    // a higher one only slowly. A batch that is entirely signal therefore
+    // cannot lift the threshold above the burst it is supposed to find.
+    if (noise_floor_ < 0.0f || batch_floor < noise_floor_) {
+        noise_floor_ = batch_floor;
+    } else {
+        float a = cfg_.floor_rise;
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        noise_floor_ += (batch_floor - noise_floor_) * a;
+    }
+    const float threshold = noise_floor_ * cfg_.threshold_x;
 
     // Find contiguous (block-granularity) elevated regions.
     std::vector<Window> raw;

@@ -155,6 +155,36 @@ private:
     // only frames the radio actually accepted.
     std::atomic<uint64_t> tx_frames_lost_{0};
 
+    // TX-path stage counters. Under overload the link collapses rather than
+    // plateauing (1600 kbps offered delivered 10 kbps, with channel occupancy
+    // FALLING from 44% to 14% -- the transmitter went quieter as it was asked
+    // for more). These localise which stage sheds the load.
+    std::atomic<uint64_t> tx_tap_pkts_{0};      // packets read off the TAP
+    std::atomic<uint64_t> tx_tap_bytes_{0};
+    std::atomic<uint64_t> tx_tap_empty_{0};     // polls that found nothing
+    std::atomic<uint64_t> tx_frames_sealed_{0}; // aggregates turned into frames
+    std::atomic<uint64_t> tx_frames_staged_{0}; // frames modulated into `stage`
+    std::atomic<uint64_t> tx_duty_defers_{0};   // flush skipped: duty gap open
+    std::atomic<uint64_t> tx_duty_waits_us_{0}; // time actually slept for duty
+    std::atomic<uint64_t> tx_stage_forces_{0};  // forced flush: stage would overflow
+    std::atomic<uint64_t> tx_pushes_ok_{0};     // txPush completed in full
+    std::atomic<uint64_t> tx_pushes_short_{0};  // txPush short/failed
+    std::atomic<uint64_t> tx_arq_blocked_{0};
+
+    // Multi-frame walk inside one detected burst window. Node A aggregates
+    // ~2 frames per burst; node B was recovering ~0.83, and the decoded frame
+    // rate stayed ~55/s across a 2x bandwidth change -- a per-burst limit, not
+    // a channel one.
+    std::atomic<uint64_t> walk_iters_{0};
+    std::atomic<uint64_t> walk_sync_found_{0};
+    std::atomic<uint64_t> walk_frames_ok_{0};
+    std::atomic<uint64_t> walk_adv_frame_{0};   // advanced past a decoded frame
+    std::atomic<uint64_t> walk_adv_ref_{0};     // advanced by the preamble ref
+    std::atomic<uint64_t> walk_exit_nosync_{0};
+    std::atomic<uint64_t> walk_exit_maxframes_{0};
+    std::atomic<uint64_t> walk_exit_eow_{0};
+    std::atomic<uint64_t> walk_frames_in_window_{0}; // sum, for frames/window   // ARQ window full
+
     // Aggregation receive accounting: records seen inside decoded frames vs
     // records the TAP actually accepted. A decoded frame counts as good if
     // any one record lands, so without these a silent per-record loss looks

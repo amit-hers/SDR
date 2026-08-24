@@ -55,7 +55,7 @@ echo "$PW" | sudo -S bash -c \
   "cd $REPO && SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
 sleep 3
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} SDR_PROFILE=1 nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
+  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
 sleep 8
 
 s_ ip addr add 10.99.0.1/24 dev sdr0
@@ -98,6 +98,7 @@ except Exception: print(f"  node {t}: no stats"); raise SystemExit
 print(f"  node {t}: tx={s.get('frames_tx')} rx_good={s.get('frames_rx_good')} "
       f"rx_bad={s.get('frames_rx_bad')} bursts={s.get('bursts_detected')} "
       f"demod={s.get('bursts_demodulated')} dropped={s.get('dropped')} "
-      f"snr={s.get('snr_db')} thread={s.get('rx_duty_pct')}% occ={s.get('rx_occupancy_pct')}%")
+      f"snr={s.get('snr_db')} occ={s.get('rx_occupancy_pct')}% "
+      f"txduty_now={s.get('tx_duty_now_pct')}% txduty_peak={s.get('tx_duty_peak_pct')}%")
 PY
 done
