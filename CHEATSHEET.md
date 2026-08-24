@@ -100,7 +100,9 @@ Edit `config.json` / `config_node2.json`.
 | `cfo_method` | fft | `fft` or `grid` |
 | `rx_buffer_samples` | 262144 | smaller = tighter deadline but truncates frames |
 | `rx_queue_depth` | 8 | buffers queued for the DSP thread |
-| `fec` / `encrypt` / `arq` | false | must match on both nodes |
+| `fec` / `encrypt` / `arq` | false | must match on both nodes. FEC now genuinely
+corrects (RS runs before the CRC verdict), but measured a net loss at 2 MHz:
+it rescued 10% of damaged frames while ~14% parity overhead cost more than it saved. |
 
 ### System
 

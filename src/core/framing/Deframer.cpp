@@ -101,43 +101,77 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
                         | (uint32_t(payload_buf_[pay_total_-2]) << 16)
                         | (uint32_t(payload_buf_[pay_total_-1]) << 24);
 
+            const uint16_t plen_saved  = plen_;
+            const uint8_t  flags_saved = flags_;
+            const uint32_t seq_saved   = seq_;
+            const int      pay_total_saved = pay_total_;
             reset();  // ready for next frame regardless of outcome
 
-            if (got != expected) {
-                ++crc_errors_;
-                return std::nullopt;
-            }
-
-            // CRC OK — decrypt then FEC-decode
-            int wire_len = pay_total_ - static_cast<int>(CRC_SIZE);
+            int wire_len = pay_total_saved - static_cast<int>(CRC_SIZE);
             std::vector<uint8_t> wire(payload_buf_.begin(),
                                       payload_buf_.begin() + wire_len);
 
-            if (aes && (flags_ & FL_ENCRYPT))
-                aes->crypt(wire.data(), wire.size(), static_cast<uint64_t>(seq_));
-
+            // Reed-Solomon runs BEFORE the CRC verdict, not after.
+            //
+            // This previously rejected on CRC mismatch and only then reached
+            // the FEC decode, so RS could never repair anything -- it ran
+            // exclusively on frames that were already intact. Every corrected
+            // frame it might have rescued was discarded one branch earlier.
+            //
+            // Framer computes the CRC over the RS-ENCODED codeword (see
+            // Framer::encode: FEC first, then CRC over the body), so a
+            // repaired frame is verified by re-encoding the corrected payload
+            // to reconstruct the codeword as transmitted -- RS encoding is
+            // deterministic, so that reproduction is exact -- and checking the
+            // CRC against that. The header and the CRC bytes themselves sit
+            // outside RS protection (~22 of ~1066 bytes), so errors landing
+            // there remain unrecoverable.
+            bool crc_ok = (got == expected);
             std::vector<uint8_t> raw;
-            if (fec && (flags_ & FL_FEC)) {
+
+            if (fec && (flags_saved & FL_FEC)) {
+                std::vector<uint8_t> tryw = wire;
+                if (aes && (flags_saved & FL_ENCRYPT))
+                    aes->crypt(tryw.data(), tryw.size(), static_cast<uint64_t>(seq_saved));
+                bool rescued = false;
                 try {
-                    raw = fec->decode(wire.data(), wire.size());
+                    raw = fec->decode(tryw.data(), tryw.size());
+                    if (!crc_ok) {
+                        // Re-encode and re-check: did RS restore the exact
+                        // codeword the transmitter sent?
+                        std::vector<uint8_t> fixed = fec->encode(raw.data(), raw.size());
+                        if (fixed.size() == static_cast<size_t>(wire_len)) {
+                            std::vector<uint8_t> body2(HEADER_SIZE + fixed.size());
+                            std::memcpy(body2.data(), hdr_buf_, HEADER_SIZE);
+                            std::memcpy(body2.data() + HEADER_SIZE, fixed.data(), fixed.size());
+                            if (crc32(body2.data(), body2.size()) == got) {
+                                crc_ok  = true;
+                                rescued = true;
+                            }
+                        }
+                    }
                 } catch (...) {
-                    ++crc_errors_;
-                    return std::nullopt;
+                    if (!crc_ok) { ++crc_errors_; return std::nullopt; }
                 }
-                raw.resize(plen_);  // trim to original length
+                if (!crc_ok) { ++crc_errors_; return std::nullopt; }
+                if (rescued) ++fec_rescued_;
+                raw.resize(plen_saved);
             } else {
+                if (!crc_ok) { ++crc_errors_; return std::nullopt; }
+                if (aes && (flags_saved & FL_ENCRYPT))
+                    aes->crypt(wire.data(), wire.size(), static_cast<uint64_t>(seq_saved));
                 raw = std::move(wire);
-                raw.resize(plen_);
+                raw.resize(plen_saved);
             }
 
             ++good_frames_;
             DecodedFrame df;
             df.payload  = std::move(raw);
-            df.flags    = flags_;
+            df.flags    = flags_saved;
             df.mod      = mod_;
             df.bw       = bw_;
             df.node_id  = node_id_;
-            df.seq      = seq_;
+            df.seq      = seq_saved;
             return df;
         }
         break;

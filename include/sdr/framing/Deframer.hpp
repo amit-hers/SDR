@@ -24,6 +24,11 @@ public:
     void reset();
 
     uint64_t crcErrors()  const { return crc_errors_; }
+    // Frames that failed CRC on arrival and were repaired by Reed-Solomon.
+    // Counts only genuine rescues: the corrected payload is re-encoded and
+    // its CRC re-checked, so this cannot be inflated by frames that were
+    // already intact.
+    uint64_t fecRescued() const { return fec_rescued_; }
     uint64_t goodFrames() const { return good_frames_; }
 
 private:
@@ -53,6 +58,7 @@ private:
     int      pay_pos_   {0};
     int      pay_total_ {0};  // plen + CRC_SIZE (+ RS padding if FL_FEC)
 
+    uint64_t fec_rescued_{0};
     uint64_t crc_errors_  {0};
     uint64_t good_frames_ {0};
 };

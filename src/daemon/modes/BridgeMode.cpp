@@ -15,6 +15,17 @@
 
 namespace sdr {
 
+// Write one [u32 seq][u32 len][bytes] record. Used to capture the exact
+// CRC-covered body on TX and the exact pre-CRC byte stream on RX, so failed
+// frames can be byte-diffed against what was actually sent.
+static void dumpRecord(std::ofstream& f, uint32_t seq, const uint8_t* d, size_t n) {
+    if (!f.is_open()) return;
+    uint32_t len = static_cast<uint32_t>(n);
+    f.write(reinterpret_cast<const char*>(&seq), 4);
+    f.write(reinterpret_cast<const char*>(&len), 4);
+    f.write(reinterpret_cast<const char*>(d), static_cast<std::streamsize>(n));
+}
+
 static constexpr int STAT_TICK = 100;   // ms
 
 BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
@@ -205,6 +216,23 @@ void BridgeMode::stop() {
                       << " p99=" << avg(t_fail_p99_.load(), tf) << "%"
                       << " max=" << avg(t_fail_max_.load(), tf) << "%"
                       << " weak_syms/frame=" << avg(t_fail_weak_.load(), tf) << "\n";
+            {
+                uint64_t cn = cs_probe_n_.load();
+                auto a=[&](std::atomic<uint64_t>& x){ return cn ? double(x.load())/double(cn)/1000.0 : 0.0; };
+                std::cerr << "RX-COSTAS n=" << cn
+                          << " | amp q1/rest  in=" << a(cs_in_amp_ratio_)
+                          << " out=" << a(cs_out_amp_ratio_)
+                          << " | phase_err rad  in q1=" << a(cs_in_ph_q1_)
+                          << " rest=" << a(cs_in_ph_rest_)
+                          << "  out q1=" << a(cs_out_ph_q1_)
+                          << " rest=" << a(cs_out_ph_rest_) << "\n";
+            }
+            std::cerr << "RX-LOC   PASS worst_pos=" << avg(t_pass_wpos_.load(), tp)/1000.0
+                      << " weak_first_q=" << avg(t_pass_wfq_.load(), tp)
+                      << " weak_last_q=" << avg(t_pass_wlq_.load(), tp) << "\n";
+            std::cerr << "RX-LOC   FAIL worst_pos=" << avg(t_fail_wpos_.load(), tf)/1000.0
+                      << " weak_first_q=" << avg(t_fail_wfq_.load(), tf)
+                      << " weak_last_q=" << avg(t_fail_wlq_.load(), tf) << "\n";
             std::cerr << "RX-QUAL  CRC-FAIL n=" << fn
                       << " EVM acq=" << avg(q_fail_acq_.load(), fn) << "%"
                       << " pay=" << avg(q_fail_pay_.load(), fn) << "%"
@@ -260,6 +288,8 @@ void BridgeMode::applyRealtime(const char* who, int core) {
 
 // ── TX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::txThread() {
+    if (const char* pth = std::getenv("SDR_TXDUMP"))
+        tx_dump_.open(pth, std::ios::binary | std::ios::trunc);
     std::vector<uint8_t>             pkt(MAX_PAYLOAD);
     std::vector<std::complex<float>> iq_syms, iq_shaped;
     std::vector<int16_t>             iq_hw;
@@ -447,6 +477,12 @@ void BridgeMode::txThread() {
                        << " wire=" << pending_frame.size() << "B\n";
         pending_payload_len = aggr_payload_bytes;
         tx_frames_sealed_.fetch_add(1, std::memory_order_relaxed);
+        // Exactly the bytes the CRC covers: past the preamble, before the
+        // postamble -- byte-for-byte what the receiver's sm.bytes holds.
+        if (tx_dump_.is_open() && pending_frame.size() > PREAMBLE_LEN + POSTAMBLE_LEN) {
+            const size_t body_len = pending_frame.size() - PREAMBLE_LEN - POSTAMBLE_LEN;
+            dumpRecord(tx_dump_, pending_seq, pending_frame.data() + PREAMBLE_LEN, body_len);
+        }
         aggr.clear();
         aggr_count = 0;
         aggr_payload_bytes = 0;
@@ -638,6 +674,14 @@ struct EvmStats {
     double rms{0}, p95{0}, p99{0}, max{0};
     uint32_t weak{0};      // symbols decided with little margin
     uint32_t n{0};
+    // Where the damage sits. Failures are driven by a few extreme symbols
+    // (2 MHz: max error 115.9% on failed frames vs 105.5% on passed, while
+    // rms differs by 2%), so the position of those outliers localises the
+    // cause: clustered at the start implicates AGC/carrier settling, at the
+    // end burst truncation or trailing edge, uniform implicates noise.
+    double   worst_pos{0};   // position of the max-error symbol, 0..1
+    uint32_t weak_first_q{0};// weak symbols in the first quarter of the frame
+    uint32_t weak_last_q{0}; // ... and in the last quarter
 };
 
 // Scaling note: symbols are normalised so their MEAN MAGNITUDE matches the
@@ -669,7 +713,12 @@ static EvmStats evmStats(const std::vector<std::complex<float>>& s,
         // decides on both axes, BPSK only on the real one.
         const double margin = qpsk ? std::min(std::fabs(re), std::fabs(im))
                                    : std::fabs(re);
-        if (margin < 0.35) ++st.weak;
+        if (margin < 0.35) {
+            ++st.weak;
+            const double frac = double(i - a) / double(b - a);
+            if (frac < 0.25) ++st.weak_first_q;
+            else if (frac >= 0.75) ++st.weak_last_q;
+        }
     }
     st.n   = static_cast<uint32_t>(e.size());
     st.rms = 100.0 * std::sqrt(sum2 / double(e.size()));
@@ -681,6 +730,18 @@ static EvmStats evmStats(const std::vector<std::complex<float>>& s,
     st.p95 = pick(0.95);
     st.p99 = pick(0.99);
     st.max = 100.0 * e.back();
+    // Locate the worst symbol in the unsorted sequence.
+    {
+        double worst = -1.0; size_t wi = a;
+        for (size_t i = a; i < b; ++i) {
+            const double re = s[i].real() * scale, im = s[i].imag() * scale;
+            const double dr = (re >= 0 ? 1.0 : -1.0);
+            const double di = qpsk ? (im >= 0 ? 1.0 : -1.0) : 0.0;
+            const double d2 = (re - dr) * (re - dr) + (im - di) * (im - di);
+            if (d2 > worst) { worst = d2; wi = i; }
+        }
+        st.worst_pos = double(wi - a) / double(b - a);
+    }
     return st;
 }
 
@@ -692,6 +753,8 @@ static double evmPct(const std::vector<std::complex<float>>& s,
 // ── RX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::rxThread() {
     applyRealtime("dsp", 3);
+    if (const char* pth = std::getenv("SDR_RXFAIL"))
+        rx_fail_dump_.open(pth, std::ios::binary | std::ios::trunc);
     std::vector<int16_t>             iq_hw;
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
     AGC agc; TimingSync tsync(cfg_.samples_per_symbol); CostasLoop costas;
@@ -745,6 +808,10 @@ void BridgeMode::rxThread() {
     ftcfg.fixed_loop = true;
     ftcfg.alpha_sh = 12;
     ftcfg.beta_sh  = 22;
+    const bool slip_tracing = (std::getenv("SDR_SLIPTRACE") != nullptr);
+    ftcfg.trace = slip_tracing;   // 20 vectors/symbol -- diagnosis only
+    if (slip_tracing)
+        slip_trace_.open(std::getenv("SDR_SLIPTRACE"), std::ios::trunc);
     FixedTimingSync fts(ftcfg);
     FixedTimingSync::Result fres;
     const double symbol_rate = static_cast<double>(cfg_.bw_mhz) * 1e6;
@@ -815,6 +882,46 @@ void BridgeMode::rxThread() {
                 // the failure rate look ~0 no matter how bad the link was.
                 // Count each fresh deframer's failure directly instead.
                 if (deframer.crcErrors() > 0) {
+                    // Seq lives at body offset 12 (big-endian) and is
+                    // readable even when the CRC fails, so failures can be
+                    // matched against the transmitted frame.
+                    // NCO state over the symbols this frame occupied. The
+                    // byte diff shows failures are whole-byte garbage from a
+                    // random mid-frame point onward (91.5% corrupt after the
+                    // first difference at 2 MHz), which is a symbol timing
+                    // slip rather than bit errors -- so dump mu, the timing
+                    // error, the loop integrator and the per-symbol step to
+                    // find the update where the loop jumps.
+                    if (slip_trace_.is_open() && !last_fts_.mu.empty()
+                        && sm.bytes.size() >= 16 && slip_frames_dumped_ < 12) {
+                        const uint8_t* b = sm.bytes.data();
+                        uint32_t sq = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                                    | (uint32_t(b[14]) <<  8) |  uint32_t(b[15]);
+                        const size_t n = last_fts_.mu.size();
+                        const size_t s0 = sm.sync_sym;
+                        const size_t s1 = std::min(n, sm.end_sym ? sm.end_sym : n);
+                        slip_trace_ << "FRAME seq=" << sq << " sync_sym=" << s0
+                                    << " end_sym=" << s1 << " nsym=" << n << "\n";
+                        slip_trace_ << "# k idx mu e_q freq_after step_pos d_idx\n";
+                        long prev_idx = (s0 < n) ? last_fts_.idx[s0] : 0;
+                        for (size_t k = s0; k < s1 && k < n; ++k) {
+                            long didx = long(last_fts_.idx[k]) - prev_idx;
+                            prev_idx = last_fts_.idx[k];
+                            slip_trace_ << (k - s0) << ' ' << last_fts_.idx[k] << ' '
+                                        << last_fts_.mu[k] << ' '
+                                        << (k < last_fts_.e_q.size() ? last_fts_.e_q[k] : 0) << ' '
+                                        << (k < last_fts_.freq_after.size() ? last_fts_.freq_after[k] : 0) << ' '
+                                        << (k < last_fts_.pos_after.size() ? last_fts_.pos_after[k] : 0) << ' '
+                                        << didx << '\n';
+                        }
+                        ++slip_frames_dumped_;
+                    }
+                    if (rx_fail_dump_.is_open() && sm.bytes.size() >= 16) {
+                        const uint8_t* b = sm.bytes.data();
+                        uint32_t rseq = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                                      | (uint32_t(b[14]) <<  8) |  uint32_t(b[15]);
+                        dumpRecord(rx_fail_dump_, rseq, sm.bytes.data(), sm.bytes.size());
+                    }
                     ++logged_crc_errors;
                     stats_.frames_rx_bad.fetch_add(1, std::memory_order_relaxed);
                     if (frame_log_.is_open())
@@ -877,7 +984,12 @@ void BridgeMode::rxThread() {
                     stats_.frames_rx_good.fetch_add(1, std::memory_order_relaxed);
                     stats_.bytes_rx.fetch_add(static_cast<uint64_t>(w),
                                               std::memory_order_relaxed);
-                    if (result->flags & FL_FEC)
+                    // Frames Reed-Solomon actually REPAIRED, not merely
+                    // frames that carried the FEC flag -- this counted every
+                    // FEC-enabled frame, so it read as a 100% correction rate
+                    // whenever FEC was on and told you nothing about whether
+                    // RS was earning its parity overhead.
+                    if (deframer.fecRescued() > 0)
                         stats_.fec_corrected.fetch_add(1, std::memory_order_relaxed);
                 }
 
@@ -1198,7 +1310,8 @@ void BridgeMode::rxThread() {
                       // all loop state inside process(), so a fresh call is
                       // already a cold start.
                       auto fr = fts.process(offset_buf);
-                      iq_timed = std::move(fr.syms);
+                      iq_timed = fr.syms;
+                      if (slip_tracing) last_fts_ = std::move(fr);
                   } else {
                       tsync.process(offset_buf, iq_timed); // matched filter + symbol timing
                   } }
@@ -1279,6 +1392,9 @@ void BridgeMode::rxThread() {
                 // roughly zero phase and frequency, so the loop begins from
                 // rest and only has to follow the drift that open-loop
                 // extrapolation accumulates towards the end of a frame.
+                EvmStats cur_tail{};
+                double   cur_evm_pay_post = 0.0;
+
                 // Payload quality must be measured HERE, not on iq_syms.
                 //
                 // demodulate() applies this tap to an internal copy of the
@@ -1292,10 +1408,54 @@ void BridgeMode::rxThread() {
                 SplitModem::PayloadTap tap;
                 if (track_payload) {
                     tap = [&](std::vector<std::complex<float>>& p) {
+                        // Weak symbols cluster in the first quarter of the
+                        // payload (98% of them) at BOTH bandwidths. Measure
+                        // the payload either side of this loop to find out
+                        // whether Costas causes that transient or inherits
+                        // it: amplitude tells an AGC/filter settle apart from
+                        // a phase-tracking transient, and comparing in
+                        // against out says which side of the loop it is on.
+                        auto probe = [](const std::vector<std::complex<float>>& v,
+                                        double& amp_q1, double& amp_rest,
+                                        double& ph_q1, double& ph_rest) {
+                            if (v.size() < 8) return;
+                            const size_t q1 = v.size() / 4;
+                            double a1=0, a2=0, p1=0, p2=0;
+                            for (size_t i = 0; i < v.size(); ++i) {
+                                const double m = std::abs(v[i]);
+                                // Phase error to the nearest QPSK decision,
+                                // folded into +-45 degrees.
+                                double ph = std::arg(v[i]);
+                                double f = std::fmod(ph + M_PI/4.0, M_PI/2.0);
+                                if (f < 0) f += M_PI/2.0;
+                                const double e = std::fabs(f - M_PI/4.0);
+                                if (i < q1) { a1 += m; p1 += e; }
+                                else        { a2 += m; p2 += e; }
+                            }
+                            amp_q1   = a1 / double(q1);
+                            amp_rest = a2 / double(v.size() - q1);
+                            ph_q1    = p1 / double(q1);
+                            ph_rest  = p2 / double(v.size() - q1);
+                        };
+                        double ia1=0, ia2=0, ip1=0, ip2=0;
+                        probe(p, ia1, ia2, ip1, ip2);
+
                         costas.reset();
                         std::vector<std::complex<float>> out;
                         costas.process(p, out);
                         p.swap(out);
+
+                        double oa1=0, oa2=0, op1=0, op2=0;
+                        probe(p, oa1, oa2, op1, op2);
+                        if (ia2 > 0 && oa2 > 0) {
+                            cs_in_amp_ratio_ .fetch_add(uint64_t(1000.0 * ia1 / ia2), std::memory_order_relaxed);
+                            cs_out_amp_ratio_.fetch_add(uint64_t(1000.0 * oa1 / oa2), std::memory_order_relaxed);
+                            cs_in_ph_q1_  .fetch_add(uint64_t(1000.0 * ip1), std::memory_order_relaxed);
+                            cs_in_ph_rest_.fetch_add(uint64_t(1000.0 * ip2), std::memory_order_relaxed);
+                            cs_out_ph_q1_ .fetch_add(uint64_t(1000.0 * op1), std::memory_order_relaxed);
+                            cs_out_ph_rest_.fetch_add(uint64_t(1000.0 * op2), std::memory_order_relaxed);
+                            cs_probe_n_.fetch_add(1, std::memory_order_relaxed);
+                        }
                         if (!p.empty()) {
                             const bool q = (tx_mod_ != ModCode::BPSK);
                             cur_tail = evmStats(p, 0, p.size(), q);
@@ -1307,8 +1467,6 @@ void BridgeMode::rxThread() {
 
                 double cur_evm_acq = 0.0, cur_evm_pay = 0.0;
                 bool   cur_evm_ok = false;
-                EvmStats cur_tail{};
-                double cur_evm_pay_post = 0.0;
                 SplitModem::Result sm;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
                   sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
@@ -1365,6 +1523,13 @@ void BridgeMode::rxThread() {
                         mx .fetch_add(static_cast<uint64_t>(cur_tail.max), std::memory_order_relaxed);
                         wk .fetch_add(cur_tail.weak, std::memory_order_relaxed);
                         tn .fetch_add(1, std::memory_order_relaxed);
+                        auto& wp = this_frame_ok ? t_pass_wpos_ : t_fail_wpos_;
+                        auto& wf = this_frame_ok ? t_pass_wfq_  : t_fail_wfq_;
+                        auto& wl = this_frame_ok ? t_pass_wlq_  : t_fail_wlq_;
+                        wp.fetch_add(static_cast<uint64_t>(cur_tail.worst_pos * 1000.0),
+                                     std::memory_order_relaxed);
+                        wf.fetch_add(cur_tail.weak_first_q, std::memory_order_relaxed);
+                        wl.fetch_add(cur_tail.weak_last_q,  std::memory_order_relaxed);
                     }
                     if (sm.inverted)                 inv .fetch_add(1, std::memory_order_relaxed);
                     if (sm.bytes.size() < need)      shrt.fetch_add(1, std::memory_order_relaxed);

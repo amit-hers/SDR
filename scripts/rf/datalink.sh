@@ -44,7 +44,8 @@ c=json.load(open(f"/home/amither/Documents/SDR/{cfg}"))
 c.update(pluto_ip=ip, node_id=nid, freq_tx_mhz=float(ftx), freq_rx_mhz=float(frx),
          tap_iface=tap, mode="bridge", stats_path=f"/tmp/sdr_stats_{tag}.json",
          modulation=os.environ.get("MOD","BPSK"), bw_mhz=int(os.environ.get("BW","1")),
-         rx_bw_factor=float(os.environ.get("BWF","1.35")), spectrum_interval_ms=0)
+         rx_bw_factor=float(os.environ.get("BWF","1.35")), spectrum_interval_ms=0,
+         fec=(os.environ.get("FEC","0")=="1"))
 if tag=="B" and os.environ.get("B_ATTEN"): c["tx_atten_db"]=float(os.environ["B_ATTEN"])
 if tag=="A" and os.environ.get("A_ATTEN"): c["tx_atten_db"]=float(os.environ["A_ATTEN"])
 json.dump(c,open(f"/home/amither/Documents/SDR/{cfg}","w"),indent=2)
@@ -52,10 +53,10 @@ PY
 done
 
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
+  "cd $REPO && ${SDR_TXDUMP:+SDR_TXDUMP=$SDR_TXDUMP} SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
 sleep 3
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
+  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
 sleep 8
 
 s_ ip addr add 10.99.0.1/24 dev sdr0
@@ -98,6 +99,7 @@ except Exception: print(f"  node {t}: no stats"); raise SystemExit
 print(f"  node {t}: tx={s.get('frames_tx')} rx_good={s.get('frames_rx_good')} "
       f"rx_bad={s.get('frames_rx_bad')} bursts={s.get('bursts_detected')} "
       f"demod={s.get('bursts_demodulated')} dropped={s.get('dropped')} "
+      f"fec_fixed={s.get('fec_corrected')} "
       f"snr={s.get('snr_db')} occ={s.get('rx_occupancy_pct')}% "
       f"txduty_now={s.get('tx_duty_now_pct')}% txduty_peak={s.get('tx_duty_peak_pct')}%")
 PY

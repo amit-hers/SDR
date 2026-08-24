@@ -1,6 +1,6 @@
 {
   "mode": "bridge",
-  "pluto_ip": "169.254.13.209",
+  "pluto_ip": "169.254.11.76",
   "node_id": "0x00000001",
   "freq_tx_mhz": 434.0,
   "freq_rx_mhz": 439.0,
@@ -17,5 +17,6 @@
   "cfo_method": "fft",
   "rt_priority": 0,
   "pin_cores": false,
-  "spectrum_interval_ms": 0
+  "spectrum_interval_ms": 0,
+  "fec": false
 }

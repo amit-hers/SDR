@@ -28,6 +28,7 @@
 #include <atomic>
 #include <memory>
 #include <fstream>
+#include "sdr/dsp/FixedTimingSync.hpp"
 #include <deque>
 #include <mutex>
 #include <condition_variable>
@@ -218,7 +219,31 @@ private:
     std::atomic<uint64_t> t_pass_n_{0}, t_pass_p95_{0}, t_pass_p99_{0},
                           t_pass_max_{0}, t_pass_weak_{0};
     std::atomic<uint64_t> t_fail_n_{0}, t_fail_p95_{0}, t_fail_p99_{0},
-                          t_fail_max_{0}, t_fail_weak_{0};   // ARQ window full
+                          t_fail_max_{0}, t_fail_weak_{0};
+    // Position of the damage within the frame.
+    std::atomic<uint64_t> t_pass_wpos_{0}, t_pass_wfq_{0}, t_pass_wlq_{0};
+    std::atomic<uint64_t> t_fail_wpos_{0}, t_fail_wfq_{0}, t_fail_wlq_{0};
+    // Either side of the Costas payload tap: does it cause the early-payload
+    // transient or inherit it?
+    std::atomic<uint64_t> cs_probe_n_{0};
+    std::atomic<uint64_t> cs_in_amp_ratio_{0},  cs_out_amp_ratio_{0};
+    std::atomic<uint64_t> cs_in_ph_q1_{0},  cs_in_ph_rest_{0};
+    std::atomic<uint64_t> cs_out_ph_q1_{0}, cs_out_ph_rest_{0};
+
+    // Byte-level TX/RX capture, for diffing what was sent against what
+    // arrived. RS repairs only 10% of 2 MHz failures despite BER ~9e-6, and
+    // failed frames show EVM identical to passing ones -- so the corruption
+    // may not be random bit errors at all. Records are
+    // [u32 seq][u32 len][bytes] over the CRC-covered body, keyed on the seq
+    // field at body offset 12.
+    std::ofstream tx_dump_;
+    std::ofstream rx_fail_dump_;
+    // NCO state trace for slip diagnosis (SDR_SLIPTRACE). Kept from the last
+    // FixedTimingSync::process() call so a frame that fails CRC can have its
+    // timing-loop state dumped for the symbols it occupied.
+    std::ofstream slip_trace_;
+    FixedTimingSync::Result last_fts_;
+    int slip_frames_dumped_{0};   // ARQ window full
 
     // Aggregation receive accounting: records seen inside decoded frames vs
     // records the TAP actually accepted. A decoded frame counts as good if
