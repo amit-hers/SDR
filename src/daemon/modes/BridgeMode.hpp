@@ -61,6 +61,14 @@ private:
     // Mirrors the receive side, where captureThread already feeds rxThread
     // through a bounded queue for the same reason.
     void tapReaderThread();
+    // Drains modulated sample buffers to the radio.
+    //
+    // txPush blocks until the radio accepts the samples -- measured at 50.3%
+    // of the transmit worker's wall time, during which it modulated nothing.
+    // Splitting the push onto its own thread lets modulation of the next
+    // buffer overlap transmission of the current one. Duty pacing lives here
+    // too, since it is a property of when samples reach the air.
+    void txPusherThread();
     void captureThread();   // does nothing but rxPull -> queue, so reception never stops
     void rxThread();        // consumes the queue and runs the DSP chain
     void statThread();
@@ -301,6 +309,17 @@ private:
     std::atomic<uint64_t>   tap_q_drops_{0};
     std::atomic<uint64_t>   tap_q_hiwater_{0};
     static constexpr size_t TAP_QUEUE_MAX = 2048;
+
+    // Modulated buffers awaiting transmission. Deliberately shallow: two in
+    // flight is enough to keep the radio fed while the next is prepared, and
+    // more would only add latency ahead of the air.
+    std::thread             tx_pusher_thread_;
+    std::deque<std::vector<int16_t>> tx_sample_q_;
+    std::deque<size_t>      tx_sample_frames_;   // frames carried by each buffer
+    std::mutex              tx_sq_mu_;
+    std::condition_variable tx_sq_cv_;
+    std::atomic<uint64_t>   tx_sq_stalls_{0};    // worker waited for room
+    static constexpr size_t TX_SAMPLE_Q_MAX = 3;
     std::thread        capture_thread_;
     std::thread        rx_thread_;
     std::thread        stat_thread_;

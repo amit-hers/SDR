@@ -110,6 +110,7 @@ void BridgeMode::start() {
     prof_t0_   = std::chrono::steady_clock::now();
     prof_cpu0_ = StageProfiler::processCpuSeconds();
     tap_reader_thread_ = std::thread(&BridgeMode::tapReaderThread, this);
+    tx_pusher_thread_  = std::thread(&BridgeMode::txPusherThread,  this);
     tx_thread_      = std::thread(&BridgeMode::txThread,      this);
     capture_thread_ = std::thread(&BridgeMode::captureThread, this);
     rx_thread_      = std::thread(&BridgeMode::rxThread,      this);
@@ -118,9 +119,19 @@ void BridgeMode::start() {
 
 void BridgeMode::stop() {
     running_.store(false);
+    // Wake EVERY waiter before joining anything.
+    //
+    // txThread can be blocked in flush() waiting for room on the sample
+    // queue. Its predicate checks running_, but a predicate is only re-tested
+    // on notify -- so notifying after join()ing that same thread deadlocks
+    // the shutdown. Notify first, join second, always.
     capture_cv_.notify_all();   // wake the DSP thread out of its wait
+    tap_cv_.notify_all();       // wake the TX worker off the TAP queue
+    tx_sq_cv_.notify_all();     // wake modulator and pusher off the sample queue
     if (tx_thread_.joinable())      tx_thread_.join();
     if (tap_reader_thread_.joinable()) tap_reader_thread_.join();
+    tx_sq_cv_.notify_all();
+    if (tx_pusher_thread_.joinable())  tx_pusher_thread_.join();
     if (capture_thread_.joinable()) capture_thread_.join();
     if (rx_thread_.joinable())      rx_thread_.join();
     if (stat_thread_.joinable())    stat_thread_.join();
@@ -249,6 +260,8 @@ void BridgeMode::stop() {
                       << "% of buffer)"
                       << " empty_polls=" << tx_tap_empty_.load() << "\n";
         }
+        std::cerr << "TX-PIPELINE sample_q_stalls=" << tx_sq_stalls_.load()
+                  << " (modulator waiting on the pusher; low = overlap working)\n";
         std::cerr << "TX-QUEUE drops=" << tap_q_drops_.load()
                   << " high_water=" << tap_q_hiwater_.load()
                   << " / " << TAP_QUEUE_MAX << "\n";
@@ -301,6 +314,76 @@ void BridgeMode::applyRealtime(const char* who, int core) {
 }
 
 // ── TX thread ────────────────────────────────────────────────────────────────
+// Drains modulated sample buffers to the radio, with duty pacing and carrier
+// sense applied here rather than in the modulator. Runs in parallel with
+// txThread so a blocking push never stalls modulation.
+void BridgeMode::txPusherThread() {
+    applyRealtime("txpush", 3);
+    const double sample_rate_tx = static_cast<double>(cfg_.bw_mhz) * 1e6 *
+                                  cfg_.samples_per_symbol;
+    const double duty = (cfg_.tx_duty_max > 0.0 && cfg_.tx_duty_max < 1.0)
+                      ? cfg_.tx_duty_max : 1.0;
+    std::chrono::steady_clock::time_point next_tx_allowed{}, air_clock{};
+
+    while (running_.load()) {
+        std::vector<int16_t> buf;
+        size_t frames = 0;
+        {
+            std::unique_lock<std::mutex> lk(tx_sq_mu_);
+            tx_sq_cv_.wait_for(lk, std::chrono::milliseconds(5), [&]{
+                return !tx_sample_q_.empty() || !running_.load(); });
+            if (tx_sample_q_.empty()) continue;
+            buf = std::move(tx_sample_q_.front()); tx_sample_q_.pop_front();
+            frames = tx_sample_frames_.front();    tx_sample_frames_.pop_front();
+        }
+        tx_sq_cv_.notify_one();          // room freed for the modulator
+        if (buf.empty()) continue;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now < next_tx_allowed) {
+            tx_duty_waits_us_.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    next_tx_allowed - now).count()), std::memory_order_relaxed);
+            std::this_thread::sleep_for(next_tx_allowed - now);
+        }
+        if (cfg_.carrier_sense) {
+            now = std::chrono::steady_clock::now();
+            const auto busy_until = std::chrono::steady_clock::time_point(
+                std::chrono::microseconds(peer_busy_until_us_.load(std::memory_order_relaxed)));
+            if (now < busy_until) {
+                auto wait = busy_until - now;
+                const auto cap = std::chrono::milliseconds(cfg_.carrier_sense_max_defer_ms);
+                if (wait > cap) { wait = cap; cs_overrides_.fetch_add(1, std::memory_order_relaxed); }
+                std::this_thread::sleep_for(wait);
+            }
+        }
+
+        const size_t want = buf.size() / 2;
+        int pushed = 0;
+        { StageProfiler::Scope sc(prof_, StageProfiler::TX_PUSH, want);
+          pushed = radio_.txPush(buf.data(), want); }
+
+        const double air = static_cast<double>(want) / sample_rate_tx;
+        tx_air_seconds_.store(tx_air_seconds_.load(std::memory_order_relaxed) + air,
+                              std::memory_order_relaxed);
+        auto after_push = std::chrono::steady_clock::now();
+        if (air_clock < after_push) air_clock = after_push;
+        air_clock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(air));
+        next_tx_allowed = air_clock +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(air / duty - air));
+
+        if (pushed >= 0 && static_cast<size_t>(pushed) == want) {
+            tx_pushes_ok_.fetch_add(1, std::memory_order_relaxed);
+            stats_.frames_tx.fetch_add(frames, std::memory_order_relaxed);
+        } else {
+            tx_pushes_short_.fetch_add(1, std::memory_order_relaxed);
+            tx_frames_lost_.fetch_add(frames, std::memory_order_relaxed);
+        }
+    }
+}
+
 // Continuously drains the TAP into tap_queue_. Runs independently of the
 // transmit worker so duty-limit sleeps never stall ingestion.
 void BridgeMode::tapReaderThread() {
@@ -381,69 +464,29 @@ void BridgeMode::txThread() {
     // is full and deferring would overflow it.
     auto flush = [&](bool force) {
         if (stage.empty()) return;
-        auto now = std::chrono::steady_clock::now();
-        if (now < next_tx_allowed) {
-            if (!force) { tx_duty_defers_.fetch_add(1, std::memory_order_relaxed); return; }
-            tx_duty_waits_us_.fetch_add(
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                    next_tx_allowed - now).count()), std::memory_order_relaxed);
-            std::this_thread::sleep_for(next_tx_allowed - now);
-        }
-
-        // Carrier sense: hold off while the peer is on the air, so the quiet
-        // periods are ones both ends agree on. Bounded, so a peer that never
-        // stops cannot starve this node entirely.
-        if (cfg_.carrier_sense) {
-            now = std::chrono::steady_clock::now();
-            const auto busy_until = std::chrono::steady_clock::time_point(
-                std::chrono::microseconds(
-                    peer_busy_until_us_.load(std::memory_order_relaxed)));
-            if (now < busy_until) {
-                if (!force) {
-                    cs_defers_.fetch_add(1, std::memory_order_relaxed);
-                    return;
-                }
-                auto wait = busy_until - now;
-                const auto cap = std::chrono::milliseconds(cfg_.carrier_sense_max_defer_ms);
-                if (wait > cap) { wait = cap; cs_overrides_.fetch_add(1, std::memory_order_relaxed); }
-                std::this_thread::sleep_for(wait);
+        // Hand the modulated buffer to the pusher thread instead of pushing
+        // it here. txPush blocks until the radio accepts the samples -- 50.3%
+        // of this worker's wall time -- and every microsecond of that was
+        // time not spent modulating the next buffer. Duty pacing and carrier
+        // sense move to the pusher, where they belong: both are properties of
+        // when samples reach the air, not of when they were prepared.
+        std::unique_lock<std::mutex> lk(tx_sq_mu_);
+        if (tx_sample_q_.size() >= TX_SAMPLE_Q_MAX) {
+            if (!force) { tx_sq_stalls_.fetch_add(1, std::memory_order_relaxed); return; }
+            // Bounded: a missed notify must degrade to a slow flush, never a hang.
+            tx_sq_cv_.wait_for(lk, std::chrono::milliseconds(50), [&]{
+                return tx_sample_q_.size() < TX_SAMPLE_Q_MAX || !running_.load(); });
+            if (tx_sample_q_.size() >= TX_SAMPLE_Q_MAX) {
+                tx_sq_stalls_.fetch_add(1, std::memory_order_relaxed);
+                return;                       // try again on the next poll
             }
         }
-
-        const size_t want = stage.size() / 2;
-        int pushed = 0;
-        { StageProfiler::Scope sc(prof_, StageProfiler::TX_PUSH, want);
-          pushed = radio_.txPush(stage.data(), want); }
-
-        const double air = static_cast<double>(want) / sample_rate_tx;
-        tx_air_seconds_.store(tx_air_seconds_.load(std::memory_order_relaxed) + air,
-                              std::memory_order_relaxed);
-
-        // Advance the air clock from wherever the previous burst ends, not
-        // from now. If the radio has already drained (we were idle), the
-        // clock catches up first so idle time is not banked as credit.
-        auto after_push = std::chrono::steady_clock::now();
-        if (air_clock < after_push) air_clock = after_push;
-        air_clock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(air));
-        next_tx_allowed = air_clock +
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(air / duty - air));
-
-        // Credit frames to frames_tx only on a complete push. A short or
-        // failed push means some of these never reached the air, and
-        // counting them anyway is what made the transmitter look healthy
-        // while the channel was empty.
-        if (pushed >= 0 && static_cast<size_t>(pushed) == want) {
-            tx_pushes_ok_.fetch_add(1, std::memory_order_relaxed);
-            stats_.frames_tx.fetch_add(staged_frames, std::memory_order_relaxed);
-        } else {
-            tx_pushes_short_.fetch_add(1, std::memory_order_relaxed);
-            tx_frames_lost_.fetch_add(staged_frames, std::memory_order_relaxed);
-            if (frame_log_.is_open())
-                frame_log_ << "[TX-SHORT] wanted=" << want << " pushed=" << pushed
-                           << " frames_dropped=" << staged_frames << "\n";
-        }
+        tx_sample_q_.emplace_back(std::move(stage));
+        tx_sample_frames_.push_back(staged_frames);
+        lk.unlock();
+        tx_sq_cv_.notify_one();
+        stage = std::vector<int16_t>();
+        stage.reserve(tx_capacity * 2);
         staged_frames = 0;
         stage.clear();
     };
@@ -565,7 +608,14 @@ void BridgeMode::txThread() {
               // flushed on its latency deadline when traffic stops.
               std::unique_lock<std::mutex> lk(tap_mu_);
               if (tap_queue_.empty())
-                  tap_cv_.wait_for(lk, std::chrono::microseconds(250),
+                  // Wait long enough to actually sleep. The reader notifies on
+                  // every packet, so a short timeout adds no responsiveness --
+                  // it just spins: a 250us bound produced 50,719 polls to
+                  // collect 5,174 packets, burning 13.95 s of a 25 s run in
+                  // the queue read alone, more than all the DSP combined. The
+                  // bound only has to be shorter than the flush deadline so a
+                  // partially-filled stage still goes out on a quiet link.
+                  tap_cv_.wait_for(lk, std::chrono::milliseconds(TX_LATENCY_MS / 2),
                                    [&]{ return !tap_queue_.empty() || !running_.load(); });
               if (!tap_queue_.empty()) {
                   auto& front = tap_queue_.front();

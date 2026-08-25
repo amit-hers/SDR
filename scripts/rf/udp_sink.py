@@ -8,6 +8,14 @@ signal.signal(signal.SIGTERM, _t)
 signal.signal(signal.SIGINT, _t)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+# Large receive buffer. The link delivers in bursts (one iio push carries
+# several frames back to back), and the default ~200 KB overflowed: 2915
+# packets reached the TAP but only ~1953 were counted, making goodput read
+# ~33% low. That was the measuring instrument, not the datalink.
+try:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
+except OSError:
+    pass
 s.bind(("0.0.0.0", 9999)); s.settimeout(45)
 seen, first, last, total = set(), None, None, 0
 try:
