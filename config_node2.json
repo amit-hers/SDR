@@ -1,6 +1,6 @@
 {
   "mode": "bridge",
-  "pluto_ip": "169.254.15.180",
+  "pluto_ip": "169.254.9.138",
   "node_id": "0x00000002",
   "freq_tx_mhz": 439.0,
   "freq_rx_mhz": 434.0,

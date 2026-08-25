@@ -808,6 +808,24 @@ void BridgeMode::rxThread() {
     ftcfg.fixed_loop = true;
     ftcfg.alpha_sh = 12;
     ftcfg.beta_sh  = 22;
+    // Overridable for sweeps. The loop locks with mu pinned at 0.94-0.99,
+    // hard against the wrap boundary, so noise tips it across constantly:
+    // steps of 3 and 5 input samples at ~0.55% each, and the imbalance
+    // (285 threes vs 280 fives at 2 MHz) inserts symbols. Seven inserted
+    // symbols shift the bit stream by 14 bits and everything after decodes
+    // as garbage -- the tail matches the transmitted data at 100% once
+    // realigned, so nothing is corrupted, only displaced.
+    //
+    // alpha_sh is the proportional gain as a right-shift, so LARGER means a
+    // slower, less noise-driven loop. n_phases sets interpolation resolution
+    // (32 phases = 1/32 sample); coarse resolution keeps mu quantised near
+    // the boundary it is dithering across.
+    if (const char* e = std::getenv("SDR_ALPHA_SH")) ftcfg.alpha_sh = std::atoi(e);
+    if (const char* e = std::getenv("SDR_BETA_SH"))  ftcfg.beta_sh  = std::atoi(e);
+    if (const char* e = std::getenv("SDR_NPHASES"))  ftcfg.n_phases = std::atoi(e);
+    std::cerr << "[rx] timing loop: alpha_sh=" << ftcfg.alpha_sh
+              << " beta_sh=" << ftcfg.beta_sh
+              << " n_phases=" << ftcfg.n_phases << "\n";
     const bool slip_tracing = (std::getenv("SDR_SLIPTRACE") != nullptr);
     ftcfg.trace = slip_tracing;   // 20 vectors/symbol -- diagnosis only
     if (slip_tracing)
