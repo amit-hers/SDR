@@ -211,6 +211,19 @@ private:
     std::atomic<uint64_t> walk_exit_eow_{0};
     std::atomic<uint64_t> walk_frames_in_window_{0}; // sum, for frames/window
 
+    // Walk-advance accuracy. Enlarging the burst window measured WORSE (more
+    // bursts found, fewer frames each), so the receiver is not window-limited
+    // -- the walk may simply be predicting the next preamble's location
+    // badly, and preamble_search only looks ~1536 samples from wherever it
+    // lands. These record predicted-vs-actual so that can be settled.
+    std::atomic<uint64_t> wk_pred_n_{0};        // advances followed by a search
+    std::atomic<uint64_t> wk_hit_{0};           // preamble found within the bound
+    std::atomic<uint64_t> wk_miss_{0};          // not found -> walk ends
+    std::atomic<int64_t>  wk_err_sum_{0};       // signed offset error, samples
+    std::atomic<uint64_t> wk_err_abs_sum_{0};
+    std::atomic<uint64_t> wk_err_max_{0};
+    std::atomic<uint64_t> wk_near_edge_{0};     // found in the last 25% of the bound
+
     // Post-TimingSync demodulation quality. Truncation and sync acquisition
     // are identical at 1 and 2 MHz (254 vs 253 truncated, 67.2 vs 66.7%
     // sync), but CRC failures rise 20x (13 -> 264), so the loss is in

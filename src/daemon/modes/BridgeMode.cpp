@@ -186,6 +186,20 @@ void BridgeMode::stop() {
                       << " frames/window=" << (win ? double(fo) / double(win) : 0.0)
                       << " adv_past_frame=" << walk_adv_frame_.load()
                       << " adv_by_template=" << walk_adv_ref_.load() << "\n";
+            {
+                uint64_t n = wk_pred_n_.load(), h = wk_hit_.load(), m = wk_miss_.load();
+                std::cerr << "RX-WALKERR predictions=" << n
+                          << " hit=" << h << " miss=" << m
+                          << " (" << (n ? 100.0*double(m)/double(n) : 0.0) << "% missed)"
+                          << " mean_err=" << (h ? double(wk_err_sum_.load())/double(h) : 0.0)
+                          << " mean|err|=" << (h ? double(wk_err_abs_sum_.load())/double(h) : 0.0)
+                          << " max|err|=" << wk_err_max_.load()
+                          << " near_edge=" << wk_near_edge_.load()
+                          << "  (search bound "
+                          << (static_cast<size_t>(cfg_.burst_margin)
+                              + static_cast<size_t>(cfg_.burst_block) * 4)
+                          << " samples)\n";
+            }
             std::cerr << "RX-WALK exits: no_sync=" << walk_exit_nosync_.load()
                       << " end_of_window=" << walk_exit_eow_.load()
                       << " hit_max_frames=" << walk_exit_maxframes_.load()
@@ -1296,11 +1310,33 @@ void BridgeMode::rxThread() {
             // demodulating a fragment can never satisfy the CRC. Extend to
             // at least one maximum-size frame (plus slack for the alignment
             // search) so a located frame is always complete.
+            // One maximum-size frame, deliberately -- NOT a whole TX burst.
+            //
+            // Enlarging this to cover a full batched push looked obviously
+            // right (bursts carry ~4.6 frames, windows reserved room for one)
+            // and measured clearly WORSE. Alternating A/B at matched TX duty:
+            //   frame floor (this)  frames/window 3.10 / 2.02   4163 / 2808 frames
+            //   burst floor         frames/window 1.09 / 1.60   2006 / 2695 frames
+            // The larger window detected MORE bursts (1842 vs 1347) yet
+            // extracted fewer frames from each, and goodput halved.
+            //
+            // So the receiver is not window-limited, and 0.83 frames/window
+            // has another cause -- most likely PreambleSync failing to locate
+            // later frames in a burst, since preamble_search is bounded to
+            // ~1536 samples from wherever the walk's advance lands.
             const size_t max_frame_samples =
                 (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 *
                 static_cast<size_t>(cfg_.samples_per_symbol);
+            // SDR_WIN_BURST=0 restores the one-frame floor, for A/B.
+            static const bool win_burst = [] {
+                const char* e = std::getenv("SDR_WIN_BURST");
+                return e && e[0] == '1';    // opt-in; measured worse
+            }();
+            const size_t burst_floor = win_burst
+                ? std::max(max_frame_samples, radio_.txCapacity())
+                : max_frame_samples;
             size_t win_end = std::min(iq_f.size(),
-                                      std::max(win.end, win.start + max_frame_samples
+                                      std::max(win.end, win.start + burst_floor
                                                         + static_cast<size_t>(cfg_.burst_margin)));
             window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
                               iq_f.begin() + static_cast<long>(win_end));
@@ -1466,6 +1502,7 @@ void BridgeMode::rxThread() {
             bool decoded_any = false;
             size_t search_from = 0;
             size_t last_end_sym = 0, last_offset = 0;
+            size_t predicted_next = 0; bool have_prediction = false;
             size_t frames_this_window = 0;
             int    frame_no = 0;
             for (; frame_no < MAX_FRAMES_PER_WINDOW; ++frame_no) {
@@ -1485,6 +1522,28 @@ void BridgeMode::rxThread() {
                 PreambleSync::Match match;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_PSYNC, tail.size());
                   match = psync.find(tail, preamble_search); }
+                // Predicted-vs-actual for the PREVIOUS frame's advance.
+                if (have_prediction) {
+                    wk_pred_n_.fetch_add(1, std::memory_order_relaxed);
+                    if (match.found) {
+                        const size_t actual = search_from + static_cast<size_t>(match.offset);
+                        const int64_t err = static_cast<int64_t>(actual) -
+                                            static_cast<int64_t>(predicted_next);
+                        const uint64_t a = static_cast<uint64_t>(err < 0 ? -err : err);
+                        wk_hit_.fetch_add(1, std::memory_order_relaxed);
+                        wk_err_sum_.fetch_add(err, std::memory_order_relaxed);
+                        wk_err_abs_sum_.fetch_add(a, std::memory_order_relaxed);
+                        uint64_t prev = wk_err_max_.load(std::memory_order_relaxed);
+                        while (a > prev && !wk_err_max_.compare_exchange_weak(prev, a)) {}
+                        // Found in the last quarter of the search bound means
+                        // a slightly worse prediction would have missed it.
+                        if (static_cast<size_t>(match.offset) > preamble_search * 3 / 4)
+                            wk_near_edge_.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        wk_miss_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    have_prediction = false;
+                }
                 if (!match.found) {
                     walk_exit_nosync_.fetch_add(1, std::memory_order_relaxed);
                     break;
@@ -1505,8 +1564,43 @@ void BridgeMode::rxThread() {
                 size_t offset = offsets[oi];
                 if (offset >= window_buf.size()) break;
                 align_attempts_.fetch_add(1, std::memory_order_relaxed);
+                // Only one frame is decoded per attempt, so copy only what a
+                // frame can occupy -- not everything from here to the end of
+                // the burst window.
+                //
+                // The window is deliberately extended to max_frame_samples +
+                // burst_margin so a clipped detection cannot truncate a real
+                // frame. An early frame therefore saw nearly the whole
+                // window, and AGC (22.8% of the RX core) plus TimingSync
+                // (9.7%) reprocessed that entire tail on every alignment
+                // attempt, discarding all of it beyond the first frame.
+                //
+                // Trimming changes no behaviour: both stages are causal and
+                // per-sample, so samples past the frame never influenced the
+                // symbols that were kept. Slack is added for the alignment
+                // search and RRC group delay.
+                const size_t frame_span =
+                    (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 *
+                        static_cast<size_t>(RRC_SPS) / 2      // QPSK worst case
+                    + BOOTSTRAP_BYTES * 8 * static_cast<size_t>(RRC_SPS)
+                    + static_cast<size_t>(RRC_TAPS) * 4;
+                // SDR_RX_TRIM=0 restores the full-tail copy, for A/B.
+                //
+                // Measured alternating at 2 MHz, two trials each:
+                //   trimmed    3706/4126 frames  acq 58%/81%  rx_cpu 53%/57%  drops 0/0
+                //   full-tail  2649/2517 frames  acq 49%/40%  rx_cpu 61%/65%  drops 46/0
+                // Trimming is better on every metric in both trials -- it is
+                // not merely cheaper, it decodes MORE, because the CPU freed
+                // keeps the receiver ahead of the capture queue.
+                static const bool trim_on = [] {
+                    const char* e = std::getenv("SDR_RX_TRIM");
+                    return !(e && e[0] == '0');
+                }();
+                const size_t take = trim_on
+                    ? std::min(window_buf.size() - offset, frame_span)
+                    : (window_buf.size() - offset);
                 offset_buf.assign(window_buf.begin() + static_cast<long>(offset),
-                                  window_buf.end());
+                                  window_buf.begin() + static_cast<long>(offset + take));
 
                 // Fresh cold start per attempt -- do not carry over state
                 // adapted to the preceding silence or a failed alignment.
@@ -1895,6 +1989,8 @@ void BridgeMode::rxThread() {
                 if (this_frame_ok && last_end_sym > 0) {
                     const size_t adv = last_offset +
                         static_cast<size_t>(last_end_sym) * static_cast<size_t>(RRC_SPS);
+                    predicted_next = adv;      // for the accuracy check below
+                    have_prediction = true;
                     // Never go backwards, and always make progress.
                     search_from = (adv > search_from) ? adv
                                 : search_from + psync.referenceLength();

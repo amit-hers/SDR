@@ -56,7 +56,7 @@ echo "$PW" | sudo -S bash -c \
   "cd $REPO && ${SDR_TX_BUF:+SDR_TX_BUF=$SDR_TX_BUF} ${SDR_TXDUMP:+SDR_TXDUMP=$SDR_TXDUMP} SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
 sleep 3
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_AGC_BLOCK:+SDR_AGC_BLOCK=$SDR_AGC_BLOCK} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} ${SDR_ALPHA_SH:+SDR_ALPHA_SH=$SDR_ALPHA_SH} ${SDR_BETA_SH:+SDR_BETA_SH=$SDR_BETA_SH} ${SDR_NPHASES:+SDR_NPHASES=$SDR_NPHASES} ${SDR_COSTAS_BW:+SDR_COSTAS_BW=$SDR_COSTAS_BW} ${SDR_RX_CARRIER:+SDR_RX_CARRIER=$SDR_RX_CARRIER} ${SDR_COSTAS_SEED:+SDR_COSTAS_SEED=$SDR_COSTAS_SEED} ${SDR_COSTAS_PHLIM:+SDR_COSTAS_PHLIM=$SDR_COSTAS_PHLIM} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
+  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_AGC_BLOCK:+SDR_AGC_BLOCK=$SDR_AGC_BLOCK} ${SDR_RX_TRIM:+SDR_RX_TRIM=$SDR_RX_TRIM} ${SDR_WIN_BURST:+SDR_WIN_BURST=$SDR_WIN_BURST} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} ${SDR_ALPHA_SH:+SDR_ALPHA_SH=$SDR_ALPHA_SH} ${SDR_BETA_SH:+SDR_BETA_SH=$SDR_BETA_SH} ${SDR_NPHASES:+SDR_NPHASES=$SDR_NPHASES} ${SDR_COSTAS_BW:+SDR_COSTAS_BW=$SDR_COSTAS_BW} ${SDR_RX_CARRIER:+SDR_RX_CARRIER=$SDR_RX_CARRIER} ${SDR_COSTAS_SEED:+SDR_COSTAS_SEED=$SDR_COSTAS_SEED} ${SDR_COSTAS_PHLIM:+SDR_COSTAS_PHLIM=$SDR_COSTAS_PHLIM} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
 sleep 8
 
 s_ ip addr add 10.99.0.1/24 dev sdr0
@@ -86,6 +86,18 @@ else
   s_ pkill -f udp_sink.py >/dev/null 2>&1
   sleep 2
   cat /tmp/sink.txt
+  # Delivery-chain trace: where do packets vanish between the decoder and
+  # the sink? Counts are taken at each hop so the loss can be localised
+  # instead of attributed to whichever stage is being worked on.
+  echo "  --- delivery chain ---"
+  echo "    sdr1 (node B TAP, in rxns):"
+  s_ ip netns exec rxns ip -s link show sdr1 2>/dev/null | tail -3 | sed "s/^/      /"
+  echo "    IP stats in rxns (InReceives/InHdrErrors/InDiscards/InDelivers):"
+  s_ ip netns exec rxns sh -c 'awk "/^Ip:/{if(h){split(h,H,\" \");split(\$0,V,\" \");for(i=2;i<=length(H);i++) if(H[i]==\"InReceives\"||H[i]==\"InHdrErrors\"||H[i]==\"InDiscards\"||H[i]==\"InDelivers\") printf \"      %s=%s\\n\",H[i],V[i]} h=\$0}" /proc/net/snmp'
+  echo "    UDP full line in rxns:"
+  s_ ip netns exec rxns sh -c 'awk "/^Udp:/{print \"      \" \$0}" /proc/net/snmp'
+  echo "    UDP socket stats in rxns:"
+  s_ ip netns exec rxns cat /proc/net/snmp 2>/dev/null | awk "/^Udp:/{getline; print \"      InDatagrams=\" \$2 \" NoPorts=\" \$3 \" InErrors=\" \$4 \" RcvbufErrors=\" \$6}" | tail -1
 fi
 
 sleep 2
