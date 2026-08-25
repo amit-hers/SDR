@@ -223,6 +223,27 @@ private:
     std::atomic<uint64_t> wk_err_abs_sum_{0};
     std::atomic<uint64_t> wk_err_max_{0};
     std::atomic<uint64_t> wk_near_edge_{0};     // found in the last 25% of the bound
+    // ── Per-frame quality trace ($SDR_FQ_LOG) ────────────────────────────
+    // The recovery fix reaches frames that were previously abandoned, and
+    // those decode at ~77% against ~98% for the rest. Two candidate causes,
+    // which call for opposite responses:
+    //
+    //   channel   -- whatever corrupted frame N also corrupts N+1. Then the
+    //                failures carry degraded SNR/EVM and cluster in time, and
+    //                there is nothing for the receiver to fix.
+    //   RX state  -- something stale is carried into the next frame. AGC,
+    //                TimingSync and Costas are already reset per attempt and
+    //                DataAidedSync is stateless, so the only cross-frame
+    //                state left in a window is the ONE CoarseFreqCorrect
+    //                estimate applied to the whole window. That would show as
+    //                normal SNR but elevated residual CFO / phase slip on the
+    //                later frames.
+    //
+    // Logged per decided frame, with the walk class and position, so the two
+    // populations can be compared at matched position-in-burst -- otherwise
+    // the comparison only rediscovers that later frames are harder.
+    std::ofstream fq_log_;
+
     // ── Failed-decode recovery ($SDR_PSYNC_LOG, [WR] lines) ──────────────
     // When a frame fails to decode the walk steps forward by only
     // referenceLength() (1120 samples) and searches 1536 from there -- but a
@@ -426,13 +447,29 @@ private:
     std::thread             tx_pusher_thread_;
     std::deque<std::vector<int16_t>> tx_sample_q_;
     std::deque<size_t>      tx_sample_frames_;   // frames carried by each buffer
-    // Frame sequence numbers carried by each buffer, in transmit order.
+    // What each staged buffer carries, travelling with it to the pusher.
+    //
     // A "TX burst" is exactly one of these buffers: one txPush, one
     // contiguous run of samples on the air, with a duty gap either side.
-    // Recording the seqs is what lets the peer's per-window log be joined
-    // back to the burst those frames were actually sent in -- the two nodes
-    // share no clock, but they do share the sequence numbering.
-    std::deque<std::vector<uint32_t>> tx_sample_seqs_;
+    // The seqs are what let the peer's per-frame log be joined back to the
+    // burst those frames were sent in -- the two nodes share no clock, but
+    // they do share the sequence numbering. The offsets locate each frame
+    // INSIDE the push, so "is it always the last frame of a buffer that
+    // fails" becomes a question the logs can answer.
+    //
+    // The sample statistics are taken on the buffer as it goes to the radio,
+    // which is the last point before the air: peak, RMS and clipping say
+    // whether the transmitter itself distorted this particular burst.
+    struct TxBurstMeta {
+        std::vector<uint32_t> seqs;
+        std::vector<uint32_t> offs;    // sample offset of each frame in the buffer
+        bool     forced{false};        // flushed because the stage was full
+        int      peak{0};              // max |I| or |Q|, raw int16
+        double   rms{0};
+        uint32_t clipped{0};           // samples at or beyond full scale
+        double   dc_i{0}, dc_q{0};
+    };
+    std::deque<TxBurstMeta> tx_sample_meta_;
     std::mutex              tx_sq_mu_;
     std::condition_variable tx_sq_cv_;
     std::atomic<uint64_t>   tx_sq_stalls_{0};    // worker waited for room
@@ -441,6 +478,9 @@ private:
     std::thread        rx_thread_;
     std::thread        stat_thread_;
     std::atomic<uint32_t> tx_seq_{0};
+    // Samples the DAC conversion had to clamp. Should stay at zero; see
+    // TX_PEAK_OVERSHOOT in the .cpp.
+    std::atomic<uint64_t> tx_clamped_{0};
 
     // Capture -> DSP handoff. Demodulating a burst takes long enough that
     // doing it inline with rxPull() left the receiver deaf ~30% of the time,

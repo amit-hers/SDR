@@ -18,6 +18,68 @@ namespace sdr {
 // Write one [u32 seq][u32 len][bytes] record. Used to capture the exact
 // CRC-covered body on TX and the exact pre-CRC byte stream on RX, so failed
 // frames can be byte-diffed against what was actually sent.
+// ── DAC full scale ───────────────────────────────────────────────────────────
+// The TX DMA channel reports `le:S16/16>>0` -- signed 16 bit, all 16 bits
+// significant, no shift -- so full scale is +-32767 and txPush hands it raw
+// int16.
+//
+// The 2047 this code used to multiply by is NOT a full-scale limit, it is an
+// amplitude choice, and a very quiet one: the RRC-shaped waveform peaks at
+// 1.533x its nominal, so 2047 puts the peak at 3138, which is 9.6% of the
+// available range and leaves 20.4 dB of digital headroom unused.
+//
+// This was briefly misread the other way -- 2047 assumed to be full scale,
+// samples above it counted as clipping, and a 4.1 dB backoff applied to
+// "fix" it. The A/B settled it immediately: backing off cost 17 points of
+// frame recovery and pushed CRC failures from 6% to 22%. There was no
+// clipping; the link is power-limited, and taking power away hurts. The
+// number to check against was the channel's data format, not a constant in
+// the source.
+static constexpr float TX_FULL_SCALE = 32767.f;
+
+// Peak-to-nominal of the RRC-shaped waveform, measured over 1409 live bursts
+// (3138 peak at a scale of 2047). Only used to size a safe upper bound for
+// the amplitude sweep; it is not a correction.
+static constexpr float TX_PEAK_OVERSHOOT = 1.60f;
+
+// Amplitude actually used.
+//
+// Swept at 2 MHz QPSK, 60 s per point (SDR_TX_SCALE):
+//   scale   dBfs   recovered   CRC fail   bursts fully recovered
+//    2047  -24.1       95.1%      4.30%        87.7%
+//    4096  -18.1       90.1%      0.02%        90.0%
+//    8192  -12.0       98.9%      0.02%        98.9%
+//   16384   -6.0       99.0%      0.00%        98.5%
+//
+// The original 2047 was transmitting 24 dB below full scale. Raising it takes
+// CRC failures from 4.3% to effectively zero and frame recovery from 95% to
+// 99% -- so the residual failures chased through the burst, window, walk and
+// carrier investigations were, in the end, a link-budget problem. The metric
+// that hid it is `snr`, which is rssi + 95, i.e. received POWER rather than a
+// signal-to-noise ratio; it cannot see a varying noise floor, which is why
+// passing and failing frames looked identical on it.
+//
+// 8192 rather than 16384: the last doubling buys nothing measurable, and this
+// leaves the peak at 12530, 8 dB below full scale -- headroom that 16QAM's
+// higher peak-to-average will want. Nothing clamps at either point.
+//
+// This is digital drive, not radiated power; `tx_atten_db` in the config is
+// the analog control and still applies on top.
+static constexpr float TX_SCALE_DEFAULT = 8192.f;
+
+// Scale and clamp one component to the DAC word.
+//
+// The clamp cannot fire at the default scale; it exists so that a future
+// amplitude change, rolloff change or louder aggregate cannot silently wrap
+// the int16. tx_clamped_ staying at zero is how you know the scale in use is
+// safe -- read it from the TRANSMITTING node's log, node A, not the peer's.
+static inline int16_t toDac(float v, float scale, std::atomic<uint64_t>& clamped) {
+    float x = v * scale;
+    if (x >  TX_FULL_SCALE) { x =  TX_FULL_SCALE; clamped.fetch_add(1, std::memory_order_relaxed); }
+    if (x < -TX_FULL_SCALE) { x = -TX_FULL_SCALE; clamped.fetch_add(1, std::memory_order_relaxed); }
+    return static_cast<int16_t>(x);
+}
+
 static void dumpRecord(std::ofstream& f, uint32_t seq, const uint8_t* d, size_t n) {
     if (!f.is_open()) return;
     uint32_t len = static_cast<uint32_t>(n);
@@ -92,6 +154,14 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
         frame_log_.open(path, std::ios::trunc);
     if (const char* path = std::getenv("SDR_RAW_LOG"); path && *path)
         raw_log_.open(path, std::ios::trunc);
+    if (const char* path = std::getenv("SDR_FQ_LOG"); path && *path) {
+        fq_log_.open(path, std::ios::trunc);
+        fq_log_ << "# per-frame quality. One line per decided frame.\n"
+                << "# class=first|after_ok|after_fail  ok=1 CRC passed\n"
+                << "# prev_ok: outcome of the PREVIOUS frame in this window"
+                   " (-1 = this is the first)\n";
+        std::cerr << "[sdr] per-frame quality trace -> " << path << "\n";
+    }
     if (const char* path = std::getenv("SDR_PSYNC_LOG"); path && *path) {
         psync_log_.open(path, std::ios::trunc);
         psync_log_ << "# PreambleSync correlation trace. One line per search.\n"
@@ -195,6 +265,8 @@ void BridgeMode::stop() {
         // TX pipeline, stage by stage. Read left to right: each stage should
         // account for the one before it. Whichever column collapses first is
         // where offered load is being shed.
+        std::cerr << "TX-CLIP samples_clamped_at_full_scale=" << tx_clamped_.load()
+                  << "  (should be 0 -- non-zero means the backoff is too small)\n";
         std::cerr << "TX-PIPE tap_pkts=" << tx_tap_pkts_.load()
                   << " tap_bytes=" << tx_tap_bytes_.load()
                   << " tap_empty_polls=" << tx_tap_empty_.load()
@@ -498,7 +570,7 @@ void BridgeMode::txPusherThread() {
     while (running_.load()) {
         std::vector<int16_t> buf;
         size_t frames = 0;
-        std::vector<uint32_t> seqs;
+        TxBurstMeta meta;
         {
             std::unique_lock<std::mutex> lk(tx_sq_mu_);
             tx_sq_cv_.wait_for(lk, std::chrono::milliseconds(5), [&]{
@@ -506,18 +578,31 @@ void BridgeMode::txPusherThread() {
             if (tx_sample_q_.empty()) continue;
             buf = std::move(tx_sample_q_.front()); tx_sample_q_.pop_front();
             frames = tx_sample_frames_.front();    tx_sample_frames_.pop_front();
-            if (!tx_sample_seqs_.empty()) {
-                seqs = std::move(tx_sample_seqs_.front()); tx_sample_seqs_.pop_front();
+            if (!tx_sample_meta_.empty()) {
+                meta = std::move(tx_sample_meta_.front()); tx_sample_meta_.pop_front();
             }
         }
         tx_sq_cv_.notify_one();          // room freed for the modulator
         if (buf.empty()) continue;
 
         auto now = std::chrono::steady_clock::now();
+        // How long this burst had to wait for the duty limiter, and how long
+        // the channel was quiet before it. A burst that follows an unusually
+        // short or long gap is a candidate for a transient the peer's AGC or
+        // front end has not settled through.
+        uint64_t duty_wait_us = 0, quiet_gap_us = 0;
+        {
+            static thread_local std::chrono::steady_clock::time_point prev_push{};
+            if (prev_push.time_since_epoch().count() != 0)
+                quiet_gap_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - prev_push).count());
+            prev_push = now;
+        }
         if (now < next_tx_allowed) {
-            tx_duty_waits_us_.fetch_add(
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                    next_tx_allowed - now).count()), std::memory_order_relaxed);
+            duty_wait_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    next_tx_allowed - now).count());
+            tx_duty_waits_us_.fetch_add(duty_wait_us, std::memory_order_relaxed);
             std::this_thread::sleep_for(next_tx_allowed - now);
         }
         if (cfg_.carrier_sense) {
@@ -568,10 +653,23 @@ void BridgeMode::txPusherThread() {
                        << " samples=" << want
                        << " air_us=" << static_cast<uint64_t>(air * 1e6)
                        << " push=" << (push_ok ? "ok" : "short")
+                       << " forced=" << (meta.forced ? 1 : 0)
+                       << " peak=" << meta.peak
+                       << " rms=" << meta.rms
+                       << " crest=" << (meta.rms > 0 ? meta.peak / meta.rms : 0.0)
+                       << " clipped=" << meta.clipped
+                       << " dc_i=" << meta.dc_i
+                       << " dc_q=" << meta.dc_q
+                       << " duty_wait_us=" << duty_wait_us
+                       << " quiet_gap_us=" << quiet_gap_us
                        << " seqs=";
-            for (size_t i = 0; i < seqs.size(); ++i)
-                burst_log_ << (i ? "," : "") << seqs[i];
-            if (seqs.empty()) burst_log_ << '-';
+            for (size_t i = 0; i < meta.seqs.size(); ++i)
+                burst_log_ << (i ? "," : "") << meta.seqs[i];
+            if (meta.seqs.empty()) burst_log_ << '-';
+            burst_log_ << " offs=";
+            for (size_t i = 0; i < meta.offs.size(); ++i)
+                burst_log_ << (i ? "," : "") << meta.offs[i];
+            if (meta.offs.empty()) burst_log_ << '-';
             burst_log_ << '\n';
         }
     }
@@ -614,6 +712,19 @@ void BridgeMode::txThread() {
     std::vector<int16_t>             iq_hw;
     RRCInterp interp(cfg_.samples_per_symbol);
 
+    // Amplitude handed to the DAC. SDR_TX_SCALE sweeps the backoff directly,
+    // in DAC counts; the default puts the worst measured RRC overshoot exactly
+    // on full scale.
+    const float tx_scale = [] {
+        if (const char* e = std::getenv("SDR_TX_SCALE"); e && *e)
+            return static_cast<float>(std::atof(e));
+        return TX_SCALE_DEFAULT;
+    }();
+    std::cerr << "[sdr] TX scale " << tx_scale << " of " << TX_FULL_SCALE
+              << " full scale (" << (20.0 * std::log10(tx_scale / TX_FULL_SCALE))
+              << " dB below it; peak lands near "
+              << (tx_scale * TX_PEAK_OVERSHOOT) << ")\n";
+
     // A txPush costs the full tx-buffer length in airtime no matter how few
     // samples were written, so frames are staged here and flushed together.
     // Without this, a short frame wastes >98% of the air time on zero padding
@@ -629,6 +740,9 @@ void BridgeMode::txThread() {
     // Only collected when the burst log is open -- this is instrumentation,
     // not part of the transmit path.
     std::vector<uint32_t> staged_seqs;
+    // Sample offset of each staged frame within the buffer being built.
+    std::vector<uint32_t> staged_offs;
+    bool staged_forced = false;
 
     // Transmit pacing. After sending `air` seconds of samples the node stays
     // quiet until `air / duty` has elapsed, so a gap of air*(1/duty - 1)
@@ -678,15 +792,42 @@ void BridgeMode::txThread() {
                 return;                       // try again on the next poll
             }
         }
+        // Statistics of exactly what is about to be handed to the radio.
+        // Taken here, on the int16 the DAC will see, so a clipped or
+        // compressed burst is visible without inferring it from the receiver.
+        TxBurstMeta meta;
+        meta.seqs   = std::move(staged_seqs);
+        meta.offs   = std::move(staged_offs);
+        meta.forced = staged_forced;
+        if (burst_log_.is_open() && !stage.empty()) {
+            double acc = 0.0, si = 0.0, sq = 0.0;
+            int pk = 0; uint32_t clip = 0;
+            for (size_t i = 0; i + 1 < stage.size(); i += 2) {
+                const int vi = stage[i], vq = stage[i + 1];
+                acc += double(vi) * vi + double(vq) * vq;
+                si  += vi; sq += vq;
+                const int a = std::max(std::abs(vi), std::abs(vq));
+                if (a > pk) pk = a;
+                if (a >= 2047) ++clip;
+            }
+            const size_t np = stage.size() / 2;
+            meta.peak    = pk;
+            meta.rms     = std::sqrt(acc / double(np));
+            meta.clipped = clip;
+            meta.dc_i    = si / double(np);
+            meta.dc_q    = sq / double(np);
+        }
         tx_sample_q_.emplace_back(std::move(stage));
         tx_sample_frames_.push_back(staged_frames);
-        tx_sample_seqs_.push_back(std::move(staged_seqs));
+        tx_sample_meta_.push_back(std::move(meta));
         lk.unlock();
         tx_sq_cv_.notify_one();
         stage = std::vector<int16_t>();
         stage.reserve(tx_capacity * 2);
         staged_frames = 0;
         staged_seqs = std::vector<uint32_t>();
+        staged_offs = std::vector<uint32_t>();
+        staged_forced = false;
         stage.clear();
     };
 
@@ -702,14 +843,15 @@ void BridgeMode::txThread() {
         { StageProfiler::Scope sc(prof_, StageProfiler::TX_CONV, iq_shaped.size());
           iq_hw.resize(iq_shaped.size() * 2);
           for (size_t i = 0; i < iq_shaped.size(); ++i) {
-              iq_hw[i * 2]     = static_cast<int16_t>(iq_shaped[i].real() * 2047.f);
-              iq_hw[i * 2 + 1] = static_cast<int16_t>(iq_shaped[i].imag() * 2047.f);
+              iq_hw[i * 2]     = toDac(iq_shaped[i].real(), tx_scale, tx_clamped_);
+              iq_hw[i * 2 + 1] = toDac(iq_shaped[i].imag(), tx_scale, tx_clamped_);
           } }
 
         // Flush first if this frame wouldn't fit, then stage it. A frame
         // larger than the whole buffer is pushed on its own (txPush clamps).
         if (stage.size() / 2 + iq_shaped.size() > tx_capacity) {
             tx_stage_forces_.fetch_add(1, std::memory_order_relaxed);
+            staged_forced = true;
             flush(/*force=*/true);
         }
         if (iq_shaped.size() > tx_capacity) {
@@ -746,6 +888,8 @@ void BridgeMode::txThread() {
             const uint8_t* b = frame.data() + PREAMBLE_LEN;
             staged_seqs.push_back((uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
                                 | (uint32_t(b[14]) <<  8) |  uint32_t(b[15]));
+            // Where this frame begins inside the buffer being built.
+            staged_offs.push_back(static_cast<uint32_t>(stage.size() / 2));
         }
         if (stage.empty()) stage_started_ = std::chrono::steady_clock::now();
         stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
@@ -1091,6 +1235,43 @@ static double evmPct(const std::vector<std::complex<float>>& s,
     return evmStats(s, a, b, qpsk).rms;
 }
 
+// EVM and weak-symbol count in `nseg` equal slices across a frame's payload.
+//
+// The average says how bad a frame was; this says WHERE. Failures are driven
+// by a handful of extreme symbols, so their position inside the frame is the
+// discriminating fact: damage at the very start implicates acquisition and
+// settling, at the end truncation or the trailing edge, in one interior slice
+// an impulsive event, and spread evenly plain noise.
+struct EvmSeg { double rms{0}; uint32_t weak{0}; };
+static std::vector<EvmSeg> evmProfile(const std::vector<std::complex<float>>& s,
+                                      size_t nseg, bool qpsk) {
+    std::vector<EvmSeg> out;
+    if (s.empty() || nseg == 0) return out;
+    double amp = 0.0;
+    for (const auto& v : s) amp += std::abs(v);
+    amp /= double(s.size());
+    if (amp <= 0.0) return out;
+    const double scale = (qpsk ? std::sqrt(2.0) : 1.0) / amp;
+    out.resize(nseg);
+    for (size_t k = 0; k < nseg; ++k) {
+        const size_t a = (s.size() * k) / nseg;
+        const size_t b = (s.size() * (k + 1)) / nseg;
+        double sum2 = 0.0; uint32_t weak = 0, n = 0;
+        for (size_t i = a; i < b; ++i) {
+            const double re = s[i].real() * scale, im = s[i].imag() * scale;
+            const double dr = (re >= 0 ? 1.0 : -1.0);
+            const double di = qpsk ? (im >= 0 ? 1.0 : -1.0) : 0.0;
+            sum2 += (re - dr) * (re - dr) + (im - di) * (im - di);
+            const double margin = qpsk ? std::min(std::fabs(re), std::fabs(im))
+                                       : std::fabs(re);
+            if (margin < 0.35) ++weak;
+            ++n;
+        }
+        if (n) { out[k].rms = 100.0 * std::sqrt(sum2 / double(n)); out[k].weak = weak; }
+    }
+    return out;
+}
+
 // ── RX thread ────────────────────────────────────────────────────────────────
 void BridgeMode::rxThread() {
     applyRealtime("dsp", 3);
@@ -1226,7 +1407,10 @@ void BridgeMode::rxThread() {
               << " beta_sh=" << ftcfg.beta_sh
               << " n_phases=" << ftcfg.n_phases << "\n";
     const bool slip_tracing = (std::getenv("SDR_SLIPTRACE") != nullptr);
-    ftcfg.trace = slip_tracing;   // 20 vectors/symbol -- diagnosis only
+    const bool fq_trace     = fq_log_.is_open();
+    // 20 vectors/symbol -- diagnosis only. The per-frame quality trace needs
+    // the timing error and NCO history, so it turns these on too.
+    ftcfg.trace = slip_tracing || fq_trace;
     if (slip_tracing)
         slip_trace_.open(std::getenv("SDR_SLIPTRACE"), std::ios::trunc);
     FixedTimingSync fts(ftcfg);
@@ -1579,6 +1763,7 @@ void BridgeMode::rxThread() {
     // a parked A/B experiment and demodulates windows differently, so mixing
     // its windows into these counts would make them mean two things at once.
     uint64_t rx_batch = 0;
+    size_t   carried_in = 0;   // samples of iq_f that came from the last batch
     // Carried ACROSS windows and across batches, to test seq continuity at
     // window boundaries.
     uint32_t prev_win_last_seq = 0;
@@ -1615,6 +1800,7 @@ void BridgeMode::rxThread() {
                 iq_f[ncar + static_cast<size_t>(i)] = {
                     iq_hw[static_cast<size_t>(i) * 2]     / 2048.f,
                     iq_hw[static_cast<size_t>(i) * 2 + 1] / 2048.f };
+            carried_in = ncar;   // how much of iq_f came from the previous batch
             if (ncar) {
                 rx_carry_stitched_.fetch_add(1, std::memory_order_relaxed);
                 carry.clear();
@@ -1776,6 +1962,61 @@ void BridgeMode::rxThread() {
                                                         + static_cast<size_t>(cfg_.burst_margin)));
             window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
                               iq_f.begin() + static_cast<long>(win_end));
+
+            // ── Pre-demodulation profile of this window ───────────────────
+            // Everything here is measured on the captured samples BEFORE any
+            // DSP touches them, so it can say what makes a burst bad without
+            // the answer being contaminated by the receiver's own behaviour.
+            //
+            // Clipping is the specific thing worth catching: the failing
+            // frames show impulsive symbol distortion at unchanged average
+            // SNR, which is what a front end running into full scale looks
+            // like and what an average power measurement cannot see.
+            if (burst_log_.is_open() && !tsync_freerun) {
+                const size_t a = win.start, b = std::min(win_end, iq_f.size());
+                double acc = 0.0, si = 0.0, sq = 0.0, pk = 0.0;
+                uint64_t clip = 0;
+                for (size_t i = a; i < b; ++i) {
+                    const float re = iq_f[i].real(), im = iq_f[i].imag();
+                    acc += double(re) * re + double(im) * im;
+                    si += re; sq += im;
+                    const double m = std::max(std::fabs(re), std::fabs(im));
+                    if (m > pk) pk = m;
+                    // int16 full scale becomes 2047/2048 after conversion.
+                    if (m >= 0.999) ++clip;
+                }
+                const size_t n = (b > a) ? (b - a) : 1;
+                const double rms = std::sqrt(acc / double(n));
+                std::lock_guard<std::mutex> lg(burst_log_mu_);
+                burst_log_ << "[RXP] batch=" << rx_batch
+                           << " win=" << win_index
+                           << " start=" << a << " end=" << b
+                           << " batch_pos=" << (double(a) / double(iq_f.size()))
+                           << " from_carry=" << ((a < carried_in) ? 1 : 0)
+                           << " peak=" << pk
+                           << " rms=" << rms
+                           << " crest=" << (rms > 0 ? pk / rms : 0.0)
+                           << " clipped=" << clip
+                           << " clip_frac=" << (double(clip) / double(n))
+                           << " dc_i=" << (si / double(n))
+                           << " dc_q=" << (sq / double(n))
+                           << " noise_floor=" << detector.noiseFloor()
+                           << " prof=";
+                // Power in 16 equal slices: an amplitude step, dropout or
+                // interference burst inside the window shows up here as a
+                // profile that is not flat, and its slice index locates it.
+                for (int k = 0; k < 16; ++k) {
+                    const size_t s0 = a + (n * size_t(k)) / 16;
+                    const size_t s1 = a + (n * size_t(k + 1)) / 16;
+                    double p = 0.0;
+                    for (size_t i = s0; i < s1; ++i)
+                        p += double(iq_f[i].real()) * iq_f[i].real()
+                           + double(iq_f[i].imag()) * iq_f[i].imag();
+                    const size_t m = (s1 > s0) ? (s1 - s0) : 1;
+                    burst_log_ << (k ? "," : "") << std::sqrt(p / double(m));
+                }
+                burst_log_ << '\n';
+            }
 
             // Where this window sits relative to the previous one in the same
             // batch. Two distinct measurements, and they answer different
@@ -2012,6 +2253,9 @@ void BridgeMode::rxThread() {
             size_t last_end_sym = 0, last_offset = 0;
             size_t predicted_next = 0; bool have_prediction = false;
             size_t frames_this_window = 0;
+            // Outcome of the previous decided frame in THIS window, for the
+            // clustering question: -1 none yet, 0 failed, 1 passed.
+            int prev_outcome = -1;
             const char* walk_exit = "max_frames";
             int    frame_no = 0;
             for (; frame_no < MAX_FRAMES_PER_WINDOW; ++frame_no) {
@@ -2194,6 +2438,13 @@ void BridgeMode::rxThread() {
                 bool this_frame_ok = false;
                 bool   fail_header_ok = false, fail_complete = false;
                 size_t fail_plen = 0, fail_end_sym = 0, fail_offset = 0;
+                size_t dec_sync_sym = 0, dec_end_sym = 0, dec_plen = 0;
+                ModCode dec_mod = ModCode::BPSK;
+                // Quality of the decisive attempt, lifted out of the loop.
+                float  last_rssi = 0.f, last_snr = 0.f, last_cfo = 0.f, last_das_q = 0.f;
+                double last_evm_acq = 0.0, last_evm_pay = 0.0;
+                EvmStats last_tail{};
+                std::vector<EvmSeg> last_prof;
                 for (size_t oi = 0; oi < ALIGN_OFFSETS && !this_frame_ok; ++oi) {
                 size_t offset = offsets[oi];
                 if (offset >= window_buf.size()) break;
@@ -2251,7 +2502,7 @@ void BridgeMode::rxThread() {
                       // already a cold start.
                       auto fr = fts.process(offset_buf);
                       iq_timed = fr.syms;
-                      if (slip_tracing) last_fts_ = std::move(fr);
+                      if (slip_tracing || fq_trace) last_fts_ = std::move(fr);
                   } else {
                       tsync.process(offset_buf, iq_timed); // matched filter + symbol timing
                   } }
@@ -2270,7 +2521,7 @@ void BridgeMode::rxThread() {
                 // $SDR_RX_CARRIER selects the method so the comparison stays
                 // reproducible on hardware: ls (default) | costas | none.
                 bool track_payload = false;
-                float cur_cfo = 0.f;
+                float cur_cfo = 0.f, cur_das_q = 0.f;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_CARRIER, iq_timed.size());
                 switch (carrier_mode_) {
                     case CarrierMode::COSTAS:
@@ -2302,7 +2553,8 @@ void BridgeMode::rxThread() {
                         auto est = dasync.estimate(iq_timed, DAS_SEARCH_SYMS);
                         if (est.ok) {
                             DataAidedSync::derotate(iq_syms, est);
-                            cur_cfo = est.freq_per_sym;
+                            cur_cfo   = est.freq_per_sym;
+                            cur_das_q = est.quality;
                             q_n_.fetch_add(1, std::memory_order_relaxed);
                             q_freq_abs_ur_.fetch_add(
                                 static_cast<uint64_t>(std::fabs(est.freq_per_sym) * 1e6),
@@ -2333,6 +2585,7 @@ void BridgeMode::rxThread() {
                 // rest and only has to follow the drift that open-loop
                 // extrapolation accumulates towards the end of a frame.
                 EvmStats cur_tail{};
+                std::vector<EvmSeg> cur_prof;
                 double   cur_evm_pay_post = 0.0;
 
                 // Payload quality must be measured HERE, not on iq_syms.
@@ -2397,7 +2650,7 @@ void BridgeMode::rxThread() {
                         probe(p, ia1, ia2, ip1, ip2);
 
                         std::vector<std::complex<float>> pre;
-                        if (slip_trace_.is_open()) pre = p;
+                        if (slip_trace_.is_open() || fq_trace) pre = p;
 
                         if (costas_seed_ != 0) costas.seed(0.f, seed_freq);
                         else                    costas.reset();
@@ -2429,6 +2682,7 @@ void BridgeMode::rxThread() {
                             const bool q = (tx_mod_ != ModCode::BPSK);
                             cur_tail = evmStats(p, 0, p.size(), q);
                             cur_evm_pay_post = cur_tail.rms;
+                            if (fq_trace) cur_prof = evmProfile(p, 12, q);
                         }
                     };
                 }
@@ -2593,6 +2847,18 @@ void BridgeMode::rxThread() {
                                   std::memory_order_relaxed);
                 }
                 if (ok_any) decoded_any = true;
+                // Bounds of whichever attempt decided this frame -- the one
+                // that succeeded, or the last one tried if none did. The
+                // quality metrics below refer to exactly this attempt.
+                dec_sync_sym = sm.sync_sym;
+                dec_end_sym  = sm.end_sym;
+                dec_plen     = sm.plen;
+                dec_mod      = sm.payload_mod;
+                last_rssi = rssi; last_snr = snr;
+                last_cfo  = cur_cfo; last_das_q = cur_das_q;
+                last_evm_acq = cur_evm_acq; last_evm_pay = cur_evm_pay;
+                last_tail = cur_tail;
+                last_prof = cur_prof;
                 if (this_frame_ok) {
                     // Remember where this frame ENDED so the walk can skip it.
                     last_end_sym = sm.end_sym;
@@ -2609,6 +2875,95 @@ void BridgeMode::rxThread() {
                     fail_offset    = offset;
                 }
                 }   // end alignment-neighbour loop
+
+                // ── Per-frame quality line ────────────────────────────────
+                if (fq_trace) {
+                    // Symbol-timing health over the symbols this frame
+                    // occupied. The chain is reset per attempt, so any
+                    // anomaly here is about THIS frame's samples, not about
+                    // state inherited from the frame before it.
+                    double mean_abs_eq = 0.0, nco_drift = 0.0;
+                    long   tslips = 0;
+                    {
+                        const size_t n  = last_fts_.mu.size();
+                        const size_t s0 = std::min(dec_sync_sym, n);
+                        const size_t s1 = std::min(dec_end_sym ? dec_end_sym : n, n);
+                        if (s1 > s0) {
+                            double acc = 0.0; size_t cnt = 0;
+                            long prev_idx = -1;
+                            for (size_t k = s0; k < s1; ++k) {
+                                if (k < last_fts_.e_q.size()) {
+                                    acc += std::fabs(double(last_fts_.e_q[k]));
+                                    ++cnt;
+                                }
+                                if (k < last_fts_.idx.size()) {
+                                    if (prev_idx >= 0) {
+                                        const long d = long(last_fts_.idx[k]) - prev_idx;
+                                        if (d != long(cfg_.samples_per_symbol)) ++tslips;
+                                    }
+                                    prev_idx = long(last_fts_.idx[k]);
+                                }
+                            }
+                            if (cnt) mean_abs_eq = acc / double(cnt);
+                            if (s1 - 1 < last_fts_.freq_after.size() &&
+                                s0 < last_fts_.freq_after.size())
+                                nco_drift = last_fts_.freq_after[s1 - 1]
+                                          - last_fts_.freq_after[s0];
+                        }
+                    }
+                    // Carrier: how hard the payload loop had to work, and
+                    // whether it took a quarter-cycle step (a slip rotates
+                    // every later symbol and corrupts the rest of the frame).
+                    double max_dphi = 0.0, cum_dphi = 0.0;
+                    long   near90 = 0;
+                    for (size_t i = 1; i < last_carrier_phase_.size(); ++i) {
+                        float d = last_carrier_phase_[i] - last_carrier_phase_[i - 1];
+                        while (d >  3.14159265f) d -= 6.28318531f;
+                        while (d < -3.14159265f) d += 6.28318531f;
+                        cum_dphi += d;
+                        const double a = std::fabs(double(d));
+                        if (a > max_dphi) max_dphi = a;
+                        if (a > 0.785398) ++near90;
+                    }
+                    static const char* kC[] = {"first", "after_ok", "after_fail"};
+                    std::lock_guard<std::mutex> lg(burst_log_mu_);
+                    fq_log_ << "[FQ] batch=" << rx_batch
+                            << " win=" << win_index
+                            << " frame_no=" << frame_no
+                            << " class=" << kC[ps_cls]
+                            << " ok=" << (this_frame_ok ? 1 : 0)
+                            << " prev_ok=" << prev_outcome
+                            << " rssi=" << last_rssi
+                            << " snr=" << last_snr
+                            << " evm_acq=" << last_evm_acq
+                            << " evm_pay=" << last_evm_pay
+                            << " evm_p95=" << last_tail.p95
+                            << " evm_p99=" << last_tail.p99
+                            << " evm_max=" << last_tail.max
+                            << " weak=" << last_tail.weak
+                            << " worst_pos=" << last_tail.worst_pos
+                            << " cfo=" << last_cfo
+                            << " das_q=" << last_das_q
+                            << " mean_abs_eq=" << mean_abs_eq
+                            << " nco_drift=" << nco_drift
+                            << " timing_slips=" << tslips
+                            << " max_dphi=" << max_dphi
+                            << " cum_dphi=" << cum_dphi
+                            << " near90=" << near90
+                            << " plen=" << dec_plen
+                            << " mod=" << modCodeName(dec_mod)
+                            << " hdr_ok=" << (fail_header_ok || this_frame_ok ? 1 : 0)
+                            << " evm_prof=";
+                    for (size_t k = 0; k < last_prof.size(); ++k)
+                        fq_log_ << (k ? "," : "") << last_prof[k].rms;
+                    if (last_prof.empty()) fq_log_ << '-';
+                    fq_log_ << " weak_prof=";
+                    for (size_t k = 0; k < last_prof.size(); ++k)
+                        fq_log_ << (k ? "," : "") << last_prof[k].weak;
+                    if (last_prof.empty()) fq_log_ << '-';
+                    fq_log_ << '\n';
+                    prev_outcome = this_frame_ok ? 1 : 0;
+                }
 
                 // Advance past the frame that was just decoded.
                 //
