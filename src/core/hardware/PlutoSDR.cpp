@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <iostream>
 #include "sdr/hardware/PlutoSDR.hpp"
 #include <stdexcept>
@@ -137,6 +138,18 @@ std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& id) {
 
     // Create buffers. TX is deliberately much smaller than RX: a push costs
     // its full buffer length in airtime regardless of how much was written.
+    // TX buffer size. Each iio push carries ~3.7 ms of fixed overhead
+    // regardless of payload, so a small buffer spends most of its time in
+    // call overhead rather than radiating: measured at 2 MHz, 41k-sample
+    // pushes took 8.8 ms to deliver 5.1 ms of air, capping the transmit path
+    // at 4.68 Msamp/s against the 8 MSPS the radio was configured for.
+    // Larger buffers amortise that, at the cost of coarser duty granularity
+    // and more latency. SDR_TX_BUF overrides for sweeps.
+    if (const char* e = std::getenv("SDR_TX_BUF")) {
+        long v = std::strtol(e, nullptr, 10);
+        if (v >= 4096 && v <= (1L << 21)) p->tx_buf_sz_ = static_cast<size_t>(v);
+    }
+    std::cerr << "[sdr] tx buffer " << p->tx_buf_sz_ << " samples\n";
     p->tx_buf_ = iio_device_create_buffer(p->tx_dev_, p->tx_buf_sz_, false);
     p->rx_buf_ = iio_device_create_buffer(p->rx_dev_, p->buf_sz_, false);
 

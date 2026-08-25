@@ -165,7 +165,9 @@ SDR_IQ_DUMP=/tmp/rx.bin SDR_IQ_DUMP_MB=400 sudo -E ./build/src/daemon/sdr-datali
 | `SDR_FRAME_LOG` | path — TX/RX frames, headers, CRC failures |
 | `SDR_RAW_LOG` | path — demodulated bytes as hex |
 | `SDR_IQ_DUMP` / `SDR_IQ_DUMP_MB` | path / size cap |
-| `SDR_RX_CARRIER` | `ls+costas` (default), `ls`, `costas`, `none` |
+| `SDR_RX_CARRIER` | `ls+costas` (default), `ls`, `costas`, `none`. Measured at 2 MHz:
+ls+costas 96.5% CRC, ls-only 17.3%, costas-only 39.8% — both stages are needed |
+| `SDR_COSTAS_BW` | carrier loop bandwidth, default 0.004 (was 0.04; halves slip rate) |
 | `SDR_TSYNC` | `fixed` (default) — fixed-point timing recovery; `liquid` — symsync_crcf; `freerun` — continuous, experimental |
 
 ## Web monitor

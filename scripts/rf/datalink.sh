@@ -53,10 +53,10 @@ PY
 done
 
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TXDUMP:+SDR_TXDUMP=$SDR_TXDUMP} SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
+  "cd $REPO && ${SDR_TX_BUF:+SDR_TX_BUF=$SDR_TX_BUF} ${SDR_TXDUMP:+SDR_TXDUMP=$SDR_TXDUMP} SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
 sleep 3
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} ${SDR_ALPHA_SH:+SDR_ALPHA_SH=$SDR_ALPHA_SH} ${SDR_BETA_SH:+SDR_BETA_SH=$SDR_BETA_SH} ${SDR_NPHASES:+SDR_NPHASES=$SDR_NPHASES} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
+  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} ${SDR_ALPHA_SH:+SDR_ALPHA_SH=$SDR_ALPHA_SH} ${SDR_BETA_SH:+SDR_BETA_SH=$SDR_BETA_SH} ${SDR_NPHASES:+SDR_NPHASES=$SDR_NPHASES} ${SDR_COSTAS_BW:+SDR_COSTAS_BW=$SDR_COSTAS_BW} ${SDR_RX_CARRIER:+SDR_RX_CARRIER=$SDR_RX_CARRIER} ${SDR_COSTAS_SEED:+SDR_COSTAS_SEED=$SDR_COSTAS_SEED} ${SDR_COSTAS_PHLIM:+SDR_COSTAS_PHLIM=$SDR_COSTAS_PHLIM} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
 sleep 8
 
 s_ ip addr add 10.99.0.1/24 dev sdr0
@@ -81,7 +81,7 @@ else
   echo "=== UDP throughput, ${SECS}s ==="
   s_ ip netns exec rxns python3 "$SP/udp_sink.py" > /tmp/sink.txt 2>&1 &
   sleep 1
-  python3 "$SP/blast.py" "${BLAST_SZ:-1000}" "${BLAST_RATE:-20}" "$SECS" >/dev/null 2>&1
+  python3 "$SP/blast.py" "${BLAST_SZ:-1000}" "${BLAST_RATE:-20}" "$SECS" >/tmp/blast_out.txt 2>&1
   sleep 4
   s_ pkill -f udp_sink.py >/dev/null 2>&1
   sleep 2

@@ -38,6 +38,18 @@ std::complex<float> CostasLoop::process(std::complex<float> in) {
     phase_err_ = err;
     nco_crcf_pll_step(nco_, err);
     nco_crcf_step(nco_);
+
+    // Keep the loop inside its own lock basin. Without this it can walk into
+    // an adjacent 90-degree lock point and stay there, rotating every
+    // subsequent symbol -- see setPhaseLimit().
+    if (phase_limit_ > 0.f) {
+        float ph = nco_crcf_get_phase(nco_);
+        float d  = ph - phase_ref_;
+        while (d >  3.14159265f) d -= 6.28318531f;
+        while (d < -3.14159265f) d += 6.28318531f;
+        if (d >  phase_limit_) nco_crcf_set_phase(nco_, phase_ref_ + phase_limit_);
+        else if (d < -phase_limit_) nco_crcf_set_phase(nco_, phase_ref_ - phase_limit_);
+    }
     return out;
 }
 
@@ -49,11 +61,13 @@ void CostasLoop::process(const std::vector<std::complex<float>>& in,
 }
 
 void CostasLoop::reset() {
+    phase_ref_ = 0.f;
     nco_crcf_reset(nco_);
     phase_err_ = 0.f;
 }
 
 void CostasLoop::seed(float phase, float freq_per_sym) {
+    phase_ref_ = phase;
     nco_crcf_set_phase(nco_, phase);
     nco_crcf_set_frequency(nco_, freq_per_sym);
     phase_err_ = 0.f;

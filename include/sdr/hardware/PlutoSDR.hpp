@@ -82,7 +82,14 @@ public:
     // TX buffer is sized to hold one maximum-size frame (a 1400-byte payload
     // at BPSK is ~47k samples) with a little slack -- not the much larger rx
     // size, since every push costs its full length in airtime.
-    static constexpr size_t TX_BUF        = 1024 * 64;   // tx samples
+    // 128k, not 64k. Each iio push carries ~3.7 ms of fixed overhead
+    // regardless of payload, so a small buffer spends most of its time in
+    // call overhead rather than radiating. Measured at 2 MHz QPSK:
+    //   64k  -> txPush 2.04 Msamp/s, 2390 TAP pkts read, 1895 frames good
+    //   128k -> txPush 8.58 Msamp/s, 4955 TAP pkts read, 3353 frames good
+    // 8.58 Msamp/s clears the 8 MSPS that 2 MHz needs; 64k did not.
+    // 256k measured worse again (coarser duty granularity, more latency).
+    static constexpr size_t TX_BUF        = 1024 * 128;  // tx samples
 
 private:
     explicit PlutoSDR() = default;

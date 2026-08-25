@@ -109,6 +109,7 @@ void BridgeMode::start() {
     stats_.uptime_s.store(0);
     prof_t0_   = std::chrono::steady_clock::now();
     prof_cpu0_ = StageProfiler::processCpuSeconds();
+    tap_reader_thread_ = std::thread(&BridgeMode::tapReaderThread, this);
     tx_thread_      = std::thread(&BridgeMode::txThread,      this);
     capture_thread_ = std::thread(&BridgeMode::captureThread, this);
     rx_thread_      = std::thread(&BridgeMode::rxThread,      this);
@@ -119,6 +120,7 @@ void BridgeMode::stop() {
     running_.store(false);
     capture_cv_.notify_all();   // wake the DSP thread out of its wait
     if (tx_thread_.joinable())      tx_thread_.join();
+    if (tap_reader_thread_.joinable()) tap_reader_thread_.join();
     if (capture_thread_.joinable()) capture_thread_.join();
     if (rx_thread_.joinable())      rx_thread_.join();
     if (stat_thread_.joinable())    stat_thread_.join();
@@ -238,6 +240,18 @@ void BridgeMode::stop() {
                       << " pay=" << avg(q_fail_pay_.load(), fn) << "%"
                       << " |cfo|=" << avg(q_fail_cfo_ur_.load(), fn)/1e6 << " rad/sym\n";
         }
+        {
+            auto tx = radio_.txStats();
+            double per = tx.pushes ? double(tx.pushed_pairs) / double(tx.pushes) : 0.0;
+            std::cerr << "TX-BATCH pushes=" << tx.pushes
+                      << " samples/push=" << per
+                      << " (" << (radio_.txCapacity() ? 100.0*per/double(radio_.txCapacity()) : 0.0)
+                      << "% of buffer)"
+                      << " empty_polls=" << tx_tap_empty_.load() << "\n";
+        }
+        std::cerr << "TX-QUEUE drops=" << tap_q_drops_.load()
+                  << " high_water=" << tap_q_hiwater_.load()
+                  << " / " << TAP_QUEUE_MAX << "\n";
         std::cerr << "TX-BLOCK duty_defers=" << tx_duty_defers_.load()
                   << " duty_slept=" << (tx_duty_waits_us_.load() / 1e6) << " s"
                   << " (" << (wall > 0 ? 100.0 * (tx_duty_waits_us_.load() / 1e6) / wall : 0.0)
@@ -287,6 +301,35 @@ void BridgeMode::applyRealtime(const char* who, int core) {
 }
 
 // ── TX thread ────────────────────────────────────────────────────────────────
+// Continuously drains the TAP into tap_queue_. Runs independently of the
+// transmit worker so duty-limit sleeps never stall ingestion.
+void BridgeMode::tapReaderThread() {
+    applyRealtime("tapread", 2);
+    std::vector<uint8_t> pkt(MAX_PAYLOAD);
+    while (running_.load()) {
+        ssize_t n = tap_->read(pkt.data(), pkt.size());
+        if (n <= 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lk(tap_mu_);
+            if (tap_queue_.size() >= TAP_QUEUE_MAX) {
+                // Drop the OLDEST. On a live datalink stale packets are worth
+                // less than fresh ones, and dropping here is visible in
+                // tap_q_drops_ rather than silently in the kernel queue.
+                tap_queue_.pop_front();
+                tap_q_drops_.fetch_add(1, std::memory_order_relaxed);
+            }
+            tap_queue_.emplace_back(pkt.begin(), pkt.begin() + n);
+            uint64_t sz = tap_queue_.size();
+            if (sz > tap_q_hiwater_.load(std::memory_order_relaxed))
+                tap_q_hiwater_.store(sz, std::memory_order_relaxed);
+        }
+        tap_cv_.notify_one();
+    }
+}
+
 void BridgeMode::txThread() {
     if (const char* pth = std::getenv("SDR_TXDUMP"))
         tx_dump_.open(pth, std::ios::binary | std::ios::trunc);
@@ -507,9 +550,29 @@ void BridgeMode::txThread() {
         }
 
         if (!have_pending) {
-            ssize_t n;
+            ssize_t n = 0;
             { StageProfiler::Scope sc(prof_, StageProfiler::TX_TAPR);
-              n = tap_->read(pkt.data(), pkt.size()); }
+              // Block on the queue rather than poll it.
+              //
+              // This used to poll and then sleep 1 ms whenever the queue was
+              // momentarily empty -- 12,855 times in a 25 s run, ~12.8 s of
+              // sleeping. The reader thread kept filling during every sleep,
+              // so the queue overflowed (8,415 drops) while the worker sat
+              // idle. High empty-polls and high drops were the same bug seen
+              // from both ends.
+              //
+              // The wait is bounded so a stage holding data still gets
+              // flushed on its latency deadline when traffic stops.
+              std::unique_lock<std::mutex> lk(tap_mu_);
+              if (tap_queue_.empty())
+                  tap_cv_.wait_for(lk, std::chrono::microseconds(250),
+                                   [&]{ return !tap_queue_.empty() || !running_.load(); });
+              if (!tap_queue_.empty()) {
+                  auto& front = tap_queue_.front();
+                  n = static_cast<ssize_t>(front.size());
+                  std::memcpy(pkt.data(), front.data(), front.size());
+                  tap_queue_.pop_front();
+              } }
             if (n > 0) {
                 tx_tap_pkts_ .fetch_add(1, std::memory_order_relaxed);
                 tx_tap_bytes_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
@@ -527,11 +590,15 @@ void BridgeMode::txThread() {
                         std::chrono::milliseconds(TX_AGGREGATE_MS)) {
                     sealAggregate();
                 } else {
+                    // Flush only on the latency deadline. Batching is what
+                    // makes each iio push worth its ~10 ms of fixed overhead:
+                    // a buffer holds ~6 frames, so flushing per frame wastes
+                    // five sixths of every call. No sleep here -- the wait
+                    // above already blocks on the queue.
                     if (!stage.empty() &&
                         std::chrono::steady_clock::now() - stage_started_ >=
-                            std::chrono::milliseconds(TX_AGGREGATE_MS))
+                            std::chrono::milliseconds(TX_LATENCY_MS))
                         flush(/*force=*/false);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
                 }
             } else {
@@ -757,7 +824,65 @@ void BridgeMode::rxThread() {
         rx_fail_dump_.open(pth, std::ios::binary | std::ios::trunc);
     std::vector<int16_t>             iq_hw;
     std::vector<std::complex<float>> iq_f, window_buf, offset_buf, iq_timed, iq_syms;
-    AGC agc; TimingSync tsync(cfg_.samples_per_symbol); CostasLoop costas;
+    AGC agc; TimingSync tsync(cfg_.samples_per_symbol);
+    // Costas bandwidth. The default 0.04 is far wider than this path needs:
+    // DataAidedSync::derotate has already removed the bulk phase and
+    // frequency, leaving ~0.002 rad/sym of residual to track. A wide loop
+    // with almost nothing to follow is slip-prone, and a quarter-cycle slip
+    // is catastrophic here -- it rotates every remaining symbol by 90 deg,
+    // which under Gray coding flips one bit per symbol and corrupts the frame
+    // from the slip point to the end. Measured at 2 MHz: 86% of corrupted
+    // bytes carry a one-bit-per-symbol-pair XOR mask (16 of 256 possible;
+    // 6% by chance), in runs of 800-1048 bytes.
+    // 0.004, not liquid's 0.04 default. Swept live at 2 MHz:
+    //   0.04   -> 187 bad frames, CRC 95.0%
+    //   0.01   -> 146 bad,        CRC 95.5%
+    //   0.004  -> 105 bad,        CRC 96.8%   <- knee
+    //   0.0015 -> 113 bad,        CRC 96.5%   (too slow to track)
+    // Confirmed on a second sweep: 73 bad / CRC 96.5% at 0.004.
+    //
+    // Both stages are needed -- measured at 2 MHz, bw 0.004:
+    //   ls+costas  CRC 96.5%   494 kbps
+    //   ls only    CRC 17.3%    53 kbps   (untracked drift is fatal)
+    //   costas only CRC 39.8%  210 kbps   (no acquisition without the LS estimate)
+    float costas_bw = 0.004f;
+    if (const char* e = std::getenv("SDR_COSTAS_BW")) {
+        float v = std::strtof(e, nullptr);
+        if (v > 0.f && v < 1.f) costas_bw = v;
+    }
+    // Quadrant-slip guard: DISABLED (0).
+    //
+    // The idea was sound, the reference frame was not. setPhaseLimit() bounds
+    // phase against a FIXED start, but the loop must legitimately ramp to
+    // follow residual frequency: even 2e-4 rad/sym accumulates 0.84 rad over
+    // a 4192-symbol payload, past pi/4. The clamp therefore cannot tell a
+    // slip from normal tracking, and it blocks the tracking.
+    //
+    // Measured at 2 MHz, monotonically worse as it tightens:
+    //   off    3728/149  CRC 96.2%  891.8 kbps
+    //   pi/4   1147/1317 CRC 46.6%  224.6 kbps
+    //   0.5     759/1245 CRC 37.9%  136.1 kbps
+    //   0.35    528/1197 CRC 30.6%   88.6 kbps
+    //
+    // A correct version would bound DETRENDED phase -- deviation from the
+    // loop's own frequency-predicted ramp -- which can distinguish the two.
+    // Not built, because three separate approaches (narrower bandwidth,
+    // residual seeding, this clamp) all reduced or removed slips and only
+    // bandwidth improved CRC. At ~3% frame loss the slips are no longer the
+    // binding constraint.
+    costas_phase_limit_ = 0.f;
+    if (const char* e = std::getenv("SDR_COSTAS_PHLIM"))
+        costas_phase_limit_ = std::strtof(e, nullptr);
+    costas_seed_ = 0;
+    if (const char* e = std::getenv("SDR_COSTAS_SEED")) {
+        std::string v(e);
+        if      (v == "freq")  costas_seed_ = 1;
+        else if (v == "resid") costas_seed_ = 2;
+    }
+    std::cerr << "[rx] costas loop bandwidth: " << costas_bw
+              << " seed=" << (costas_seed_==1?"freq":costas_seed_==2?"resid":"none")
+              << " phase_limit=" << costas_phase_limit_ << "\n";
+    CostasLoop costas(costas_bw);
 
     // Free-running fixed-point timing recovery (SDR_TSYNC=fixed).
     //
@@ -1446,7 +1571,23 @@ void BridgeMode::rxThread() {
                 double cur_evm_acq2 = 0.0;
                 SplitModem::PayloadTap tap;
                 if (track_payload) {
-                    tap = [&](std::vector<std::complex<float>>& p) {
+                    // Costas seeding (SDR_COSTAS_SEED):
+                    //   none  reset to phase 0, freq 0 -- current behaviour
+                    //   freq  seed the NCO frequency with the LS estimate
+                    //   resid seed with the estimate's EXTRAPOLATION ERROR
+                    //
+                    // Note derotate() has already removed est.freq_per_sym
+                    // from these symbols, so "freq" re-applies a ramp that is
+                    // no longer present -- it is measured here rather than
+                    // assumed. "resid" is the variant that matches the intent
+                    // of turning Costas into a tracker: it seeds what the
+                    // loop actually has left to follow, which is the error in
+                    // the LS fit extrapolated across the payload, not the fit
+                    // itself.
+                    const float seed_freq =
+                        (costas_seed_ == 1) ? cur_cfo :
+                        (costas_seed_ == 2) ? (cur_cfo * 0.05f) : 0.f;
+                    tap = [&, seed_freq](std::vector<std::complex<float>>& p) {
                         // Weak symbols cluster in the first quarter of the
                         // payload (98% of them) at BOTH bandwidths. Measure
                         // the payload either side of this loop to find out
@@ -1482,7 +1623,9 @@ void BridgeMode::rxThread() {
                         std::vector<std::complex<float>> pre;
                         if (slip_trace_.is_open()) pre = p;
 
-                        costas.reset();
+                        if (costas_seed_ != 0) costas.seed(0.f, seed_freq);
+                        else                    costas.reset();
+                        costas.setPhaseLimit(costas_phase_limit_);
                         std::vector<std::complex<float>> out;
                         costas.process(p, out);
                         p.swap(out);

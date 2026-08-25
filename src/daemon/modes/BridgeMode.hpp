@@ -48,6 +48,19 @@ public:
 
 private:
     void txThread();
+    // Drains the TAP continuously into tap_queue_, so that ingestion is never
+    // blocked by the transmit worker's duty-limit sleeps.
+    //
+    // txThread previously read the TAP, aggregated, modulated, pushed AND
+    // slept for the duty limiter all on one thread. It spent ~24% of wall
+    // time asleep enforcing duty, during which nothing drained the TAP, so
+    // offered traffic backed up and was dropped: at 600 pkt/s offered only
+    // ~160 pkt/s were ever read, and TX duty sat pinned near 49% regardless
+    // of load because the frame rate -- not the radio -- was the limit.
+    //
+    // Mirrors the receive side, where captureThread already feeds rxThread
+    // through a bounded queue for the same reason.
+    void tapReaderThread();
     void captureThread();   // does nothing but rxPull -> queue, so reception never stops
     void rxThread();        // consumes the queue and runs the DSP chain
     void statThread();
@@ -125,6 +138,10 @@ private:
     // idle TAP poll (once per millisecond), which meant almost no batching
     // at all: measured 6470 samples per push into a 65536-sample buffer.
     static constexpr int TX_AGGREGATE_MS = 2;
+    // How long a partially-filled TX buffer may wait before being sent.
+    // Larger batches amortise the ~10 ms fixed cost of an iio push, but bound
+    // it so a quiet link does not sit on queued data. Overridable for sweeps.
+    static constexpr int TX_LATENCY_MS   = 8;
     std::chrono::steady_clock::time_point stage_started_{};
 
     // Alignment attempts per located preamble. PreambleSync's correlation
@@ -245,6 +262,8 @@ private:
     FixedTimingSync::Result last_fts_;
     int slip_frames_dumped_{0};
     int slip_pass_dumped_{0};   // control group: frames that PASSED CRC
+    int costas_seed_{0};        // 0=none 1=LS freq 2=residual fraction
+    float costas_phase_limit_{0.f};      // quadrant-slip guard, radians (0 = off)
     // Per-symbol carrier rotation applied by the Costas loop, recovered as
     // arg(out * conj(in)) so no change to CostasLoop is needed. A QPSK Costas
     // has four-fold phase ambiguity; a mid-frame slip of ~pi/2 re-maps every
@@ -273,6 +292,15 @@ private:
 
     std::atomic<bool>  running_{false};
     std::thread        tx_thread_;
+    std::thread        tap_reader_thread_;
+    // Bounded so a stalled transmitter cannot grow it without limit; dropping
+    // the oldest packet is better than unbounded latency on a live datalink.
+    std::deque<std::vector<uint8_t>> tap_queue_;
+    std::mutex              tap_mu_;
+    std::condition_variable tap_cv_;
+    std::atomic<uint64_t>   tap_q_drops_{0};
+    std::atomic<uint64_t>   tap_q_hiwater_{0};
+    static constexpr size_t TAP_QUEUE_MAX = 2048;
     std::thread        capture_thread_;
     std::thread        rx_thread_;
     std::thread        stat_thread_;
