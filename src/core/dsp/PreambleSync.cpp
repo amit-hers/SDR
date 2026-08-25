@@ -83,7 +83,7 @@ float correlateAt(const std::vector<std::complex<float>>& buf, size_t d,
 
 PreambleSync::Match
 PreambleSync::find(const std::vector<std::complex<float>>& buf,
-                   size_t max_search) const {
+                   size_t max_search, Diag* diag) const {
     Match best{0, 0.f, false};
     const size_t L = ref_.size();
     if (buf.size() <= L) return best;
@@ -103,8 +103,13 @@ PreambleSync::find(const std::vector<std::complex<float>>& buf,
 
     size_t coarse_best = 0;
     float  coarse_q    = 0.f;
+    // Only retained when diagnostics are on -- the decode path allocates
+    // nothing and behaves exactly as before.
+    std::vector<float> coarse;
+    if (diag) coarse.reserve(limit / COARSE_OFFSET_STEP + 1);
     for (size_t d = 0; d <= limit; d += COARSE_OFFSET_STEP) {
         float q = correlateAt(buf, d, ref_, ref_energy_, COARSE_REF_STRIDE);
+        if (diag) coarse.push_back(q);
         if (q > coarse_q) { coarse_q = q; coarse_best = d; }
     }
 
@@ -120,7 +125,89 @@ PreambleSync::find(const std::vector<std::complex<float>>& buf,
     }
 
     best.found = best.quality >= MIN_QUALITY;
+
+    if (diag) {
+        diag->peak     = best.quality;
+        diag->peak_off = best.offset;
+        diag->searched = coarse.size();
+        // Second peak, taken at least half a reference away from the winner.
+        // Nearer than that is the same peak's own shoulder, not a rival: the
+        // preamble is ~1120 samples long, so the correlation lobe is broad
+        // and adjacent offsets are highly correlated by construction.
+        const size_t sep = (L / 2) / COARSE_OFFSET_STEP + 1;
+        const size_t win = static_cast<size_t>(coarse_best) / COARSE_OFFSET_STEP;
+        diag->second     = 0.f;
+        diag->second_off = -1;
+        for (size_t i = 0; i < coarse.size(); ++i) {
+            const size_t d = (i > win) ? (i - win) : (win - i);
+            if (d < sep) continue;
+            if (coarse[i] > diag->second) {
+                diag->second     = coarse[i];
+                diag->second_off = static_cast<long>(i * COARSE_OFFSET_STEP);
+            }
+        }
+    }
     return best;
+}
+
+PreambleSync::Probe
+PreambleSync::probe(const std::vector<std::complex<float>>& buf,
+                    size_t max_search, double sample_rate,
+                    double df_max_hz, int df_steps, size_t ref_stride) const {
+    Probe p;
+    const size_t L = ref_.size();
+    if (buf.size() <= L || sample_rate <= 0.0 || df_steps < 1) return p;
+    p.ran = true;
+
+    size_t limit = buf.size() - L;
+    if (max_search && max_search < limit) limit = max_search;
+
+    // The stride MUST be coprime with the preamble's sample period, or the
+    // probe silently lies.
+    //
+    // PREAMBLE_BYTE is 0xAA -- alternating bits, so the waveform repeats
+    // every 2 symbols, i.e. every 2*sps samples. A stride that is a multiple
+    // of that period samples the same phase of the repeat every time, the
+    // strided reference collapses towards a constant, and it then correlates
+    // strongly with anything carrying energy. Measured with stride 8 at
+    // sps=4: 65 of 276 probes returned a "normalised" correlation above 1.0,
+    // which is impossible, and the probe reported preambles that were not
+    // there. The period is a power of two, so any ODD stride walks all
+    // phases; round up to one.
+    if (ref_stride < 1) ref_stride = 1;
+    if ((ref_stride & 1u) == 0) ++ref_stride;
+
+    // Coarser offset grid than find() uses: this is a "is anything here at
+    // all" question, and the peak is broad. Exactness is find()'s job.
+    // Rotating the REFERENCE by the trial offset is identical to derotating
+    // the buffer -- the correlation is conj(ref)*buf -- but costs one pass
+    // over 1120 samples per hypothesis instead of a cos/sin per multiply
+    // inside the inner loop.
+    const size_t step = 4;
+    std::vector<std::complex<float>> ref_df(L);
+    for (int i = 0; i < df_steps; ++i) {
+        const double frac = (df_steps == 1) ? 0.0
+                          : (2.0 * double(i) / double(df_steps - 1) - 1.0);
+        const double df   = frac * df_max_hz;
+        const double dphi = 2.0 * 3.14159265358979323846 * df / sample_rate;
+        for (size_t k = 0; k < L; ++k) {
+            const double a = dphi * static_cast<double>(k);
+            const std::complex<double> rot(std::cos(a), std::sin(a));
+            const std::complex<double> v =
+                std::complex<double>(ref_[k].real(), ref_[k].imag()) * rot;
+            ref_df[k] = std::complex<float>(static_cast<float>(v.real()),
+                                            static_cast<float>(v.imag()));
+        }
+        float  bq = 0.f; long bo = 0;
+        for (size_t d = 0; d <= limit; d += step) {
+            float q = correlateAt(buf, d, ref_df, ref_energy_, ref_stride);
+            if (q > bq) { bq = q; bo = static_cast<long>(d); }
+        }
+        if (bq > p.best_q) { p.best_q = bq; p.best_off = bo;
+                             p.best_df = static_cast<float>(df); }
+        if (df == 0.0)     { p.q_at_df0 = bq; p.off_at_df0 = bo; }
+    }
+    return p;
 }
 
 } // namespace sdr

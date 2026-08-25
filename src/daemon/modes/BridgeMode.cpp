@@ -92,6 +92,32 @@ BridgeMode::BridgeMode(const Config& cfg, PlutoSDR& radio)
         frame_log_.open(path, std::ios::trunc);
     if (const char* path = std::getenv("SDR_RAW_LOG"); path && *path)
         raw_log_.open(path, std::ios::trunc);
+    if (const char* path = std::getenv("SDR_PSYNC_LOG"); path && *path) {
+        psync_log_.open(path, std::ios::trunc);
+        psync_log_ << "# PreambleSync correlation trace. One line per search.\n"
+                   << "# class: first=cold first search in a window,"
+                      " after_ok=after a decoded frame,"
+                      " after_fail=after a sync hit that did not decode\n"
+                   << "# MIN_QUALITY=" << PreambleSync::MIN_QUALITY
+                   << " search_bound=" << (static_cast<size_t>(cfg_.burst_margin)
+                        + static_cast<size_t>(cfg_.burst_block) * 4) << "\n";
+        std::cerr << "[sdr] PreambleSync trace -> " << path << "\n";
+    }
+    if (const char* path = std::getenv("SDR_BURST_LOG"); path && *path) {
+        burst_log_.open(path, std::ios::trunc);
+        burst_log_ << "# burst-boundary trace\n"
+                   << "# [TXB] one pushed buffer = one burst on the air\n"
+                   << "# [RXW] one detected window; join to [TXB] by seq\n"
+                   << "# cfg block=" << cfg_.burst_block
+                   << " threshold=" << cfg_.burst_threshold
+                   << " margin=" << cfg_.burst_margin
+                   << " merge_gap=" << cfg_.burst_merge_gap
+                   << " noise_q=" << cfg_.burst_noise_q
+                   << " sps=" << cfg_.samples_per_symbol
+                   << " rx_buffer=" << cfg_.rx_buffer_samples
+                   << " tx_capacity=" << radio_.txCapacity() << "\n";
+        std::cerr << "[sdr] burst-boundary log -> " << path << "\n";
+    }
     if (const char* path = std::getenv("SDR_IQ_DUMP"); path && *path) {
         size_t mb = 128;
         if (const char* m = std::getenv("SDR_IQ_DUMP_MB"); m && *m)
@@ -185,6 +211,7 @@ void BridgeMode::stop() {
                       << " frames_ok=" << fo
                       << " frames/window=" << (win ? double(fo) / double(win) : 0.0)
                       << " adv_past_frame=" << walk_adv_frame_.load()
+                      << " adv_past_FAILED_frame=" << walk_adv_hdr_.load()
                       << " adv_by_template=" << walk_adv_ref_.load() << "\n";
             {
                 uint64_t n = wk_pred_n_.load(), h = wk_hit_.load(), m = wk_miss_.load();
@@ -195,10 +222,139 @@ void BridgeMode::stop() {
                           << " mean|err|=" << (h ? double(wk_err_abs_sum_.load())/double(h) : 0.0)
                           << " max|err|=" << wk_err_max_.load()
                           << " near_edge=" << wk_near_edge_.load()
+                          << " bias_applied=" << wk_bias_applied_.load()
+                          << " mean_bias=" << (wk_bias_n_.load()
+                                ? double(wk_bias_sum_.load()) / double(wk_bias_n_.load()) : 0.0)
+                          << " biased_advances=" << wk_bias_n_.load()
                           << "  (search bound "
                           << (static_cast<size_t>(cfg_.burst_margin)
                               + static_cast<size_t>(cfg_.burst_block) * 4)
                           << " samples)\n";
+            }
+            if (wr_fails_.load()) {
+                const uint64_t f = wr_fails_.load();
+                std::cerr << "RX-RECOVER failed_decode_advances=" << f
+                          << " header_decoded_anyway=" << wr_header_ok_.load()
+                          << " (" << (100.0 * double(wr_header_ok_.load()) / double(f)) << "%)"
+                          << " payload_complete=" << wr_complete_.load()
+                          << "\n    advance taken = referenceLength ("
+                          << PreambleSync(cfg_.samples_per_symbol).referenceLength()
+                          << " samples); a frame is ~"
+                          << ((MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 *
+                              static_cast<size_t>(RRC_SPS) / 2)
+                          << "\n";
+                if (wr_hdr_adv_n_.load())
+                    std::cerr << "    header-derived frame end was AHEAD of the resume point in "
+                              << wr_hdr_adv_n_.load() << " cases, by "
+                              << (double(wr_hdr_adv_gap_.load()) / double(wr_hdr_adv_n_.load()))
+                              << " samples on average\n";
+                const uint64_t pn = wr_probe_n_.load();
+                if (pn) {
+                    const uint64_t by = wr_next_beyond_.load(), wi = wr_next_within_.load();
+                    std::cerr << "    probe (n=" << pn << "): next preamble"
+                              << " WITHIN the search bound=" << wi
+                              << " (" << (100.0 * double(wi) / double(pn)) << "%)"
+                              << "  BEYOND it=" << by
+                              << " (" << (100.0 * double(by) / double(pn)) << "%)"
+                              << "  none left=" << wr_next_none_.load()
+                              << " (" << (100.0 * double(wr_next_none_.load()) / double(pn)) << "%)\n";
+                    const uint64_t found = wi + by;
+                    if (found)
+                        std::cerr << "    mean distance from resume to the next real preamble="
+                                  << (double(wr_dist_sum_.load()) / double(found))
+                                  << " max=" << wr_dist_max_.load()
+                                  << "  <- BEYOND means a decodable frame was abandoned\n";
+                }
+            }
+            {
+                const uint64_t tw = rx_trunc_windows_.load();
+                const uint64_t ce = rx_carry_events_.load();
+                std::cerr << "RX-CARRY windows_clipped_at_buffer_edge=" << tw
+                          << " deferred=" << ce
+                          << " refused_cap=" << rx_carry_refused_cap_.load()
+                          << " refused_holdtime=" << rx_carry_refused_batches_.load()
+                          << " batches_with_carry_in=" << rx_carry_stitched_.load()
+                          << "\n    mean_samples_retained="
+                          << (ce ? double(rx_carry_samples_.load()) / double(ce) : 0.0)
+                          << " max=" << rx_carry_max_.load()
+                          << " cap=" << rx_carry_cap_.load()
+                          << " (capture buffer " << cfg_.rx_buffer_samples << ")\n";
+            }
+            if (ps_n_[PS_FIRST].load() || ps_n_[PS_AFTER_OK].load()) {
+                static const char* kCls[] = {"first     ", "after_ok  ", "after_fail"};
+                std::cerr << "RX-PSYNC  (MIN_QUALITY=" << PreambleSync::MIN_QUALITY
+                          << ")  peak = correlation at the winning offset\n";
+                for (int c = 0; c < PS_NCLASS; ++c) {
+                    const uint64_t n = ps_n_[c].load(), f = ps_fail_[c].load();
+                    if (!n) continue;
+                    const uint64_t hits = n - f;
+                    std::cerr << "  " << kCls[c]
+                              << " attempts=" << n
+                              << " fail=" << f
+                              << " (" << (100.0 * double(f) / double(n)) << "%)"
+                              << " mean_peak_hit="
+                              << (hits ? double(ps_q_hit_mil_[c].load()) / double(hits) / 1000.0 : 0.0)
+                              << " mean_peak_MISS="
+                              << (f ? double(ps_q_miss_mil_[c].load()) / double(f) / 1000.0 : 0.0)
+                              << " misses_just_under_thresh=" << ps_near_thresh_[c].load()
+                              << " peak/second(hits)="
+                              << (ps_ratio_n_[c].load()
+                                  ? double(ps_ratio_mil_[c].load()) / double(ps_ratio_n_[c].load()) / 1000.0
+                                  : 0.0)
+                              << "\n";
+                }
+                // mean_peak_MISS is the number that decides the question: near
+                // MIN_QUALITY means a usable preamble is being rejected; near
+                // zero means nothing correlating was there to find.
+                const uint64_t pn = ps_probe_n_.load();
+                if (pn) {
+                    std::cerr << "RX-PSYNC probe (wide rescan of failures, n=" << pn << ")"
+                              << " mean_best_q=" << (double(ps_probe_q_mil_.load()) / double(pn) / 1000.0)
+                              << "\n    found_at_df0_outside_bound=" << ps_probe_found_wide_.load()
+                              << "  found_only_with_carrier_offset=" << ps_probe_found_cfo_.load()
+                              << "  nothing_at_any_hypothesis=" << ps_probe_nothing_.load()
+                              << "\n    mean_df_when_carrier_was_the_cause="
+                              << (ps_probe_found_cfo_.load()
+                                  ? double(ps_probe_df_sum_.load()) / double(ps_probe_found_cfo_.load())
+                                  : 0.0) << " Hz\n";
+                }
+            }
+            if (bd_windows_.load()) {
+                const uint64_t w  = bd_windows_.load();
+                const uint64_t op = bd_overlap_pairs_.load();
+                const uint64_t gp = bd_gap_pairs_.load();
+                const uint64_t sp = bd_seq_pairs_.load(), sc = bd_seq_contig_.load();
+                std::cerr << "RX-BURST windows=" << w
+                          << " batches=" << bd_batches_.load()
+                          << " frames=" << bd_frames_.load()
+                          << " empty_windows=" << bd_win_empty_.load()
+                          << " (" << (100.0 * double(bd_win_empty_.load()) / double(w))
+                          << "%)\n";
+                std::cerr << "RX-BURST frames/window hist: 0=" << bd_fpw_[0].load()
+                          << " 1=" << bd_fpw_[1].load() << " 2=" << bd_fpw_[2].load()
+                          << " 3=" << bd_fpw_[3].load() << " 4=" << bd_fpw_[4].load()
+                          << " 5=" << bd_fpw_[5].load() << " 6-9=" << bd_fpw_[6].load()
+                          << " 10+=" << bd_fpw_[7].load() << "\n";
+                std::cerr << "RX-BURST window spacing: pairs=" << gp
+                          << " mean_raw_gap=" << (gp ? double(bd_gap_sum_.load()) / double(gp) : 0.0)
+                          << " min_raw_gap=" << (gp ? bd_gap_min_.load() : 0)
+                          << " gaps<4x_merge=" << bd_gap_near_merge_.load()
+                          << " | ext_overlapping=" << op
+                          << " mean_overlap=" << (op ? double(bd_overlap_samples_.load()) / double(op) : 0.0)
+                          << " max_overlap=" << bd_overlap_max_.load()
+                          << " (merge_gap=" << cfg_.burst_merge_gap << ")\n";
+                // The verdict line: consecutive windows carrying consecutive
+                // seqs means one transmitted burst was split across them.
+                // same_batch is the diagnostic number here; the overall
+                // adjacency rate counts consecutive BURSTS as well as split
+                // ones and must not be read as a split rate (see the note at
+                // the point it is computed). burst_join.py answers that.
+                std::cerr << "RX-BURST seq adjacency across windows: pairs=" << sp
+                          << " adjacent=" << sc
+                          << " (" << (sp ? 100.0 * double(sc) / double(sp) : 0.0) << "%)"
+                          << " same_batch=" << bd_seq_contig_same_batch_.load()
+                          << "  <- same_batch>0 means a real merge failure;"
+                             " the overall %% is NOT a split rate\n";
             }
             std::cerr << "RX-WALK exits: no_sync=" << walk_exit_nosync_.load()
                       << " end_of_window=" << walk_exit_eow_.load()
@@ -342,6 +498,7 @@ void BridgeMode::txPusherThread() {
     while (running_.load()) {
         std::vector<int16_t> buf;
         size_t frames = 0;
+        std::vector<uint32_t> seqs;
         {
             std::unique_lock<std::mutex> lk(tx_sq_mu_);
             tx_sq_cv_.wait_for(lk, std::chrono::milliseconds(5), [&]{
@@ -349,6 +506,9 @@ void BridgeMode::txPusherThread() {
             if (tx_sample_q_.empty()) continue;
             buf = std::move(tx_sample_q_.front()); tx_sample_q_.pop_front();
             frames = tx_sample_frames_.front();    tx_sample_frames_.pop_front();
+            if (!tx_sample_seqs_.empty()) {
+                seqs = std::move(tx_sample_seqs_.front()); tx_sample_seqs_.pop_front();
+            }
         }
         tx_sq_cv_.notify_one();          // room freed for the modulator
         if (buf.empty()) continue;
@@ -388,12 +548,31 @@ void BridgeMode::txPusherThread() {
             std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(air / duty - air));
 
-        if (pushed >= 0 && static_cast<size_t>(pushed) == want) {
+        const bool push_ok = (pushed >= 0 && static_cast<size_t>(pushed) == want);
+        if (push_ok) {
             tx_pushes_ok_.fetch_add(1, std::memory_order_relaxed);
             stats_.frames_tx.fetch_add(frames, std::memory_order_relaxed);
         } else {
             tx_pushes_short_.fetch_add(1, std::memory_order_relaxed);
             tx_frames_lost_.fetch_add(frames, std::memory_order_relaxed);
+        }
+
+        // One line per burst that actually reached the air. `samples` is the
+        // burst's true length, so the peer's window lengths can be compared
+        // against what was transmitted rather than against a guess.
+        if (burst_log_.is_open()) {
+            const uint64_t id = tx_burst_id_.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lg(burst_log_mu_);
+            burst_log_ << "[TXB] burst=" << id
+                       << " frames=" << frames
+                       << " samples=" << want
+                       << " air_us=" << static_cast<uint64_t>(air * 1e6)
+                       << " push=" << (push_ok ? "ok" : "short")
+                       << " seqs=";
+            for (size_t i = 0; i < seqs.size(); ++i)
+                burst_log_ << (i ? "," : "") << seqs[i];
+            if (seqs.empty()) burst_log_ << '-';
+            burst_log_ << '\n';
         }
     }
 }
@@ -446,6 +625,10 @@ void BridgeMode::txThread() {
     // Frames currently sitting in `stage`, i.e. modulated but not yet handed
     // to the radio. They only count as transmitted once a push completes.
     size_t staged_frames = 0;
+    // Their sequence numbers, in the order they were laid into the buffer.
+    // Only collected when the burst log is open -- this is instrumentation,
+    // not part of the transmit path.
+    std::vector<uint32_t> staged_seqs;
 
     // Transmit pacing. After sending `air` seconds of samples the node stays
     // quiet until `air / duty` has elapsed, so a gap of air*(1/duty - 1)
@@ -497,11 +680,13 @@ void BridgeMode::txThread() {
         }
         tx_sample_q_.emplace_back(std::move(stage));
         tx_sample_frames_.push_back(staged_frames);
+        tx_sample_seqs_.push_back(std::move(staged_seqs));
         lk.unlock();
         tx_sq_cv_.notify_one();
         stage = std::vector<int16_t>();
         stage.reserve(tx_capacity * 2);
         staged_frames = 0;
+        staged_seqs = std::vector<uint32_t>();
         stage.clear();
     };
 
@@ -529,14 +714,39 @@ void BridgeMode::txThread() {
         }
         if (iq_shaped.size() > tx_capacity) {
             int pushed = radio_.txPush(iq_hw.data(), iq_shaped.size());
-            if (pushed >= 0 && static_cast<size_t>(pushed) == iq_shaped.size())
-                stats_.frames_tx.fetch_add(1, std::memory_order_relaxed);
-            else
-                tx_frames_lost_.fetch_add(1, std::memory_order_relaxed);
+            const bool ok = (pushed >= 0 &&
+                             static_cast<size_t>(pushed) == iq_shaped.size());
+            if (ok) stats_.frames_tx.fetch_add(1, std::memory_order_relaxed);
+            else    tx_frames_lost_.fetch_add(1, std::memory_order_relaxed);
+            // Bypasses the stage and the pusher, so log it here or its seq
+            // would be missing from the join and look like a lost frame.
+            if (burst_log_.is_open() && frame.size() >= PREAMBLE_LEN + 16) {
+                const uint8_t* b = frame.data() + PREAMBLE_LEN;
+                const uint32_t sq = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                                  | (uint32_t(b[14]) <<  8) |  uint32_t(b[15]);
+                const uint64_t id = tx_burst_id_.fetch_add(1, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lg(burst_log_mu_);
+                burst_log_ << "[TXB] burst=" << id << " frames=1"
+                           << " samples=" << iq_shaped.size()
+                           << " air_us=" << static_cast<uint64_t>(
+                                  double(iq_shaped.size()) / sample_rate_tx * 1e6)
+                           << " push=" << (ok ? "ok" : "short")
+                           << " oversize=1 seqs=" << sq << '\n';
+            }
             return;
         }
         ++staged_frames;
         tx_frames_staged_.fetch_add(1, std::memory_order_relaxed);
+        // Read the seq back out of the wire bytes rather than taking it from
+        // pending_seq: transmit() is also called for ARQ retransmits and for
+        // ACK/control frames, whose seq never passes through pending_seq. The
+        // offset is the same one the receiver reads a CRC-failed frame's seq
+        // from, so both ends are quoting the identical field.
+        if (burst_log_.is_open() && frame.size() >= PREAMBLE_LEN + 16) {
+            const uint8_t* b = frame.data() + PREAMBLE_LEN;
+            staged_seqs.push_back((uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                                | (uint32_t(b[14]) <<  8) |  uint32_t(b[15]));
+        }
         if (stage.empty()) stage_started_ = std::chrono::steady_clock::now();
         stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
     };
@@ -1060,6 +1270,11 @@ void BridgeMode::rxThread() {
     // The A/B is meant to isolate timing recovery; anything downstream of
     // SplitModem must be byte-identical between the two.
     bool ok_any = false;
+    // Seq of the last frame deliver() accepted. The burst-boundary log needs
+    // to know WHICH frames a window produced, not just how many, and the
+    // decoded seq is the only identifier shared with the transmitting node.
+    uint32_t delivered_seq = 0;
+    bool     delivered_seq_valid = false;
     auto deliver = [&](const SplitModem::Result& sm, float rssi, float snr,
                        size_t oi) -> bool {
         bool this_frame_ok = false;
@@ -1165,6 +1380,8 @@ void BridgeMode::rxThread() {
                 if (!this_frame_ok)
                 align_hits_[oi].fetch_add(1, std::memory_order_relaxed);
                 this_frame_ok = true;
+                delivered_seq = result->seq;
+                delivered_seq_valid = true;
                 stats_.updatePeer(result->node_id, rssi, snr);
 
                 if ((result->flags & FL_CTRL) && (result->flags & FL_ACK)) {
@@ -1235,6 +1452,140 @@ void BridgeMode::rxThread() {
         return this_frame_ok;
     };
 
+    // ── Failed-decode recovery probe ($SDR_WR_PROBE=<every-Nth>) ─────────
+    // Scans forward from the resume point for the next real preamble, so a
+    // failure can be classified as "the advance was wrong" (a preamble sat
+    // beyond the search region) or "nothing was left to find".
+    const size_t wr_probe_every = [] {
+        const char* e = std::getenv("SDR_WR_PROBE");
+        return e ? static_cast<size_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    constexpr size_t WR_PROBE_MAX = 600;
+    size_t wr_seen = 0, wr_done = 0;
+
+    // ── Capture-batch carry-over ─────────────────────────────────────────
+    // SDR_RX_CARRY=0 restores the old truncate-at-the-buffer-edge behaviour,
+    // for A/B against the fix.
+    static const bool rx_carry_on = [] {
+        const char* e = std::getenv("SDR_RX_CARRY");
+        return !(e && e[0] == '0');
+    }();
+    // Largest tail that may be held back, in samples. Fixed rather than a
+    // fraction of the (carry-inflated) working buffer, so a sweep of this
+    // number means the same thing on every batch.
+    //
+    // Default = one transmitted burst plus the context the detector keeps
+    // either side of it. A burst is one txPush, i.e. exactly txCapacity
+    // samples, and a carried tail is the part of ONE burst that overhung the
+    // buffer edge -- so it can never usefully exceed that. Measured: the
+    // largest tail ever seen was 131584 = txCapacity + burst_margin, dead on
+    // the derivation.
+    //
+    // Swept at 2 MHz QPSK, 60 s each (SDR_RX_CARRY_MAX):
+    //    64k  431 of 706 clipped windows REFUSED -- recovery 80.4%,
+    //         cross-batch splits back to 38, frames/window CV 0.83.
+    //         Below one burst, so it rejects the common case.
+    //   128k  3 refused. recovery 90.2%, splits 0, CV 0.40, CPU 55.2%.
+    //   256k  2 refused. recovery 89.4% (no better), CPU 59.2% (+4 points).
+    // 128k is the knee; doubling it rescues one window. The residual short
+    // bursts are NOT cap-limited -- see the note on carry_batches below.
+    const size_t carry_max = [&] {
+        if (const char* e = std::getenv("SDR_RX_CARRY_MAX"); e && *e)
+            return static_cast<size_t>(std::strtoul(e, nullptr, 10));
+        const size_t one_burst = radio_.txCapacity()
+                               + static_cast<size_t>(cfg_.burst_margin) * 2;
+        // Never hold more than a whole capture buffer, whatever the radio
+        // reports, so a misconfigured TX buffer cannot stall the receiver.
+        return std::min(one_burst, static_cast<size_t>(cfg_.rx_buffer_samples));
+    }();
+    rx_carry_cap_.store(carry_max, std::memory_order_relaxed);
+    std::vector<std::complex<float>> carry;
+    // Consecutive batches the same burst has been deferred for. A burst that
+    // never ends -- a saturated channel, or a stuck detector -- must not defer
+    // for ever, so after this many batches it is demodulated as-is.
+    //
+    // Not the binding constraint on what is still lost. At the default cap,
+    // of 138 bursts that still came up short, only 3 exited on a window that
+    // ran out; 135 exited on no_sync, mid-burst, having failed to re-acquire
+    // after a frame that did not decode (427 interior frames lost that way
+    // against 138 final frames). That is the walk's recover-after-a-failed-
+    // decode path, not capture batching, and no cap value addresses it.
+    size_t carry_batches = 0;
+    constexpr size_t CARRY_MAX_BATCHES = 2;
+
+    // ── PreambleSync trace ($SDR_PSYNC_LOG / $SDR_PSYNC_PROBE) ───────────
+    const bool psync_trace = psync_log_.is_open();
+    // Probe every Nth failure. The rescan is ~100x a normal search, so it is
+    // sampled and capped: it runs on the DSP thread, and a diagnostic that
+    // starves reception changes the thing it is measuring.
+    const size_t psync_probe_every = [] {
+        const char* e = std::getenv("SDR_PSYNC_PROBE");
+        return e ? static_cast<size_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    constexpr size_t PSYNC_PROBE_MAX = 400;
+    size_t psync_fail_seen = 0, psync_probes_done = 0;
+    // Wide rescan range and carrier hypotheses. +-20 kHz covers the point
+    // where a residual offset cancels the peak outright: the reference spans
+    // ~1120 samples = 140 us at 8 MS/s, so ~7 kHz already rotates it a full
+    // turn and destroys the correlation.
+    constexpr double PSYNC_PROBE_DF   = 20000.0;
+    constexpr int    PSYNC_PROBE_STEP = 21;
+
+    // ── Walk advance bias ────────────────────────────────────────────────
+    // The walk predicts the next preamble at
+    //     last_offset + last_end_sym * RRC_SPS
+    // and the RX-WALKERR instrumentation showed that prediction is
+    // systematically EARLY -- the real preamble is consistently found some
+    // way past it (+179 samples on the measured run). The bias is structural,
+    // not noise: end_sym stops at the CRC, so the POSTAMBLE that follows every
+    // frame is unaccounted for, and the symbol->sample conversion carries the
+    // decimator's group delay on top of that.
+    //
+    // It costs no frames -- the search runs forward from wherever it lands, so
+    // an early prediction only wastes search range -- but it wastes it on
+    // every single frame, out of a bound of just
+    // burst_margin + 4*burst_block samples.
+    //
+    // Fixed by measuring it rather than hard-coding it: the two structural
+    // terms above depend on samples_per_symbol and on the RRC configuration,
+    // so a literal constant would be right for exactly one config. Instead
+    // take the MINIMUM error seen over a recent history and advance by that,
+    // less a guard. The minimum is conservative by construction: no frame in
+    // the history would have been overshot by it, which matters because
+    // overshooting past a preamble loses the frame outright, whereas
+    // undershooting only costs search range -- the two errors are not
+    // symmetric, so the estimator must not be a mean.
+    //
+    // OPT-IN (SDR_WALK_BIAS=1) until its own A/B is run. The burst-boundary
+    // experiment showed the bias is real and extremely tight -- mean +179.2,
+    // max 181, never negative -- but ALSO that it costs nothing: of 968
+    // advances that failed to find the next preamble, near_edge was 0, i.e.
+    // not one miss happened near the far end of the 1536-sample search bound.
+    // The misses are correlation failures, not range failures, so correcting
+    // the bias cannot recover them. It stays off by default so it cannot be
+    // mistaken for a fix for the extraction loss.
+    static const bool walk_bias_on = [] {
+        const char* e = std::getenv("SDR_WALK_BIAS");
+        return e && e[0] == '1';
+    }();
+    constexpr size_t BIAS_HIST  = 64;   // predictions the minimum is taken over
+    constexpr int64_t BIAS_GUARD = 64;  // samples held back below that minimum
+    std::array<int64_t, BIAS_HIST> bias_hist{};
+    size_t  bias_n = 0, bias_i = 0;
+    size_t  walk_bias = 0;
+
+    // ── Burst-boundary instrumentation state ($SDR_BURST_LOG) ────────────
+    // Only the default (non-freerun) timing path is instrumented; freerun is
+    // a parked A/B experiment and demodulates windows differently, so mixing
+    // its windows into these counts would make them mean two things at once.
+    uint64_t rx_batch = 0;
+    // Carried ACROSS windows and across batches, to test seq continuity at
+    // window boundaries.
+    uint32_t prev_win_last_seq = 0;
+    bool     prev_win_seq_ok   = false;
+    uint64_t prev_win_batch    = ~uint64_t(0);
+    std::vector<uint32_t> win_seqs;
+
     while (running_.load()) {
         {
             std::unique_lock<std::mutex> lk(capture_mu_);
@@ -1251,11 +1602,23 @@ void BridgeMode::rxThread() {
 
         {
             StageProfiler::Scope sc(prof_, StageProfiler::RX_CONVERT, (uint64_t)n);
-            iq_f.resize(static_cast<size_t>(n));
+            // Samples held back from the previous batch go in FRONT of the new
+            // ones, so a burst that straddled the boundary is contiguous here
+            // and the detector sees it as one region. Built in place rather
+            // than inserted at begin(), which would memmove the whole buffer.
+            const size_t ncar = carry.size();
+            iq_f.resize(ncar + static_cast<size_t>(n));
+            if (ncar)
+                std::memcpy(iq_f.data(), carry.data(),
+                            ncar * sizeof(std::complex<float>));
             for (int i = 0; i < n; ++i)
-                iq_f[static_cast<size_t>(i)] = {
+                iq_f[ncar + static_cast<size_t>(i)] = {
                     iq_hw[static_cast<size_t>(i) * 2]     / 2048.f,
                     iq_hw[static_cast<size_t>(i) * 2 + 1] / 2048.f };
+            if (ncar) {
+                rx_carry_stitched_.fetch_add(1, std::memory_order_relaxed);
+                carry.clear();
+            }
         }
 
         // Spectrum is display-only. Rate-limit it: measured at 73% of all
@@ -1295,15 +1658,88 @@ void BridgeMode::rxThread() {
             StageProfiler::Scope sc(prof_, StageProfiler::RX_TSYNC, iq_f.size());
             fres = fts.process(iq_f);
         }
-        stats_.bursts_detected.fetch_add(windows.size(), std::memory_order_relaxed);
-        {
-            uint64_t occ = 0;
-            for (const auto& w : windows) occ += (w.end > w.start) ? (w.end - w.start) : 0;
-            stats_.rx_burst_samples.fetch_add(occ, std::memory_order_relaxed);
-            stats_.rx_seen_samples .fetch_add(iq_f.size(), std::memory_order_relaxed);
+        // ── Defer a window that the capture buffer cut in half ────────────
+        // The detector clamps a window's end to the buffer, so a burst still
+        // in progress when the buffer ran out shows up as a window ending
+        // exactly at iq_f.size(). Hold it back and prepend it to the next
+        // batch instead of demodulating a fragment now.
+        //
+        // Only the LAST window can be clipped this way, and deferring it
+        // means it is demodulated exactly once, next time round, when it is
+        // whole. Processing it now AND carrying it would deliver its frames
+        // twice.
+        size_t n_process = windows.size();
+        if (!windows.empty() && windows.back().end >= iq_f.size()) {
+            const auto& last = windows.back();
+            rx_trunc_windows_.fetch_add(1, std::memory_order_relaxed);
+            const size_t want = iq_f.size() - last.start;
+            // Never hold more than half a buffer, and never for more than a
+            // couple of batches: a carry that keeps growing is a saturated
+            // channel, and holding it would add latency without ever
+            // completing the burst.
+            const bool ok = rx_carry_on
+                         && want <= carry_max
+                         && carry_batches < CARRY_MAX_BATCHES;
+            if (ok) {
+                carry.assign(iq_f.begin() + static_cast<long>(last.start), iq_f.end());
+                ++carry_batches;
+                --n_process;                    // demodulated next batch, not now
+                rx_carry_events_ .fetch_add(1, std::memory_order_relaxed);
+                rx_carry_samples_.fetch_add(want, std::memory_order_relaxed);
+                uint64_t mx = rx_carry_max_.load(std::memory_order_relaxed);
+                while (want > mx && !rx_carry_max_.compare_exchange_weak(mx, want)) {}
+            } else {
+                if (rx_carry_on) {
+                    if (want > carry_max)
+                        rx_carry_refused_cap_.fetch_add(1, std::memory_order_relaxed);
+                    else
+                        rx_carry_refused_batches_.fetch_add(1, std::memory_order_relaxed);
+                }
+                carry_batches = 0;
+            }
+        } else {
+            carry_batches = 0;
         }
 
-        for (const auto& win : windows) {
+        // Count only what is actually demodulated here. A deferred window is
+        // counted next batch, when it is processed -- counting it now would
+        // book it twice and make frames/window read low for a reason that has
+        // nothing to do with the receiver.
+        {
+            uint64_t occ = 0;
+            for (size_t i = 0; i < n_process; ++i)
+                occ += (windows[i].end > windows[i].start)
+                     ? (windows[i].end - windows[i].start) : 0;
+            stats_.bursts_detected.fetch_add(n_process, std::memory_order_relaxed);
+            stats_.rx_burst_samples.fetch_add(occ, std::memory_order_relaxed);
+            // New samples only; the carried ones were counted in their own
+            // batch and must not be counted again.
+            stats_.rx_seen_samples .fetch_add(static_cast<uint64_t>(n),
+                                              std::memory_order_relaxed);
+        }
+
+        ++rx_batch;
+        if (burst_log_.is_open() && !tsync_freerun) {
+            bd_batches_.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lg(burst_log_mu_);
+            burst_log_ << "[RXB] batch=" << rx_batch
+                       << " samples=" << iq_f.size()
+                       << " new=" << n
+                       << " carried_in=" << (iq_f.size() - static_cast<size_t>(n))
+                       << " windows=" << windows.size()
+                       << " processed=" << n_process
+                       << " deferred=" << (windows.size() - n_process)
+                       << " noise_floor=" << detector.noiseFloor() << '\n';
+        }
+
+        // Raw (pre-extension) bounds of the previous window in THIS batch, so
+        // the gap the merge step chose not to close can be measured directly.
+        size_t prev_raw_end = 0, prev_ext_end = 0;
+        bool   have_prev_in_batch = false;
+        size_t win_index = 0;
+
+        for (size_t wpos = 0; wpos < n_process; ++wpos) {
+            const auto& win = windows[wpos];
             // The detector marks where energy is, which is not the same as
             // where the frame ends: pulse shaping and threshold hysteresis
             // routinely clip a window well short of a full frame, and
@@ -1340,6 +1776,46 @@ void BridgeMode::rxThread() {
                                                         + static_cast<size_t>(cfg_.burst_margin)));
             window_buf.assign(iq_f.begin() + static_cast<long>(win.start),
                               iq_f.begin() + static_cast<long>(win_end));
+
+            // Where this window sits relative to the previous one in the same
+            // batch. Two distinct measurements, and they answer different
+            // questions:
+            //
+            //   raw_gap     -- silence the DETECTOR saw between the two
+            //                  elevated regions. A raw_gap only a little
+            //                  larger than burst_merge_gap is one transmitted
+            //                  burst the merge step declined to rejoin.
+            //   ext_overlap -- samples the two windows SHARE after each was
+            //                  extended to hold a maximum-size frame. Those
+            //                  samples are demodulated twice, once per window,
+            //                  and a frame living in them can be found from
+            //                  either side.
+            size_t raw_gap = 0, ext_overlap = 0;
+            const bool has_prev = have_prev_in_batch;
+            if (has_prev) {
+                raw_gap = (win.start > prev_raw_end) ? win.start - prev_raw_end : 0;
+                ext_overlap = (prev_ext_end > win.start) ? prev_ext_end - win.start : 0;
+                if (burst_log_.is_open() && !tsync_freerun) {
+                    bd_gap_pairs_.fetch_add(1, std::memory_order_relaxed);
+                    bd_gap_sum_  .fetch_add(raw_gap, std::memory_order_relaxed);
+                    uint64_t gmin = bd_gap_min_.load(std::memory_order_relaxed);
+                    while (raw_gap < gmin &&
+                           !bd_gap_min_.compare_exchange_weak(gmin, raw_gap)) {}
+                    if (raw_gap < static_cast<size_t>(cfg_.burst_merge_gap) * 4)
+                        bd_gap_near_merge_.fetch_add(1, std::memory_order_relaxed);
+                    if (ext_overlap > 0) {
+                        bd_overlap_pairs_  .fetch_add(1, std::memory_order_relaxed);
+                        bd_overlap_samples_.fetch_add(ext_overlap, std::memory_order_relaxed);
+                        uint64_t omax = bd_overlap_max_.load(std::memory_order_relaxed);
+                        while (ext_overlap > omax &&
+                               !bd_overlap_max_.compare_exchange_weak(omax, ext_overlap)) {}
+                    }
+                }
+            }
+            prev_raw_end = win.end;
+            prev_ext_end = win_end;
+            have_prev_in_batch = true;
+            win_seqs.clear();
 
             if (tsync_freerun) {
                 // res.idx[] holds the input sample index each symbol came
@@ -1499,15 +1975,49 @@ void BridgeMode::rxThread() {
             // back-to-back frames, so walk the window: locate a frame, decode
             // from there, then resume searching after it. Decoding only the
             // first frame per window would throw away most of a busy channel.
+            // Samples one frame can occupy: the acquisition section plus a
+            // QPSK-rate payload, with slack for the alignment search and RRC
+            // group delay. Used both to trim each decode attempt and to size
+            // the recovery probe's lookahead.
+            const size_t frame_span =
+                (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 *
+                    static_cast<size_t>(RRC_SPS) / 2      // QPSK worst case
+                + BOOTSTRAP_BYTES * 8 * static_cast<size_t>(RRC_SPS)
+                + static_cast<size_t>(RRC_TAPS) * 4;
+
+            // Distance to the NEXT preamble at or after `from`, or -1 if none
+            // within `limit` samples. Scans in slices and stops at the first
+            // hit: every preamble is identical, so a single wide find() would
+            // return an arbitrary one of them by argmax, not the nearest --
+            // and the nearest is the whole question here.
+            auto nextPreambleFrom = [&](size_t from, size_t limit) -> long {
+                const size_t L = psync.referenceLength();
+                const size_t slice = 2048;
+                size_t scanned = 0;
+                std::vector<std::complex<float>> sbuf;
+                while (from + L < window_buf.size() && scanned < limit) {
+                    const size_t take = std::min(window_buf.size() - from, slice + L);
+                    sbuf.assign(window_buf.begin() + static_cast<long>(from),
+                                window_buf.begin() + static_cast<long>(from + take));
+                    auto m = psync.find(sbuf, slice);
+                    if (m.found) return static_cast<long>(from + static_cast<size_t>(m.offset));
+                    from    += slice;
+                    scanned += slice;
+                }
+                return -1;
+            };
+
             bool decoded_any = false;
             size_t search_from = 0;
             size_t last_end_sym = 0, last_offset = 0;
             size_t predicted_next = 0; bool have_prediction = false;
             size_t frames_this_window = 0;
+            const char* walk_exit = "max_frames";
             int    frame_no = 0;
             for (; frame_no < MAX_FRAMES_PER_WINDOW; ++frame_no) {
                 if (search_from >= window_buf.size()) {
                     walk_exit_eow_.fetch_add(1, std::memory_order_relaxed);
+                    walk_exit = "end_of_window";
                     break;
                 }
                 walk_iters_.fetch_add(1, std::memory_order_relaxed);
@@ -1519,9 +2029,101 @@ void BridgeMode::rxThread() {
                 // channel the window is large and this loop runs many times
                 // -- that alone starves the DSP thread. Frames follow each
                 // other closely, so the next preamble is near at hand.
+                // Which of the two failure populations this attempt belongs
+                // to. Decided BEFORE the search, because the block below
+                // consumes have_prediction.
+                const int ps_cls = (frame_no == 0)      ? PS_FIRST
+                                 : (have_prediction)    ? PS_AFTER_OK
+                                                        : PS_AFTER_FAIL;
+                PreambleSync::Diag pdiag;
                 PreambleSync::Match match;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_PSYNC, tail.size());
-                  match = psync.find(tail, preamble_search); }
+                  match = psync.find(tail, preamble_search,
+                                     psync_trace ? &pdiag : nullptr); }
+
+                if (psync_trace) {
+                    ps_n_[ps_cls].fetch_add(1, std::memory_order_relaxed);
+                    // Where the preamble was expected to sit inside `tail`.
+                    // For a cold search that is the context the detector
+                    // keeps ahead of the burst; for a walk advance it is the
+                    // prediction, which lands at 0 while the bias is off.
+                    const int64_t expected =
+                        (ps_cls == PS_FIRST)    ? static_cast<int64_t>(cfg_.burst_margin)
+                      : (ps_cls == PS_AFTER_OK) ? (static_cast<int64_t>(predicted_next)
+                                                 - static_cast<int64_t>(search_from))
+                                                : -1;
+                    const uint64_t qm = static_cast<uint64_t>(pdiag.peak * 1000.f);
+                    PreambleSync::Probe pr;
+
+                    if (!match.found) {
+                        ps_fail_[ps_cls].fetch_add(1, std::memory_order_relaxed);
+                        ps_q_miss_mil_[ps_cls].fetch_add(qm, std::memory_order_relaxed);
+                        // Peak within 25% below the threshold: the signal was
+                        // present and the threshold made the call.
+                        if (pdiag.peak >= PreambleSync::MIN_QUALITY * 0.75f)
+                            ps_near_thresh_[ps_cls].fetch_add(1, std::memory_order_relaxed);
+
+                        ++psync_fail_seen;
+                        if (psync_probe_every && psync_probes_done < PSYNC_PROBE_MAX &&
+                            (psync_fail_seen % psync_probe_every) == 0) {
+                            // Stride 3: odd, so it walks every phase of the
+                            // preamble's 2*sps-sample repeat (see probe()).
+                            pr = psync.probe(tail, preamble_search * 4, sample_rate,
+                                             PSYNC_PROBE_DF, PSYNC_PROBE_STEP, 3);
+                            ++psync_probes_done;
+                            ps_probe_n_.fetch_add(1, std::memory_order_relaxed);
+                            ps_probe_q_mil_.fetch_add(
+                                static_cast<uint64_t>(pr.best_q * 1000.f),
+                                std::memory_order_relaxed);
+                            if (pr.q_at_df0 >= PreambleSync::MIN_QUALITY) {
+                                // Present, un-shifted, just outside the bound.
+                                ps_probe_found_wide_.fetch_add(1, std::memory_order_relaxed);
+                            } else if (pr.best_q >= PreambleSync::MIN_QUALITY) {
+                                // Only correlates once a carrier offset is
+                                // undone: the preamble was there and residual
+                                // CFO cancelled the peak.
+                                ps_probe_found_cfo_.fetch_add(1, std::memory_order_relaxed);
+                                ps_probe_df_sum_.fetch_add(
+                                    static_cast<int64_t>(pr.best_df), std::memory_order_relaxed);
+                            } else {
+                                ps_probe_nothing_.fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
+                    } else {
+                        ps_q_hit_mil_[ps_cls].fetch_add(qm, std::memory_order_relaxed);
+                        if (pdiag.second > 0.f) {
+                            ps_ratio_mil_[ps_cls].fetch_add(
+                                static_cast<uint64_t>(pdiag.peak / pdiag.second * 1000.f),
+                                std::memory_order_relaxed);
+                            ps_ratio_n_[ps_cls].fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+
+                    static const char* kCls[] = {"first", "after_ok", "after_fail"};
+                    std::lock_guard<std::mutex> lg(burst_log_mu_);
+                    psync_log_ << "[PS] batch=" << rx_batch
+                               << " win=" << win_index
+                               << " frame_no=" << frame_no
+                               << " class=" << kCls[ps_cls]
+                               << " found=" << (match.found ? 1 : 0)
+                               << " peak=" << pdiag.peak
+                               << " second=" << pdiag.second
+                               << " ratio=" << (pdiag.second > 0.f
+                                                ? pdiag.peak / pdiag.second : 0.f)
+                               << " peak_off=" << pdiag.peak_off
+                               << " second_off=" << pdiag.second_off
+                               << " expected_off=" << expected
+                               << " search_from=" << search_from
+                               << " tail=" << tail.size()
+                               << " bound=" << preamble_search;
+                    if (pr.ran)
+                        psync_log_ << " probe_q=" << pr.best_q
+                                   << " probe_df=" << pr.best_df
+                                   << " probe_off=" << pr.best_off
+                                   << " probe_q_df0=" << pr.q_at_df0
+                                   << " probe_off_df0=" << pr.off_at_df0;
+                    psync_log_ << '\n';
+                }
                 // Predicted-vs-actual for the PREVIOUS frame's advance.
                 if (have_prediction) {
                     wk_pred_n_.fetch_add(1, std::memory_order_relaxed);
@@ -1539,13 +2141,43 @@ void BridgeMode::rxThread() {
                         // a slightly worse prediction would have missed it.
                         if (static_cast<size_t>(match.offset) > preamble_search * 3 / 4)
                             wk_near_edge_.fetch_add(1, std::memory_order_relaxed);
+
+                        // Feed the bias estimator. A negative error means the
+                        // prediction overshot; such a sample drags the minimum
+                        // below zero and the clamp then disables the bias,
+                        // which is the correct response.
+                        bias_hist[bias_i] = err;
+                        bias_i = (bias_i + 1) % BIAS_HIST;
+                        if (bias_n < BIAS_HIST) ++bias_n;
+                        int64_t mn = bias_hist[0];
+                        for (size_t k = 1; k < bias_n; ++k)
+                            if (bias_hist[k] < mn) mn = bias_hist[k];
+                        const int64_t want = mn - BIAS_GUARD;
+                        walk_bias = (walk_bias_on && bias_n >= 8 && want > 0)
+                                  ? static_cast<size_t>(want) : 0;
+                        wk_bias_applied_.store(walk_bias, std::memory_order_relaxed);
                     } else {
                         wk_miss_.fetch_add(1, std::memory_order_relaxed);
                     }
                     have_prediction = false;
                 }
                 if (!match.found) {
-                    walk_exit_nosync_.fetch_add(1, std::memory_order_relaxed);
+                    // Distinguish "searched and found nothing" from "there was
+                    // nothing left to search". find() returns quality 0
+                    // immediately when fewer than one reference length remains,
+                    // and the end-of-window test above only fires once
+                    // search_from is past the very end -- so a walk that simply
+                    // ran out of window was being reported as a correlation
+                    // failure. Measured: 80% of post-decode "no_sync" exits had
+                    // under 1120 samples left, median 799. Pooling the two hid
+                    // the real loss path completely.
+                    if (tail.size() <= psync.referenceLength()) {
+                        walk_exit_eow_.fetch_add(1, std::memory_order_relaxed);
+                        walk_exit = "tail_exhausted";
+                    } else {
+                        walk_exit_nosync_.fetch_add(1, std::memory_order_relaxed);
+                        walk_exit = "no_sync";
+                    }
                     break;
                 }
                 walk_sync_found_.fetch_add(1, std::memory_order_relaxed);
@@ -1560,6 +2192,8 @@ void BridgeMode::rxThread() {
                 };
 
                 bool this_frame_ok = false;
+                bool   fail_header_ok = false, fail_complete = false;
+                size_t fail_plen = 0, fail_end_sym = 0, fail_offset = 0;
                 for (size_t oi = 0; oi < ALIGN_OFFSETS && !this_frame_ok; ++oi) {
                 size_t offset = offsets[oi];
                 if (offset >= window_buf.size()) break;
@@ -1579,11 +2213,9 @@ void BridgeMode::rxThread() {
                 // per-sample, so samples past the frame never influenced the
                 // symbols that were kept. Slack is added for the alignment
                 // search and RRC group delay.
-                const size_t frame_span =
-                    (MAX_PAYLOAD + WIRE_FRAME_OVERHEAD) * 8 *
-                        static_cast<size_t>(RRC_SPS) / 2      // QPSK worst case
-                    + BOOTSTRAP_BYTES * 8 * static_cast<size_t>(RRC_SPS)
-                    + static_cast<size_t>(RRC_TAPS) * 4;
+                // frame_span is loop-invariant (all compile-time constants);
+                // hoisted to the window scope so the recovery probe can use
+                // the same figure.
                 // SDR_RX_TRIM=0 restores the full-tail copy, for A/B.
                 //
                 // Measured alternating at 2 MHz, two trials each:
@@ -1965,6 +2597,16 @@ void BridgeMode::rxThread() {
                     // Remember where this frame ENDED so the walk can skip it.
                     last_end_sym = sm.end_sym;
                     last_offset  = offset;
+                } else {
+                    // What the FAILED attempt still managed to learn. A frame
+                    // can fail the CRC with a perfectly good header, in which
+                    // case its true end -- and so the correct place to resume
+                    // -- was known and simply not used.
+                    fail_header_ok = sm.header_ok;
+                    fail_complete  = sm.complete;
+                    fail_plen      = sm.plen;
+                    fail_end_sym   = sm.end_sym;
+                    fail_offset    = offset;
                 }
                 }   // end alignment-neighbour loop
 
@@ -1991,17 +2633,142 @@ void BridgeMode::rxThread() {
                         static_cast<size_t>(last_end_sym) * static_cast<size_t>(RRC_SPS);
                     predicted_next = adv;      // for the accuracy check below
                     have_prediction = true;
+                    // Skip the known-dead run between the CRC and the next
+                    // preamble (postamble + group delay), measured above.
+                    const size_t adv_b = adv + walk_bias;
+                    if (walk_bias) {
+                        wk_bias_sum_.fetch_add(walk_bias, std::memory_order_relaxed);
+                        wk_bias_n_  .fetch_add(1, std::memory_order_relaxed);
+                    }
                     // Never go backwards, and always make progress.
-                    search_from = (adv > search_from) ? adv
+                    search_from = (adv_b > search_from) ? adv_b
                                 : search_from + psync.referenceLength();
                     walk_adv_frame_.fetch_add(1, std::memory_order_relaxed);
                     ++frames_this_window;
                     walk_frames_ok_.fetch_add(1, std::memory_order_relaxed);
+                    if (delivered_seq_valid) {
+                        win_seqs.push_back(delivered_seq);
+                        delivered_seq_valid = false;
+                    }
                 } else {
                     // No decode here: step by the template so a stubborn
                     // correlation peak cannot spin us in place.
-                    search_from = base + psync.referenceLength();
-                    walk_adv_ref_.fetch_add(1, std::memory_order_relaxed);
+                    const size_t resume = base + psync.referenceLength();
+                    wr_fails_.fetch_add(1, std::memory_order_relaxed);
+                    if (fail_header_ok) wr_header_ok_.fetch_add(1, std::memory_order_relaxed);
+                    if (fail_complete)  wr_complete_ .fetch_add(1, std::memory_order_relaxed);
+
+                    // Where a header-derived advance WOULD have put us. Only
+                    // meaningful when the header decoded; recorded, not used.
+                    long hdr_end = -1;
+                    if (fail_header_ok && fail_end_sym > 0) {
+                        hdr_end = static_cast<long>(fail_offset +
+                            fail_end_sym * static_cast<size_t>(RRC_SPS));
+                        if (hdr_end > static_cast<long>(resume)) {
+                            wr_hdr_adv_n_ .fetch_add(1, std::memory_order_relaxed);
+                            wr_hdr_adv_gap_.fetch_add(
+                                static_cast<uint64_t>(hdr_end - static_cast<long>(resume)),
+                                std::memory_order_relaxed);
+                        }
+                    }
+
+                    long next = -2;   // -2 = not probed
+                    if (wr_probe_every && wr_done < WR_PROBE_MAX &&
+                        (++wr_seen % wr_probe_every) == 0) {
+                        // Look far enough ahead to clear two whole frames, so
+                        // "nothing found" really means nothing, not merely
+                        // nothing nearby.
+                        next = nextPreambleFrom(resume, frame_span * 2);
+                        ++wr_done;
+                        wr_probe_n_.fetch_add(1, std::memory_order_relaxed);
+                        if (next < 0) {
+                            wr_next_none_.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            const uint64_t d = static_cast<uint64_t>(
+                                static_cast<size_t>(next) - resume);
+                            wr_dist_sum_.fetch_add(d, std::memory_order_relaxed);
+                            uint64_t mx = wr_dist_max_.load(std::memory_order_relaxed);
+                            while (d > mx && !wr_dist_max_.compare_exchange_weak(mx, d)) {}
+                            // Inside the bound means the walk would have found
+                            // it and the advance is not to blame; beyond it
+                            // means a real frame was abandoned.
+                            if (d <= preamble_search)
+                                wr_next_within_.fetch_add(1, std::memory_order_relaxed);
+                            else
+                                wr_next_beyond_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+
+                    if (psync_trace) {
+                        std::lock_guard<std::mutex> lg(burst_log_mu_);
+                        psync_log_ << "[WR] batch=" << rx_batch
+                                   << " win=" << win_index
+                                   << " frame_no=" << frame_no
+                                   << " frames_so_far=" << frames_this_window
+                                   << " failed_at=" << base
+                                   << " resume=" << resume
+                                   << " skipped=" << (resume - base)
+                                   << " header_ok=" << (fail_header_ok ? 1 : 0)
+                                   << " complete=" << (fail_complete ? 1 : 0)
+                                   << " plen=" << fail_plen
+                                   << " hdr_frame_end=" << hdr_end
+                                   << " bound=" << preamble_search
+                                   << " win_left=" << (window_buf.size() - resume);
+                        if (next != -2) {
+                            psync_log_ << " next_preamble=" << next
+                                       << " next_dist=" << (next < 0 ? -1
+                                            : static_cast<long>(next) - static_cast<long>(resume));
+                        }
+                        psync_log_ << '\n';
+                    }
+                    // ── Resume past the frame that failed ────────────────
+                    //
+                    // The old step of one referenceLength (1120 samples) put
+                    // the next search inside the payload of the frame that
+                    // had just failed -- a frame is ~23520 samples, and the
+                    // search bound is 1536, so the next preamble at ~17500
+                    // could never be reached. Measured over 80 probed
+                    // failures: the next real preamble lay BEYOND the search
+                    // region in 95% of cases and inside it in 0%, and the
+                    // walk abandoned the rest of the burst every time --
+                    // roughly 795 frames per 60 s run against 8172 decoded.
+                    //
+                    // A failed CRC does not mean a failed header: the header
+                    // decoded in 158 of 160 failures, and it carries the
+                    // payload length, so end_sym is the frame's true end.
+                    // Use it exactly as the success path above does, rather
+                    // than throwing it away.
+                    //
+                    // No separate 180-sample constant is applied here. The
+                    // measured gap from this advance to the next preamble is
+                    // 180 samples (stdev 0.0 over 76 cases) -- the same bias
+                    // the success path leaves -- so the search finds it well
+                    // inside the 1536 bound. Correcting it belongs in
+                    // walk_bias, which both paths already share, not in a
+                    // second constant that could drift away from the first.
+                    //
+                    // SDR_WALK_HDR_ADV=0 restores the referenceLength step.
+                    static const bool hdr_adv_on = [] {
+                        const char* e = std::getenv("SDR_WALK_HDR_ADV");
+                        return !(e && e[0] == '0');
+                    }();
+                    size_t next_from = resume;
+                    if (hdr_adv_on && fail_header_ok && fail_end_sym > 0) {
+                        const size_t adv = fail_offset +
+                            fail_end_sym * static_cast<size_t>(RRC_SPS) + walk_bias;
+                        // Only ever forwards, and never less progress than the
+                        // template step -- a header that somehow decoded with a
+                        // tiny end_sym must not stall the walk in place.
+                        if (adv > resume) {
+                            next_from = adv;
+                            walk_adv_hdr_.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            walk_adv_ref_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else {
+                        walk_adv_ref_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    search_from = next_from;
                 }
             }
             if (frame_no >= MAX_FRAMES_PER_WINDOW)
@@ -2009,8 +2776,78 @@ void BridgeMode::rxThread() {
             walk_frames_in_window_.fetch_add(frames_this_window, std::memory_order_relaxed);
             if (decoded_any)
                 stats_.bursts_demodulated.fetch_add(1, std::memory_order_relaxed);
+
+            // ── One [RXW] line per detected window ────────────────────────
+            if (burst_log_.is_open() && !tsync_freerun) {
+                bd_windows_.fetch_add(1, std::memory_order_relaxed);
+                bd_frames_ .fetch_add(frames_this_window, std::memory_order_relaxed);
+                if (frames_this_window == 0)
+                    bd_win_empty_.fetch_add(1, std::memory_order_relaxed);
+                {
+                    size_t b = frames_this_window;
+                    if (b >= 10)     b = 7;
+                    else if (b >= 6) b = 6;
+                    bd_fpw_[b].fetch_add(1, std::memory_order_relaxed);
+                }
+
+                // Seq adjacency across the window boundary.
+                //
+                // This was introduced as an RX-only stand-in for "one TX burst
+                // was split", and it is NOT one -- the first live run had it
+                // reading 67.6% while the authoritative join read 2.5%. The
+                // reason is that consecutive TX bursts carry consecutive seqs
+                // too, so a window ending at seq 238 followed by one starting
+                // at 239 is the NEXT burst just as often as it is the same
+                // burst continued, and the receiver cannot tell which without
+                // the transmitter's log.
+                //
+                // Kept only as a channel-continuity indicator. The sub-metric
+                // that IS diagnostic is same_batch: two windows inside ONE
+                // capture buffer carrying consecutive seqs is a real merge
+                // failure, because nothing but the detector separated them.
+                // Cross-batch adjacency is just an rxPull boundary.
+                // For the actual split rate, use scripts/rf/burst_join.py.
+                bool contig = false;
+                if (!win_seqs.empty() && prev_win_seq_ok) {
+                    bd_seq_pairs_.fetch_add(1, std::memory_order_relaxed);
+                    if (win_seqs.front() == prev_win_last_seq + 1) {
+                        contig = true;
+                        bd_seq_contig_.fetch_add(1, std::memory_order_relaxed);
+                        if (prev_win_batch == rx_batch)
+                            bd_seq_contig_same_batch_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+
+                std::lock_guard<std::mutex> lg(burst_log_mu_);
+                burst_log_ << "[RXW] batch=" << rx_batch
+                           << " win=" << win_index << '/' << windows.size()
+                           << " raw=[" << win.start << ',' << win.end << ')'
+                           << " raw_len=" << (win.end - win.start)
+                           << " ext=[" << win.start << ',' << win_end << ')'
+                           << " ext_len=" << (win_end - win.start)
+                           << " raw_gap_prev=" << (has_prev ? std::to_string(raw_gap) : "-")
+                           << " ext_overlap_prev=" << (has_prev ? std::to_string(ext_overlap) : "-")
+                           << " frames=" << frames_this_window
+                           << " iters=" << frame_no
+                           << " exit=" << walk_exit
+                           << " seq_contig_prev=" << (contig ? 1 : 0)
+                           << " seqs=";
+                for (size_t i = 0; i < win_seqs.size(); ++i)
+                    burst_log_ << (i ? "," : "") << win_seqs[i];
+                if (win_seqs.empty()) burst_log_ << '-';
+                burst_log_ << '\n';
+
+                if (!win_seqs.empty()) {
+                    prev_win_last_seq = win_seqs.back();
+                    prev_win_seq_ok   = true;
+                    prev_win_batch    = rx_batch;
+                }
+            }
+            ++win_index;
         }
     }
+    if (burst_log_.is_open()) burst_log_.flush();
+    if (psync_log_.is_open()) psync_log_.flush();
 }
 
 // ── Stat thread ───────────────────────────────────────────────────────────────

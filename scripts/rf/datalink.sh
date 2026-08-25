@@ -9,6 +9,11 @@
 # crosses the air -- every "success" would be local loopback.
 #
 # env: MOD BW BWF BLAST_SZ BLAST_RATE B_ATTEN SDR_TSYNC TCP=1 SECS=<n>
+#      SDR_WALK_BIAS=0 -- hold off the walk-advance bias correction
+#      PSYNC=1 SDR_PSYNC_PROBE=<n> -- PreambleSync correlation trace,
+#                  probing every nth failure with a wide/CFO rescan
+#      BURST=1  -- write burst-boundary logs on both nodes and join them
+#                  at the end (does one TX burst arrive as one RX window?)
 set -u
 SECS="${1:-30}"
 REPO=/home/amither/Documents/SDR
@@ -53,10 +58,10 @@ PY
 done
 
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TX_BUF:+SDR_TX_BUF=$SDR_TX_BUF} ${SDR_TXDUMP:+SDR_TXDUMP=$SDR_TXDUMP} SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
+  "cd $REPO && ${SDR_TX_BUF:+SDR_TX_BUF=$SDR_TX_BUF} ${SDR_TXDUMP:+SDR_TXDUMP=$SDR_TXDUMP} ${BURST:+SDR_BURST_LOG=/tmp/burst_A.log} SDR_PROFILE=1 nohup $BIN --config config.json > /tmp/dA.log 2>&1 &" 
 sleep 3
 echo "$PW" | sudo -S bash -c \
-  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_AGC_BLOCK:+SDR_AGC_BLOCK=$SDR_AGC_BLOCK} ${SDR_RX_TRIM:+SDR_RX_TRIM=$SDR_RX_TRIM} ${SDR_WIN_BURST:+SDR_WIN_BURST=$SDR_WIN_BURST} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} ${SDR_ALPHA_SH:+SDR_ALPHA_SH=$SDR_ALPHA_SH} ${SDR_BETA_SH:+SDR_BETA_SH=$SDR_BETA_SH} ${SDR_NPHASES:+SDR_NPHASES=$SDR_NPHASES} ${SDR_COSTAS_BW:+SDR_COSTAS_BW=$SDR_COSTAS_BW} ${SDR_RX_CARRIER:+SDR_RX_CARRIER=$SDR_RX_CARRIER} ${SDR_COSTAS_SEED:+SDR_COSTAS_SEED=$SDR_COSTAS_SEED} ${SDR_COSTAS_PHLIM:+SDR_COSTAS_PHLIM=$SDR_COSTAS_PHLIM} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
+  "cd $REPO && ${SDR_TSYNC:+SDR_TSYNC=$SDR_TSYNC} ${SDR_AGC_BW:+SDR_AGC_BW=$SDR_AGC_BW} ${SDR_AGC_BLOCK:+SDR_AGC_BLOCK=$SDR_AGC_BLOCK} ${SDR_RX_TRIM:+SDR_RX_TRIM=$SDR_RX_TRIM} ${SDR_WALK_BIAS:+SDR_WALK_BIAS=$SDR_WALK_BIAS} ${SDR_WALK_HDR_ADV:+SDR_WALK_HDR_ADV=$SDR_WALK_HDR_ADV} ${SDR_RX_CARRY:+SDR_RX_CARRY=$SDR_RX_CARRY} ${SDR_RX_CARRY_MAX:+SDR_RX_CARRY_MAX=$SDR_RX_CARRY_MAX} ${SDR_WIN_BURST:+SDR_WIN_BURST=$SDR_WIN_BURST} ${SDR_RXFAIL:+SDR_RXFAIL=$SDR_RXFAIL} ${SDR_SLIPTRACE:+SDR_SLIPTRACE=$SDR_SLIPTRACE} ${SDR_ALPHA_SH:+SDR_ALPHA_SH=$SDR_ALPHA_SH} ${SDR_BETA_SH:+SDR_BETA_SH=$SDR_BETA_SH} ${SDR_NPHASES:+SDR_NPHASES=$SDR_NPHASES} ${SDR_COSTAS_BW:+SDR_COSTAS_BW=$SDR_COSTAS_BW} ${SDR_RX_CARRIER:+SDR_RX_CARRIER=$SDR_RX_CARRIER} ${SDR_COSTAS_SEED:+SDR_COSTAS_SEED=$SDR_COSTAS_SEED} ${SDR_COSTAS_PHLIM:+SDR_COSTAS_PHLIM=$SDR_COSTAS_PHLIM} ${BURST:+SDR_BURST_LOG=/tmp/burst_B.log} ${PSYNC:+SDR_PSYNC_LOG=/tmp/psync_B.log} ${SDR_PSYNC_PROBE:+SDR_PSYNC_PROBE=$SDR_PSYNC_PROBE} ${SDR_WR_PROBE:+SDR_WR_PROBE=$SDR_WR_PROBE} SDR_PROFILE=1 SDR_FRAME_LOG=/tmp/frames_B.txt nohup $BIN --config config_node2.json > /tmp/dB.log 2>&1 &"
 sleep 8
 
 s_ ip addr add 10.99.0.1/24 dev sdr0
@@ -116,3 +121,27 @@ print(f"  node {t}: tx={s.get('frames_tx')} rx_good={s.get('frames_rx_good')} "
       f"txduty_now={s.get('tx_duty_now_pct')}% txduty_peak={s.get('tx_duty_peak_pct')}%")
 PY
 done
+
+# ── Burst-boundary join ──────────────────────────────────────────────────────
+# The daemons flush their burst logs as they run, but the RX-BURST summary is
+# only printed on shutdown, so kill them before reading either.
+if [ "${BURST:-0}" = "1" ]; then
+  echo "$PW" | sudo -S pkill -x sdr-datalink >/dev/null 2>&1
+  sleep 3
+  echo "=== burst boundaries: A transmitted -> B detected ==="
+  python3 "$SP/burst_join.py" --tx /tmp/burst_A.log --rx /tmp/burst_B.log \
+    || echo "  (join failed -- check /tmp/burst_A.log and /tmp/burst_B.log)"
+  echo "  --- node B RX-BURST summary (from its own log) ---"
+  grep -E "^RX-BURST|^RX-CARRY|^ +mean_samples_retained" /tmp/dB.log | awk "!seen[\$0]++" | sed "s/^/    /"
+fi
+if [ "${PSYNC:-0}" = "1" ]; then
+  echo "$PW" | sudo -S pkill -x sdr-datalink >/dev/null 2>&1
+  sleep 3
+  echo "=== failed-frame recovery ==="
+  grep -E "^RX-RECOVER|^ +advance taken|^ +header-derived|^ +probe \(n=|^ +mean distance" /tmp/dB.log \
+    | awk "!seen[\$0]++" | sed "s/^/  /"
+  echo "=== PreambleSync failure analysis ==="
+  grep -E "^RX-PSYNC|^ +(first|after_ok|after_fail) |^ +found_at_df0|^ +mean_df" /tmp/dB.log \
+    | awk "!seen[\$0]++" | sed "s/^/  /"
+  python3 "$SP/psync_report.py" /tmp/psync_B.log || true
+fi

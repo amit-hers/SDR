@@ -223,6 +223,103 @@ private:
     std::atomic<uint64_t> wk_err_abs_sum_{0};
     std::atomic<uint64_t> wk_err_max_{0};
     std::atomic<uint64_t> wk_near_edge_{0};     // found in the last 25% of the bound
+    // ── Failed-decode recovery ($SDR_PSYNC_LOG, [WR] lines) ──────────────
+    // When a frame fails to decode the walk steps forward by only
+    // referenceLength() (1120 samples) and searches 1536 from there -- but a
+    // frame is ~18600 samples, so the next search starts and ends INSIDE the
+    // frame that just failed, over payload that cannot correlate. Measured:
+    // the post-failure class fails 100% of the time (590/590), and 427 of the
+    // 565 frames still lost are interior frames abandoned this way.
+    //
+    // These record whether the advance was simply wrong -- i.e. a decodable
+    // preamble sat beyond the search region -- or whether nothing was left.
+    // Advances taken past a frame that failed to decode, using the header's
+    // own length rather than a blind template step.
+    std::atomic<uint64_t> walk_adv_hdr_{0};
+    std::atomic<uint64_t> wr_fails_{0};        // failed-decode advances taken
+    std::atomic<uint64_t> wr_header_ok_{0};    // ... where the header DID decode,
+                                               // so the true frame end was known
+    std::atomic<uint64_t> wr_complete_{0};     // ... and the payload was all present
+    std::atomic<uint64_t> wr_probe_n_{0};      // recovery probes run
+    std::atomic<uint64_t> wr_next_within_{0};  // next preamble inside the search bound
+    std::atomic<uint64_t> wr_next_beyond_{0};  // exists, but beyond it -> ABANDONED
+    std::atomic<uint64_t> wr_next_none_{0};    // nothing left in the window
+    std::atomic<uint64_t> wr_dist_sum_{0};     // distance from the resume point
+    std::atomic<uint64_t> wr_dist_max_{0};
+    // Where a header-derived advance WOULD have landed, versus where the walk
+    // actually resumed.
+    std::atomic<uint64_t> wr_hdr_adv_n_{0};
+    std::atomic<uint64_t> wr_hdr_adv_gap_{0};  // computable_end - actual_resume
+
+    // ── Capture-batch carry-over ─────────────────────────────────────────
+    // rxPull hands the DSP thread a fixed-size buffer, and a burst that
+    // starts in its back half runs off the end. The detector then reports a
+    // window clipped at the buffer edge, the walk decodes frames until fewer
+    // than one correlation reference remains, and the rest of the burst --
+    // sitting at the head of the NEXT buffer -- is never joined to it.
+    //
+    // Measured before the fix, at a 130368-sample burst against a 262144-
+    // sample capture buffer: of bursts that lost frames, 79.2% had their
+    // window end within 4096 samples of the buffer edge, against 0.5% of
+    // bursts that were fully recovered. Frames recovered tracked window
+    // shortfall almost exactly -- short by N frames, lose N frames.
+    //
+    // Fixed by DEFERRING the clipped window instead of demodulating a
+    // fragment: its samples are held and prepended to the next batch, so the
+    // burst is presented to the detector whole, exactly once. Deferring
+    // rather than overlapping is what keeps it exactly once -- an overlap
+    // buffer would re-present frames that had already been delivered.
+    std::atomic<uint64_t> rx_trunc_windows_{0};  // windows clipped at the buffer edge
+    std::atomic<uint64_t> rx_carry_events_{0};   // ... that were deferred
+    std::atomic<uint64_t> rx_carry_samples_{0};  // total samples carried
+    std::atomic<uint64_t> rx_carry_max_{0};
+    // Deferral refused, split by WHICH bound bound: conflating them hides
+    // whether the cap or the hold-time is the binding constraint.
+    std::atomic<uint64_t> rx_carry_refused_cap_{0};      // tail bigger than the cap
+    std::atomic<uint64_t> rx_carry_refused_batches_{0};  // held for too many batches
+    std::atomic<uint64_t> rx_carry_stitched_{0}; // deferred windows later processed
+    std::atomic<uint64_t> rx_carry_cap_{0};      // $SDR_RX_CARRY_MAX, samples
+
+    // ── PreambleSync correlation-quality trace ($SDR_PSYNC_LOG) ──────────
+    // The burst-boundary run showed EVERY window ends on no_sync, so the loss
+    // is PreambleSync failing to correlate -- 25% of windows never find their
+    // first preamble, and 14% of post-decode advances never find the next.
+    // These separate "the preamble is not there / not aligned" from "it is
+    // there and MIN_QUALITY rejected it", which call for opposite fixes.
+    std::ofstream psync_log_;
+
+    // Attempt classes. The two failure populations behave differently and
+    // must never be pooled: one is cold acquisition, the other is walk state.
+    enum PsyncClass { PS_FIRST = 0,   // first search in a window (cold)
+                      PS_AFTER_OK,    // after a frame decoded (walk advance)
+                      PS_AFTER_FAIL,  // after a sync hit that failed to decode
+                      PS_NCLASS };
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_n_{};
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_fail_{};
+    // Peak quality, in milli-units, summed over attempts. Kept separately for
+    // hits and misses: the miss mean is the number that says whether the
+    // threshold is the problem.
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_q_hit_mil_{};
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_q_miss_mil_{};
+    // Failures whose peak landed just under MIN_QUALITY -- a threshold call,
+    // not an absent signal.
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_near_thresh_{};
+    // Peak-to-second-peak ratio on hits, milli-units. A ratio near 1 means
+    // the winner was not distinctive and the offset may be the wrong lobe.
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_ratio_mil_{};
+    std::array<std::atomic<uint64_t>, PS_NCLASS> ps_ratio_n_{};
+
+    // Failure post-mortem (SDR_PSYNC_PROBE=<every-Nth>).
+    std::atomic<uint64_t> ps_probe_n_{0};
+    std::atomic<uint64_t> ps_probe_found_wide_{0};   // peak appeared at df=0, wider range
+    std::atomic<uint64_t> ps_probe_found_cfo_{0};    // peak appeared only at df!=0
+    std::atomic<uint64_t> ps_probe_nothing_{0};      // no peak at any hypothesis
+    std::atomic<int64_t>  ps_probe_df_sum_{0};       // Hz, over ps_probe_found_cfo_
+    std::atomic<uint64_t> ps_probe_q_mil_{0};        // best q found, milli
+
+    std::atomic<uint64_t> wk_bias_applied_{0};  // current advance bias, samples
+    std::atomic<uint64_t> wk_bias_sum_{0};      // for the mean actually used
+    std::atomic<uint64_t> wk_bias_n_{0};
 
     // Post-TimingSync demodulation quality. Truncation and sync acquisition
     // are identical at 1 and 2 MHz (254 vs 253 truncated, 67.2 vs 66.7%
@@ -329,6 +426,13 @@ private:
     std::thread             tx_pusher_thread_;
     std::deque<std::vector<int16_t>> tx_sample_q_;
     std::deque<size_t>      tx_sample_frames_;   // frames carried by each buffer
+    // Frame sequence numbers carried by each buffer, in transmit order.
+    // A "TX burst" is exactly one of these buffers: one txPush, one
+    // contiguous run of samples on the air, with a duty gap either side.
+    // Recording the seqs is what lets the peer's per-window log be joined
+    // back to the burst those frames were actually sent in -- the two nodes
+    // share no clock, but they do share the sequence numbering.
+    std::deque<std::vector<uint32_t>> tx_sample_seqs_;
     std::mutex              tx_sq_mu_;
     std::condition_variable tx_sq_cv_;
     std::atomic<uint64_t>   tx_sq_stalls_{0};    // worker waited for room
@@ -354,6 +458,48 @@ private:
     // or CRC-failed) is logged there with its content, for manual RF-link
     // analysis. Off by default (empty path -> no file opened).
     std::ofstream frame_log_;
+
+    // ── Burst-boundary instrumentation ($SDR_BURST_LOG) ───────────────────
+    // Answers one question: does one transmitted burst arrive as one detected
+    // RX window, or is the receiver chopping it into several?
+    //
+    // The transmitter writes a [TXB] line per pushed buffer (burst id, frame
+    // count, sample count, the seqs it carried); the receiver writes an [RXW]
+    // line per detected window (raw and extended bounds, overlap with the
+    // previous window, frames extracted, the seqs decoded). The two logs live
+    // on different nodes and are joined offline by seq --
+    // scripts/rf/burst_join.py.
+    //
+    // Written from txPusherThread and rxThread, hence the mutex.
+    std::ofstream burst_log_;
+    std::mutex    burst_log_mu_;
+    std::atomic<uint64_t> tx_burst_id_{0};
+
+    // RX-side summary, so the basic verdict does not require the peer's log.
+    std::atomic<uint64_t> bd_batches_{0};        // capture buffers with >=1 window
+    std::atomic<uint64_t> bd_windows_{0};
+    std::atomic<uint64_t> bd_win_empty_{0};      // window yielded no frame at all
+    std::atomic<uint64_t> bd_frames_{0};         // frames extracted from windows
+    // Extended windows (win.start .. win_end) that overlap their predecessor:
+    // the same samples are demodulated twice, once per window.
+    std::atomic<uint64_t> bd_overlap_pairs_{0};
+    std::atomic<uint64_t> bd_overlap_samples_{0};
+    std::atomic<uint64_t> bd_overlap_max_{0};
+    // Raw detector regions (pre-extension) and the gaps between them. A gap
+    // just above burst_merge_gap is a burst the merge step declined to rejoin.
+    std::atomic<uint64_t> bd_gap_pairs_{0};
+    std::atomic<uint64_t> bd_gap_sum_{0};
+    std::atomic<uint64_t> bd_gap_min_{~uint64_t(0)};
+    std::atomic<uint64_t> bd_gap_near_merge_{0};  // gap < 4x merge_gap
+    // Sequence continuity across window boundaries. If a window's first
+    // decoded seq is exactly one past the previous window's last decoded seq,
+    // those two windows were carrying consecutive frames -- which is what a
+    // single TX burst split in two looks like from the receiver alone.
+    std::atomic<uint64_t> bd_seq_pairs_{0};      // consecutive windows both decoding
+    std::atomic<uint64_t> bd_seq_contig_{0};     // ... and seq continued exactly
+    std::atomic<uint64_t> bd_seq_contig_same_batch_{0};
+    // Frames-per-window histogram: 0,1,2,3,4,5,6-9,10+
+    std::array<std::atomic<uint64_t>, 8> bd_fpw_{};
 
     // Diagnostic: if $SDR_RAW_LOG is set, every raw demodulated byte (before
     // framing) is dumped there as hex, for manually inspecting what the
