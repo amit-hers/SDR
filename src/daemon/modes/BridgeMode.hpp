@@ -482,6 +482,49 @@ private:
     // TX_PEAK_OVERSHOOT in the .cpp.
     std::atomic<uint64_t> tx_clamped_{0};
 
+    // ── TX sample accounting ─────────────────────────────────────────────
+    // Every modulated sample is accounted for at exactly one of these, so a
+    // sample can never go missing without a counter saying so. The invariant
+    // is checked and printed at shutdown:
+    //
+    //     generated == queued  + dropped_before_queue
+    //     queued    == pushed  + dropped_in_push
+    //     generated == pushed  + dropped                (total)
+    //
+    // This exists because samples WERE being silently discarded: when the
+    // sample queue was full, flush() gave up and returned without flushing,
+    // transmit() appended the frame to the staging buffer anyway, the buffer
+    // grew past txCapacity, and txPush() clamped to capacity and threw the
+    // rest away. Measured at 4 MHz: 37.3% of pushes exceeded capacity and
+    // 13.7M samples -- about 3300 frames a run -- vanished while being
+    // counted as transmitted.
+    std::atomic<uint64_t> tx_gen_samples_{0};      // modulated
+    std::atomic<uint64_t> tx_queued_samples_{0};   // handed to the pusher
+    std::atomic<uint64_t> tx_pushed_samples_{0};   // accepted by the radio
+    std::atomic<uint64_t> tx_dropped_samples_{0};  // discarded, with a reason below
+    // Where drops happened, so a non-zero total localises itself.
+    std::atomic<uint64_t> tx_drop_backpressure_{0}; // no room and shutting down
+    std::atomic<uint64_t> tx_drop_short_push_{0};   // radio took fewer than offered
+    std::atomic<uint64_t> tx_drop_oversize_{0};     // frame larger than one buffer
+    std::atomic<uint64_t> tx_drop_shutdown_{0};     // still staged/queued at exit
+    std::atomic<uint64_t> tx_frames_dropped_{0};    // frames behind those samples
+    // How long the modulator spent blocked waiting for room. Backpressure is
+    // supposed to cost latency, not samples; this is what it cost.
+    std::atomic<uint64_t> tx_backpressure_us_{0};
+    std::atomic<uint64_t> tx_backpressure_n_{0};
+    // stop() runs twice (explicit, then destructor); shutdown accounting must
+    // happen exactly once or the totals double.
+    std::atomic<bool>     tx_accounted_{false};
+
+    // Samples rxPull actually returned, and pulls made. The only unambiguous
+    // measure of what the transport delivered: the stage profiler credits
+    // each call with the size REQUESTED, and rx_batch counts only batches
+    // that contained a detected window, so both overstate or understate the
+    // achieved rate. This counts what arrived.
+    std::atomic<uint64_t> rx_pulled_samples_{0};
+    std::atomic<uint64_t> rx_pulls_{0};
+    std::atomic<uint64_t> rx_pulls_short_{0};   // returned less than requested
+
     // Capture -> DSP handoff. Demodulating a burst takes long enough that
     // doing it inline with rxPull() left the receiver deaf ~30% of the time,
     // and a frame straddling one of those gaps is captured only partially --

@@ -151,6 +151,15 @@ std::unique_ptr<PlutoSDR> PlutoSDR::connect(const std::string& id) {
     }
     std::cerr << "[sdr] tx buffer " << p->tx_buf_sz_ << " samples\n";
     p->tx_buf_ = iio_device_create_buffer(p->tx_dev_, p->tx_buf_sz_, false);
+    // The RX iio buffer is the transport's transfer unit, so it is the knob
+    // that decides achievable sample rate -- a bigger buffer amortises the
+    // per-refill round trip over more samples. SDR_RX_BUF overrides for
+    // sweeps, matching SDR_TX_BUF above.
+    if (const char* e = std::getenv("SDR_RX_BUF")) {
+        long v = std::strtol(e, nullptr, 10);
+        if (v >= 4096 && v <= (1L << 21)) p->buf_sz_ = static_cast<size_t>(v);
+    }
+    std::cerr << "[sdr] rx buffer " << p->buf_sz_ << " samples\n";
     p->rx_buf_ = iio_device_create_buffer(p->rx_dev_, p->buf_sz_, false);
 
     if (!p->tx_buf_ || !p->rx_buf_)

@@ -228,6 +228,22 @@ void BridgeMode::stop() {
     if (tap_reader_thread_.joinable()) tap_reader_thread_.join();
     tx_sq_cv_.notify_all();
     if (tx_pusher_thread_.joinable())  tx_pusher_thread_.join();
+    // Whatever never made it out counts as dropped, so the accounting balances
+    // instead of leaving an unexplained gap at shutdown.
+    // stop() is called explicitly and again from the destructor, so this must
+    // be idempotent: counting the queue twice made the invariant read
+    // VIOLATED by different amounts in each of the two printed reports.
+    if (!tx_accounted_.exchange(true)) {
+        std::lock_guard<std::mutex> lk(tx_sq_mu_);
+        uint64_t left = 0, frames = 0;
+        for (const auto& b : tx_sample_q_) left += b.size() / 2;
+        for (auto f : tx_sample_frames_)   frames += f;
+        if (left) {
+            tx_dropped_samples_.fetch_add(left, std::memory_order_relaxed);
+            tx_drop_shutdown_  .fetch_add(left, std::memory_order_relaxed);
+            tx_frames_dropped_ .fetch_add(frames, std::memory_order_relaxed);
+        }
+    }
     if (capture_thread_.joinable()) capture_thread_.join();
     if (rx_thread_.joinable())      rx_thread_.join();
     if (stat_thread_.joinable())    stat_thread_.join();
@@ -260,11 +276,48 @@ void BridgeMode::stop() {
                   << " short_pushes=" << tx.short_pushes
                   << " | frames_tx(on air)=" << stats_.frames_tx.load()
                   << " frames_lost_in_push=" << tx_frames_lost_.load() << "\n";
+        {
+            const double sr = double(cfg_.bw_mhz) * 1e6 * cfg_.samples_per_symbol;
+            const uint64_t got = rx_pulled_samples_.load();
+            std::cerr << "RX-TRANSPORT pulls=" << rx_pulls_.load()
+                      << " short_pulls=" << rx_pulls_short_.load()
+                      << " samples=" << got
+                      << "\n    achieved=" << (wall > 0 ? got / wall / 1e6 : 0.0)
+                      << " Msamp/s of " << (sr / 1e6) << " configured ("
+                      << (sr > 0 && wall > 0 ? 100.0 * (got / wall) / sr : 0.0)
+                      << "% -- below 100% means the radio produced samples the host never took)\n";
+        }
         std::cerr << "carrier sense: defers=" << cs_defers_.load()
                   << " forced_overrides=" << cs_overrides_.load() << "\n";
         // TX pipeline, stage by stage. Read left to right: each stage should
         // account for the one before it. Whichever column collapses first is
         // where offered load is being shed.
+        {
+            const uint64_t gen = tx_gen_samples_.load(), q = tx_queued_samples_.load();
+            const uint64_t pu = tx_pushed_samples_.load(), dr = tx_dropped_samples_.load();
+            std::cerr << "TX-SAMPLES generated=" << gen
+                      << " queued=" << q
+                      << " pushed=" << pu
+                      << " dropped=" << dr
+                      << " (" << (gen ? 100.0 * double(dr) / double(gen) : 0.0) << "%)\n";
+            std::cerr << "    drops by cause: backpressure=" << tx_drop_backpressure_.load()
+                      << " short_push=" << tx_drop_short_push_.load()
+                      << " oversize=" << tx_drop_oversize_.load()
+                      << " at_shutdown=" << tx_drop_shutdown_.load()
+                      << " frames_dropped=" << tx_frames_dropped_.load() << "\n";
+            // The whole point of the counters: state the invariant and say
+            // plainly whether it held, rather than leaving it to be inferred.
+            const int64_t gap = int64_t(gen) - int64_t(pu) - int64_t(dr);
+            std::cerr << "    invariant generated == pushed + dropped : "
+                      << (gap == 0 ? "HOLDS" : "VIOLATED") ;
+            if (gap != 0) std::cerr << " by " << gap << " samples";
+            std::cerr << "\n";
+            const uint64_t bn = tx_backpressure_n_.load();
+            std::cerr << "    backpressure waits=" << bn
+                      << " total=" << (tx_backpressure_us_.load() / 1000) << " ms"
+                      << " mean=" << (bn ? double(tx_backpressure_us_.load()) / double(bn) / 1000.0 : 0.0)
+                      << " ms  (latency is the intended cost; samples are not)\n";
+        }
         std::cerr << "TX-CLIP samples_clamped_at_full_scale=" << tx_clamped_.load()
                   << "  (should be 0 -- non-zero means the backoff is too small)\n";
         std::cerr << "TX-PIPE tap_pkts=" << tx_tap_pkts_.load()
@@ -634,6 +687,17 @@ void BridgeMode::txPusherThread() {
                 std::chrono::duration<double>(air / duty - air));
 
         const bool push_ok = (pushed >= 0 && static_cast<size_t>(pushed) == want);
+        // Account for every sample handed to the radio. txPush clamps to the
+        // radio's buffer and returns what it took, so a short push is real
+        // loss and is recorded as such rather than inferred later.
+        const size_t took = (pushed > 0) ? static_cast<size_t>(pushed) : 0;
+        tx_pushed_samples_.fetch_add(took, std::memory_order_relaxed);
+        if (took < want) {
+            const size_t lost = want - took;
+            tx_dropped_samples_.fetch_add(lost, std::memory_order_relaxed);
+            tx_drop_short_push_.fetch_add(lost, std::memory_order_relaxed);
+            tx_frames_dropped_ .fetch_add(frames, std::memory_order_relaxed);
+        }
         if (push_ok) {
             tx_pushes_ok_.fetch_add(1, std::memory_order_relaxed);
             stats_.frames_tx.fetch_add(frames, std::memory_order_relaxed);
@@ -773,8 +837,12 @@ void BridgeMode::txThread() {
 
     // `force` waits out the gap instead of deferring -- used when the stage
     // is full and deferring would overflow it.
-    auto flush = [&](bool force) {
-        if (stage.empty()) return;
+    // Returns true if the staging buffer was handed off (or was already
+    // empty). False means it is STILL FULL and the caller must not add to it
+    // -- that was the bug: the old version returned void, the caller could
+    // not tell, and appended anyway.
+    auto flush = [&](bool force) -> bool {
+        if (stage.empty()) return true;
         // Hand the modulated buffer to the pusher thread instead of pushing
         // it here. txPush blocks until the radio accepts the samples -- 50.3%
         // of this worker's wall time -- and every microsecond of that was
@@ -783,14 +851,33 @@ void BridgeMode::txThread() {
         // when samples reach the air, not of when they were prepared.
         std::unique_lock<std::mutex> lk(tx_sq_mu_);
         if (tx_sample_q_.size() >= TX_SAMPLE_Q_MAX) {
-            if (!force) { tx_sq_stalls_.fetch_add(1, std::memory_order_relaxed); return; }
-            // Bounded: a missed notify must degrade to a slow flush, never a hang.
-            tx_sq_cv_.wait_for(lk, std::chrono::milliseconds(50), [&]{
-                return tx_sample_q_.size() < TX_SAMPLE_Q_MAX || !running_.load(); });
-            if (tx_sample_q_.size() >= TX_SAMPLE_Q_MAX) {
-                tx_sq_stalls_.fetch_add(1, std::memory_order_relaxed);
-                return;                       // try again on the next poll
+            if (!force) { tx_sq_stalls_.fetch_add(1, std::memory_order_relaxed); return false; }
+            // Real backpressure: wait for room rather than giving up.
+            //
+            // Giving up is what discarded samples. Blocking here instead
+            // pushes the stall back up the chain -- the modulator waits, the
+            // TAP queue fills, and tapReaderThread drops its OLDEST packet
+            // and counts it in tap_q_drops_. That is loss at the ingress,
+            // where it is visible and where dropping a stale packet is the
+            // right thing, rather than loss after the frame was already
+            // counted as transmitted.
+            //
+            // The wait is in bounded slices so a missed notify degrades to a
+            // slow flush rather than a hang, and it always releases when
+            // running_ clears -- stop() notifies before joining this thread.
+            tx_sq_stalls_.fetch_add(1, std::memory_order_relaxed);
+            const auto t0 = std::chrono::steady_clock::now();
+            while (tx_sample_q_.size() >= TX_SAMPLE_Q_MAX && running_.load()) {
+                tx_sq_cv_.wait_for(lk, std::chrono::milliseconds(20), [&]{
+                    return tx_sample_q_.size() < TX_SAMPLE_Q_MAX || !running_.load(); });
             }
+            tx_backpressure_us_.fetch_add(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - t0).count()),
+                std::memory_order_relaxed);
+            tx_backpressure_n_.fetch_add(1, std::memory_order_relaxed);
+            if (tx_sample_q_.size() >= TX_SAMPLE_Q_MAX)
+                return false;                 // shutting down; caller accounts for it
         }
         // Statistics of exactly what is about to be handed to the radio.
         // Taken here, on the int16 the DAC will see, so a clipped or
@@ -817,6 +904,7 @@ void BridgeMode::txThread() {
             meta.dc_i    = si / double(np);
             meta.dc_q    = sq / double(np);
         }
+        tx_queued_samples_.fetch_add(stage.size() / 2, std::memory_order_relaxed);
         tx_sample_q_.emplace_back(std::move(stage));
         tx_sample_frames_.push_back(staged_frames);
         tx_sample_meta_.push_back(std::move(meta));
@@ -829,6 +917,7 @@ void BridgeMode::txThread() {
         staged_offs = std::vector<uint32_t>();
         staged_forced = false;
         stage.clear();
+        return true;
     };
 
     auto transmit = [&](const std::vector<uint8_t>& frame) {
@@ -849,15 +938,38 @@ void BridgeMode::txThread() {
 
         // Flush first if this frame wouldn't fit, then stage it. A frame
         // larger than the whole buffer is pushed on its own (txPush clamps).
+        // Everything modulated is accounted for from here on.
+        tx_gen_samples_.fetch_add(iq_shaped.size(), std::memory_order_relaxed);
+
+        // Make room BEFORE appending, and refuse the frame if room could not
+        // be made. Appending regardless is what grew the staging buffer past
+        // txCapacity and let txPush() throw the tail away without a word.
         if (stage.size() / 2 + iq_shaped.size() > tx_capacity) {
             tx_stage_forces_.fetch_add(1, std::memory_order_relaxed);
             staged_forced = true;
-            flush(/*force=*/true);
+            if (!flush(/*force=*/true)) {
+                // Only reachable while shutting down, since flush() otherwise
+                // waits for room. Refuse explicitly rather than overflow.
+                tx_dropped_samples_ .fetch_add(iq_shaped.size(), std::memory_order_relaxed);
+                tx_drop_backpressure_.fetch_add(iq_shaped.size(), std::memory_order_relaxed);
+                tx_frames_dropped_  .fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
         }
         if (iq_shaped.size() > tx_capacity) {
             int pushed = radio_.txPush(iq_hw.data(), iq_shaped.size());
             const bool ok = (pushed >= 0 &&
                              static_cast<size_t>(pushed) == iq_shaped.size());
+            // txPush clamps to the radio's buffer, so an oversize frame loses
+            // its tail. Count what was actually accepted and what was not.
+            const size_t took = (pushed > 0) ? static_cast<size_t>(pushed) : 0;
+            tx_pushed_samples_.fetch_add(took, std::memory_order_relaxed);
+            if (took < iq_shaped.size()) {
+                const size_t lost = iq_shaped.size() - took;
+                tx_dropped_samples_.fetch_add(lost, std::memory_order_relaxed);
+                tx_drop_oversize_  .fetch_add(lost, std::memory_order_relaxed);
+                tx_frames_dropped_ .fetch_add(1, std::memory_order_relaxed);
+            }
             if (ok) stats_.frames_tx.fetch_add(1, std::memory_order_relaxed);
             else    tx_frames_lost_.fetch_add(1, std::memory_order_relaxed);
             // Bypasses the stage and the pusher, so log it here or its seq
@@ -893,6 +1005,17 @@ void BridgeMode::txThread() {
         }
         if (stage.empty()) stage_started_ = std::chrono::steady_clock::now();
         stage.insert(stage.end(), iq_hw.begin(), iq_hw.end());
+        // The staging buffer must never exceed one radio buffer; if it does,
+        // txPush will silently truncate it. The flush above guarantees this,
+        // and this is the guard that says so out loud if it ever stops being
+        // true, instead of losing frames quietly the way it used to.
+        if (stage.size() / 2 > tx_capacity) {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true))
+                std::cerr << "[sdr] BUG: TX stage " << (stage.size() / 2)
+                          << " samples exceeds txCapacity " << tx_capacity
+                          << " -- samples would be silently truncated\n";
+        }
     };
 
     bool                  have_pending{false};
@@ -1049,6 +1172,17 @@ void BridgeMode::txThread() {
                                    std::memory_order_relaxed);
         have_pending = false;
     }
+
+    // Anything still in the staging buffer when this thread exits was
+    // modulated and will never be transmitted. It lives only here, so it has
+    // to be accounted for here or the invariant shows an unexplained gap --
+    // which is exactly what it did on the first run with these counters.
+    if (!stage.empty()) {
+        const uint64_t left = stage.size() / 2;
+        tx_dropped_samples_.fetch_add(left, std::memory_order_relaxed);
+        tx_drop_shutdown_  .fetch_add(left, std::memory_order_relaxed);
+        tx_frames_dropped_ .fetch_add(staged_frames, std::memory_order_relaxed);
+    }
 }
 
 // ── Capture thread ───────────────────────────────────────────────────────────
@@ -1082,6 +1216,12 @@ void BridgeMode::captureThread() {
             prev_iter = now2;
         }
 
+        if (n > 0) {
+            rx_pulled_samples_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+            rx_pulls_.fetch_add(1, std::memory_order_relaxed);
+            if (n < cfg_.rx_buffer_samples)
+                rx_pulls_short_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (n <= 0) continue;
         buf.resize(static_cast<size_t>(n) * 2);
 
