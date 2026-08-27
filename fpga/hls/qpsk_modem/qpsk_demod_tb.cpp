@@ -96,8 +96,14 @@ int runVector(const std::string& dir, const std::string& name) {
                 (unsigned)ap_uint<32>(locks).to_uint());
 
     if (got.empty()) { std::printf("             FAIL: no output at all\n"); return 1; }
-    // Bit-exact requirement: a long uninterrupted run of correct bytes.
-    const size_t need = want.size() / 2;
+    // Bit-exact requirement.
+    //
+    // The matched filter needs NTAPS/sps symbols of history before its output
+    // is meaningful, so the first few bytes are fill and cannot match. Allow
+    // exactly that much and require every remaining byte to be correct --
+    // "most of them" is not a correctness gate.
+    const size_t kFill = 4;                       // ~49/4 symbols = 3 bytes, +1
+    const size_t need = (want.size() > kFill) ? want.size() - kFill : want.size();
     if (m.run < need) {
         std::printf("             FAIL: longest exact run %zu < required %zu\n", m.run, need);
         return 1;

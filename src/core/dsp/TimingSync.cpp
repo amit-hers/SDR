@@ -18,7 +18,7 @@ static inline std::complex<float> from_lc(liquid_float_complex lc) {
 TimingSync::TimingSync(int sps) : sps_(sps) {
     sync_ = symsync_crcf_create_rnyquist(
         LIQUID_FIRFILT_RRC, static_cast<unsigned>(sps_),
-        RRC_TAPS, RRC_ROLLOFF, 32);
+        RRC_SPAN_SYMS, RRC_ROLLOFF, 32);
     if (!sync_)
         throw std::runtime_error("TimingSync: symsync_crcf_create failed");
     symsync_crcf_set_lf_bw(sync_, 0.02f);

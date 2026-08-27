@@ -13,13 +13,17 @@ source [file join [file dirname [info script]] .. common.tcl]
 
 set project_name "qpsk_modem"
 open_project -reset $project_name
-add_files qpsk_modem.cpp
 
 set_top qpsk_demod_top
 # The testbench drives the core with IQ from the validated host TX path and
 # requires the transmitted bytes back. Run before synthesis: a core that does
 # not compute the right answer is not worth scheduling.
-add_files -tb qpsk_demod_tb.cpp -cflags "-I../vectors"
+# SDR_HLS_BYPASS lets a bring-up run isolate a stage, e.g.
+#   SDR_HLS_BYPASS="-DSDR_BYPASS_TIMING=1 -DSDR_BYPASS_COSTAS=1"
+set bypass ""
+if {[info exists ::env(SDR_HLS_BYPASS)]} { set bypass $::env(SDR_HLS_BYPASS) }
+add_files qpsk_modem.cpp -cflags $bypass
+add_files -tb qpsk_demod_tb.cpp -cflags "-I../vectors $bypass"
 sdr_solution "solution_demod"
 # csim runs several directories below the core, so hand the testbench an
 # absolute path rather than a relative one that silently resolves nowhere.

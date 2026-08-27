@@ -11,6 +11,7 @@
 //   <name>.bits  expected payload bytes -- what the demodulator must recover
 //   <name>.meta  human-readable description
 #include "sdr/modem/SplitModem.hpp"
+#include "sdr/modem/Modem.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/framing/Frame.hpp"
 #include "sdr/framing/Framer.hpp"
@@ -93,20 +94,25 @@ int main(int argc, char** argv) {
     std::mt19937 rng(0xC0FFEE);
     for (auto& b : payload) b = static_cast<uint8_t>(rng() & 0xFF);
 
-    Framer framer;
-    std::vector<uint8_t> frame = framer.encode(payload.data(), payload.size(),
-                                               0, ModCode::QPSK,
-                                               BwCode::BW_2P5, 1, 0,
-                                               nullptr, nullptr);
+    // A PURE QPSK waveform, deliberately not a full frame.
+    //
+    // SplitModem modulates the 50-byte acquisition section (preamble + sync +
+    // header) as BPSK and only the payload as QPSK -- one bit per symbol then
+    // two. Feeding that to a pure-QPSK demodulator cannot produce a bit-exact
+    // match at any alignment, because the bits-per-symbol changes partway
+    // through the waveform. That is a property of the stimulus, not a fault in
+    // the core, and it is what an earlier version of this generator got wrong.
+    //
+    // qpsk_demod_top demodulates QPSK, so it is given QPSK.
+    Modem qpsk(ModScheme::QPSK);
     std::vector<std::complex<float>> syms, shaped;
-    SplitModem::modulate(frame, ModCode::QPSK, syms);
+    qpsk.modulate(payload.data(), static_cast<int>(payload.size()), syms);
     RRCInterp interp(RRC_SPS);
     interp.process(syms, shaped);
+    const std::vector<uint8_t>& frame = payload;
 
-    // The demodulator recovers the wire bytes, preamble included -- it has no
-    // framing. Expect exactly what the modulator was given.
     writeVector(dir, "clean", shaped, frame,
-                "host SplitModem+RRCInterp, QPSK, no impairment");
+                "host Modem(QPSK)+RRCInterp, pure QPSK, no impairment");
 
     auto impaired = shaped;
     // 200 Hz at 8 MS/s, and 25 dB SNR: both well inside what the live link

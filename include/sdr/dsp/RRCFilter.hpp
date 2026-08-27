@@ -15,6 +15,23 @@ static constexpr float RRC_ROLLOFF = 0.35f;
 static constexpr double RRC_OCCUPIED_BW_FACTOR = 1.4;
 static constexpr int   RRC_TAPS    = 32;
 
+// Symbols of pulse span on EACH side of centre -- liquid's `m` parameter.
+// Total prototype length is 2*sps*m + 1.
+//
+// This is deliberately separate from RRC_TAPS, which this codebase uses with
+// two different meanings: RRCInterp/RRCDecim/TimingSync pass it to liquid as
+// `m` (so it meant a 64-symbol span, 257 taps), while FixedTimingSync computes
+// `RRC_TAPS / sps` and treats it as a tap count (an 8-symbol span). The
+// receive path has therefore always matched-filtered with span 8 against a
+// span-64 transmit pulse, and still recovered 95% of frames -- the extra
+// transmit span was doing nothing.
+//
+// 6 is chosen so the matched filter is implementable in fabric: 2*4*6+1 = 49
+// taps, against 257 for m=32. A fully unrolled complex FIR at II=1 costs two
+// multiplies per tap, so 257 taps needs 514 DSP48 slices and a Zynq-7020 has
+// 220. 49 taps needs 98 and fits.
+static constexpr int   RRC_SPAN_SYMS = 6;
+
 class RRCInterp {
 public:
     explicit RRCInterp(int sps = RRC_SPS);

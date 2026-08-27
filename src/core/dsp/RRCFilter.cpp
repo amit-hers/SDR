@@ -21,7 +21,7 @@ static inline std::complex<float> from_lc(liquid_float_complex lc) {
 RRCInterp::RRCInterp(int sps) : sps_(sps) {
     interp_ = firinterp_crcf_create_prototype(
         LIQUID_FIRFILT_RRC, static_cast<unsigned>(sps_),
-        RRC_TAPS, RRC_ROLLOFF, 0.f);
+        RRC_SPAN_SYMS, RRC_ROLLOFF, 0.f);
     if (!interp_)
         throw std::runtime_error("RRCInterp: firinterp_crcf_create_prototype failed");
 }
@@ -56,7 +56,7 @@ void RRCInterp::reset() {
 RRCDecim::RRCDecim(int sps) : sps_(sps), buf_(static_cast<size_t>(sps)) {
     decim_ = firdecim_crcf_create_prototype(
         LIQUID_FIRFILT_RRC, static_cast<unsigned>(sps_),
-        RRC_TAPS, RRC_ROLLOFF, 0.f);
+        RRC_SPAN_SYMS, RRC_ROLLOFF, 0.f);
     if (!decim_)
         throw std::runtime_error("RRCDecim: firdecim_crcf_create_prototype failed");
 }

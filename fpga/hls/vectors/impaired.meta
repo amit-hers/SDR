@@ -1,5 +1,5 @@
 same waveform, +200 Hz CFO, 25 dB SNR
-samples=6016
-expect_bytes=326
+samples=4096
+expect_bytes=256
 sps=4
 tx_scale=8192
