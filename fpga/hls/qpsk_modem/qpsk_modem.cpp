@@ -41,6 +41,13 @@
  */
 typedef ap_fixed<16, 1>  fixp_t;    /* [-1, 1) normalized sample */
 typedef ap_fixed<32, 2>  acc_t;     /* accumulator for FIR       */
+/* Carrier phase, in radians.
+ *
+ * Needs at least +-pi = 3.14159, which acc_t (ap_fixed<32,2>, range [-2,2))
+ * cannot represent -- the Costas accumulator saturated at 1.99999 and stopped
+ * tracking, so the loop never actually rotated anything. Four integer bits
+ * give [-8,8): room for +-pi plus the overshoot before wrapping. */
+typedef ap_fixed<32, 4>  phase_t;
 typedef ap_uint<8>        byte_t;
 
 /* ── AXI4-Stream types ──────────────────────────────────────────── */
@@ -86,11 +93,6 @@ static bool rrc_filter_decim(fixp_t i_in, fixp_t q_in,
     static fixp_t delay_q[NTAPS];
 #pragma HLS ARRAY_PARTITION variable=delay_i complete
 #pragma HLS ARRAY_PARTITION variable=delay_q complete
-    /* Three bits, not two. This counts UP TO SPS (4) and is compared against
-     * it: an ap_uint<2> saturates the comparison at 3, `phase < 4` is then
-     * always true, and this function always returned false -- which made the
-     * whole demodulator chain downstream of it dead code. */
-    static ap_uint<3> phase = 0;  /* counts 1..SPS */
 
     /* Shift register */
     for (int k = NTAPS-1; k > 0; k--) {
@@ -101,11 +103,20 @@ static bool rrc_filter_decim(fixp_t i_in, fixp_t q_in,
     delay_i[0] = i_in;
     delay_q[0] = q_in;
 
-    phase++;
-    if (phase < 4) return false;
-    phase = 0;
-
-    /* FIR: fully unrolled → single-cycle multiply-accumulate */
+    /* No decimation here.
+     *
+     * This used to drop 3 of every 4 samples on a fixed phase, and
+     * timing_recovery below then decimated by 4 again -- 16x total against a
+     * symbol rate that is only 4x the sample rate. Measured in C simulation:
+     * 6016 input samples produced 94 output bytes where 376 were expected,
+     * exactly the factor of 4 too few.
+     *
+     * A matched filter belongs at the full sample rate; choosing WHICH sample
+     * represents each symbol is timing recovery's job, and it needs all four
+     * phases to make that choice. Picking a fixed phase here both broke the
+     * rate and denied the timing loop the samples it exists to compare.
+     *
+     * FIR: fully unrolled → single-cycle multiply-accumulate */
     acc_t acc_i = 0, acc_q = 0;
     for (int k = 0; k < NTAPS; k++) {
 #pragma HLS UNROLL
@@ -159,25 +170,35 @@ static ap_uint<2> qpsk_decision(fixp_t i, fixp_t q)
 static void costas_loop(fixp_t& i, fixp_t& q)
 {
 #pragma HLS INLINE
-    static acc_t phase = 0;
-    static acc_t freq  = 0;
-    const acc_t Kp = acc_t(0.04f);
-    const acc_t Ki = acc_t(0.001f);
+    static phase_t phase = 0;
+    static phase_t freq  = 0;
+    const phase_t Kp = phase_t(0.04f);
+    const phase_t Ki = phase_t(0.001f);
 
     /* Rotate input by -phase */
-    acc_t cos_p = hls::cos(phase);
-    acc_t sin_p = hls::sin(phase);
+    acc_t cos_p = hls::cos((acc_t)phase);
+    acc_t sin_p = hls::sin((acc_t)phase);
     acc_t ir =  (acc_t)i * cos_p + (acc_t)q * sin_p;
     acc_t qr = -(acc_t)i * sin_p + (acc_t)q * cos_p;
 
-    /* Phase error */
-    fixp_t si = (ir >= acc_t(0)) ? fixp_t(1.0f) : fixp_t(-1.0f);
-    fixp_t sq = (qr >= acc_t(0)) ? fixp_t(1.0f) : fixp_t(-1.0f);
-    acc_t err = (acc_t)sq * ir - (acc_t)si * qr;
+    /* Phase error, decision-directed. The +-1 decisions are held in acc_t:
+     * fixp_t is ap_fixed<16,1> with range [-1,1), so fixp_t(1.0f) is not
+     * representable and the previous code was feeding the loop a saturated
+     * constant instead of unity. */
+    acc_t si = (ir >= acc_t(0)) ? acc_t(1.0f) : acc_t(-1.0f);
+    acc_t sq = (qr >= acc_t(0)) ? acc_t(1.0f) : acc_t(-1.0f);
+    acc_t err = sq * ir - si * qr;
 
     /* 2nd order loop filter */
-    freq  = freq  + Ki * err;
-    phase = phase + Kp * err + freq;
+    freq  = freq  + (phase_t)(Ki * err);
+    phase = phase + (phase_t)(Kp * err) + freq;
+
+    /* Wrap to [-pi, pi]. Without this the accumulator walks off regardless of
+     * how many integer bits it has, and hls::cos/sin lose meaning. */
+    const phase_t PI  = phase_t(3.14159265f);
+    const phase_t TAU = phase_t(6.28318531f);
+    if (phase >  PI) phase -= TAU;
+    if (phase < -PI) phase += TAU;
 
     i = (fixp_t)ir;
     q = (fixp_t)qr;
@@ -259,9 +280,20 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 
     IQSample in = s_axis_iq.read();
 
-    /* Scale int16 → Q1.15 */
-    fixp_t i = fixp_t(in.i) / fixp_t(32768);
-    fixp_t q = fixp_t(in.q) / fixp_t(32768);
+    /* Reinterpret int16 as Q1.15.
+     *
+     * This was `fixp_t(in.i) / fixp_t(32768)`, which divides by zero on every
+     * single sample: fixp_t is ap_fixed<16,1> with range [-1,1), so the
+     * literal 32768 is not representable and wraps to exactly 0. C simulation
+     * dies with SIGFPE on the first sample -- the core had never been run.
+     *
+     * An int16 and a Q1.15 fixed-point value have identical bit patterns, so
+     * the conversion is a reinterpretation, not an arithmetic operation. This
+     * is both correct and free in hardware, where the divide would otherwise
+     * have inferred a divider. */
+    fixp_t i, q;
+    i.range(15, 0) = in.i.range(15, 0);
+    q.range(15, 0) = in.q.range(15, 0);
 
     /* AGC */
     agc(i, q);

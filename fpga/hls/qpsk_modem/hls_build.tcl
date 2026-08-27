@@ -16,7 +16,15 @@ open_project -reset $project_name
 add_files qpsk_modem.cpp
 
 set_top qpsk_demod_top
+# The testbench drives the core with IQ from the validated host TX path and
+# requires the transmitted bytes back. Run before synthesis: a core that does
+# not compute the right answer is not worth scheduling.
+add_files -tb qpsk_demod_tb.cpp -cflags "-I../vectors"
 sdr_solution "solution_demod"
+# csim runs several directories below the core, so hand the testbench an
+# absolute path rather than a relative one that silently resolves nowhere.
+set vec_dir [file normalize [file join [file dirname [info script]] .. vectors]]
+csim_design -argv $vec_dir
 csynth_design
 sdr_export "QPSK Demodulator (RRC + AGC + Timing + Costas)" "2.0"
 

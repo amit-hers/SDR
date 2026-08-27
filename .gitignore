@@ -67,3 +67,4 @@ fpga/hls/rssi_meter/rssi_meter/
 fpga/hls/gain_block/gain_block/
 fpga/hls/sync_detector/sync_detector/
 fpga/hls/qpsk_modem/qpsk_modem/
+baselines/
