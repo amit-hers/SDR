@@ -13,6 +13,7 @@
 #include "sdr/modem/SplitModem.hpp"
 #include "sdr/dsp/RRCFilter.hpp"
 #include "sdr/framing/Frame.hpp"
+#include "sdr/framing/Framer.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>

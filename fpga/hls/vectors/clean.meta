@@ -1,0 +1,5 @@
+host SplitModem+RRCInterp, QPSK, no impairment
+samples=6016
+expect_bytes=326
+sps=4
+tx_scale=8192
