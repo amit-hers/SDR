@@ -63,13 +63,31 @@ void gain_block_top(
     static ap_uint<32> clips = 0;
     static ap_uint<32> gates = 0;
 
+    // AXI-Lite control registers are `volatile ap_uint<N>&`, and clang-16
+    // (Vitis HLS 2026.1) no longer converts those implicitly to bool:
+    //   ERROR: [HLS 207-4589] no viable conversion from 'volatile ap_uint<1>' to 'bool'
+    // Sampling each register once into a local is both the fix and the
+    // better hardware: a volatile reference re-reads the register on every
+    // access, so a control value could otherwise change midway through the
+    // computation it is steering.
+    // Copy out of the volatile reference FIRST, then test the copy. Comparing
+    // the volatile operand directly still fails:
+    //   ERROR: [HLS 207-4572] invalid operands to binary expression
+    //                         ('volatile ap_uint<1>' and 'int')
+    // ap_int_base has a volatile-aware copy constructor but no volatile
+    // comparison operators, so the copy is what makes this legal.
+    const ap_uint<1>  en_raw  = enabled;
+    const ap_uint<13> gain_l  = gain_q12;
+    const ap_uint<16> limit_l = amp_limit;
+    const bool        en_l    = (en_raw != 0);
+
     if (s_axis_iq.empty()) return;
 
     IQSample in  = s_axis_iq.read();
     IQSample out = in;   // default: pass through
 
-    if (enabled) {
-        ap_uint<16> limit = amp_limit;
+    if (en_l) {
+        ap_uint<16> limit = limit_l;
 
         // PA safety gate: if either I or Q exceeds limit, zero the sample
         ap_uint<16> abs_i = (in.i < 0) ? (ap_uint<16>)(-in.i) : (ap_uint<16>)in.i;

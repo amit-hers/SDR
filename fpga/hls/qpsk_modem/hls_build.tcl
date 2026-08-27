@@ -1,33 +1,29 @@
+# qpsk_modem -- Vitis HLS build for the Zynq-7000 in the PlutoSDR.
+#
+# Run with (2026.1 retired the standalone `vivado_hls` command):
+#
+#     fpga/hls/build.sh qpsk_modem
+#
+# or directly:
+#
+#     source <install>/Vitis/settings64.sh
+#     vitis-run --mode hls --tcl fpga/hls/qpsk_modem/hls_build.tcl
+
+source [file join [file dirname [info script]] .. common.tcl]
+
 set project_name "qpsk_modem"
-set part         "xc7z020clg400-2"
-set clock_ns     5
+open_project -reset $project_name
+add_files qpsk_modem.cpp
 
-open_project   $project_name
-
-# Both RX demod and TX mod share the same file
-add_files      qpsk_modem.cpp
-
-# Build demod first
-set_top        qpsk_demod_top
-open_solution  "solution_demod"
-set_part       $part
-create_clock   -period $clock_ns -name default
-config_interface -trim_dangling_ports
+set_top qpsk_demod_top
+sdr_solution "solution_demod"
 csynth_design
-export_design -format ip_catalog \
-    -description "QPSK Demodulator (RRC + AGC + Timing + Costas)" \
-    -vendor "sdr-link" -library "dsp" -version "2.0"
+sdr_export "QPSK Demodulator (RRC + AGC + Timing + Costas)" "2.0"
 
-# Build mod
-set_top        qpsk_mod_top
-open_solution  "solution_mod"
-set_part       $part
-create_clock   -period $clock_ns -name default
-config_interface -trim_dangling_ports
+set_top qpsk_mod_top
+sdr_solution "solution_mod"
 csynth_design
-export_design -format ip_catalog \
-    -description "QPSK/BPSK Modulator (RRC polyphase interpolation)" \
-    -vendor "sdr-link" -library "dsp" -version "2.0"
+sdr_export "QPSK/BPSK Modulator (RRC polyphase interpolation)" "2.0"
 
-puts "Demod IP → ./${project_name}/solution_demod/impl/ip/"
-puts "Mod   IP → ./${project_name}/solution_mod/impl/ip/"
+puts "qpsk_modem/qpsk_demod_top IP -> ./${project_name}/solution_demod/impl/ip/"
+puts "qpsk_modem/qpsk_mod_top IP -> ./${project_name}/solution_mod/impl/ip/"

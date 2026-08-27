@@ -72,6 +72,17 @@ public:
     virtual bool sendFrame(const uint8_t* payload, size_t len,
                            uint8_t flags, uint32_t seq) = 0;
 
+    // Send anything the PHY is holding back, now.
+    //
+    // A PHY batches frames so each transmission is worth its fixed overhead,
+    // and it cannot tell "more frames are coming in a moment" from "the
+    // offered traffic has stopped" -- only the caller knows that. So the
+    // caller says. Without this the PHY has to guess from its own queue
+    // depth, which under load looks idle every few milliseconds and produces
+    // half-filled bursts: measured 3.66 frames per burst instead of 6.4, and
+    // the peer then sees twice as many half-length windows.
+    virtual void flushPending() = 0;
+
     // Decoded frames, delivered as they arrive. Called on the PHY's own
     // thread; the callee must not block it.
     using FrameHandler = std::function<void(const DecodedFrame&)>;
@@ -93,6 +104,10 @@ public:
         // Link traffic, so the DTC scaling claim is measured and not assumed.
         uint64_t host_link_tx_bytes {0};
         uint64_t host_link_rx_bytes {0};
+        // Cumulative seconds of signal actually radiated. The daemon takes
+        // the delta per tick to get live duty; only the PHY can know it,
+        // since only the PHY knows how many samples reached the air.
+        double   air_seconds {0.0};
         float    tx_duty_pct {0.f};
         float    snr_db {0.f};
         float    rssi_dbm {0.f};

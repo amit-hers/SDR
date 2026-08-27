@@ -1,16 +1,23 @@
-set project_name "sync_detector"
-set part         "xc7z020clg400-2"
-set clock_ns     5
+# sync_detector -- Vitis HLS build for the Zynq-7000 in the PlutoSDR.
+#
+# Run with (2026.1 retired the standalone `vivado_hls` command):
+#
+#     fpga/hls/build.sh sync_detector
+#
+# or directly:
+#
+#     source <install>/Vitis/settings64.sh
+#     vitis-run --mode hls --tcl fpga/hls/sync_detector/hls_build.tcl
 
-open_project   $project_name
-set_top        sync_detector_top
-add_files      sync_detector.cpp
-open_solution  "solution1"
-set_part       $part
-create_clock   -period $clock_ns -name default
-config_interface -trim_dangling_ports
+source [file join [file dirname [info script]] .. common.tcl]
+
+set project_name "sync_detector"
+open_project -reset $project_name
+add_files sync_detector.cpp
+
+set_top sync_detector_top
+sdr_solution "solution1"
 csynth_design
-export_design -format ip_catalog \
-    -description "Frame Sync Word Correlator (0xC0FFEE77)" \
-    -vendor "sdr-link" -library "dsp" -version "1.0"
-puts "sync_detector IP → ./${project_name}/solution1/impl/ip/"
+sdr_export "Frame sync-word detector" "1.0"
+
+puts "sync_detector/sync_detector_top IP -> ./${project_name}/solution1/impl/ip/"

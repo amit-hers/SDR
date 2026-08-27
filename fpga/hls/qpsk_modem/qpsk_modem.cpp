@@ -86,7 +86,11 @@ static bool rrc_filter_decim(fixp_t i_in, fixp_t q_in,
     static fixp_t delay_q[NTAPS];
 #pragma HLS ARRAY_PARTITION variable=delay_i complete
 #pragma HLS ARRAY_PARTITION variable=delay_q complete
-    static ap_uint<2> phase = 0;  /* counts 0..SPS-1 */
+    /* Three bits, not two. This counts UP TO SPS (4) and is compared against
+     * it: an ap_uint<2> saturates the comparison at 3, `phase < 4` is then
+     * always true, and this function always returned false -- which made the
+     * whole demodulator chain downstream of it dead code. */
+    static ap_uint<3> phase = 0;  /* counts 1..SPS */
 
     /* Shift register */
     for (int k = NTAPS-1; k > 0; k--) {
@@ -188,7 +192,9 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out)
     static fixp_t i_prev = 0, q_prev = 0;
     static fixp_t i_mid  = 0, q_mid  = 0;
     static acc_t  tau    = 0;
-    static ap_uint<2> cnt = 0;
+    /* Three bits for the same reason as `phase` in rrc_filter_decim: `cnt < 4`
+     * can never be false for an ap_uint<2>, so this returned false forever. */
+    static ap_uint<3> cnt = 0;
     const acc_t Kt = acc_t(0.01f);
 
     cnt++;
@@ -238,8 +244,18 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 
     static ap_uint<32> locks = 0;
 
+    // AXI-Lite control registers are `volatile ap_uint<N>&`, and clang-16
+    // (Vitis HLS 2026.1) no longer converts those implicitly to bool:
+    //   ERROR: [HLS 207-4589] no viable conversion from 'volatile ap_uint<1>' to 'bool'
+    // Sampling each register once into a local is both the fix and the
+    // better hardware: a volatile reference re-reads the register on every
+    // access, so a control value could otherwise change midway through the
+    // computation it is steering.
+    const ap_uint<1> demod_raw = demod_enabled;   // copy out of volatile first
+    const bool       demod_en  = (demod_raw != 0);
+
     if (s_axis_iq.empty()) return;
-    if (!demod_enabled)   { s_axis_iq.read(); return; }  // drain + suppress
+    if (!demod_en)        { s_axis_iq.read(); return; }  // drain + suppress
 
     IQSample in = s_axis_iq.read();
 
@@ -264,9 +280,26 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
     /* QPSK symbol decision */
     ap_uint<2> sym = qpsk_decision(ti, tq);
 
-    /* Pack two symbols into one output byte (4 symbols = 1 byte) */
-    static ap_uint<4> bit_acc = 0;
-    static ap_uint<2> sym_cnt = 0;
+    /* Pack four 2-bit symbols into one output byte.
+     *
+     * Both widths here were wrong, and together they silently removed the
+     * entire output path:
+     *
+     *   sym_cnt was ap_uint<2>, which counts 0,1,2,3,0,... and can never
+     *   equal 4. The comparison below was therefore always false, the write
+     *   to m_axis_bits was unreachable, and HLS eliminated it -- leaving
+     *   'Port m_axis_bits_TDATA has no fanin or fanout' and a top function
+     *   reported as having no outputs. The core synthesised and exported IP
+     *   that could never emit a bit.
+     *
+     *   bit_acc was ap_uint<4>, which holds two symbols, not the four the
+     *   comment describes. Even had the counter worked, half of every byte
+     *   would have been shifted out and lost.
+     *
+     * sym_cnt needs three bits to hold the value 4 at all.
+     */
+    static ap_uint<8> bit_acc = 0;
+    static ap_uint<3> sym_cnt = 0;
 
     bit_acc = (bit_acc << 2) | sym;
     sym_cnt++;
@@ -307,6 +340,18 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
 #pragma HLS ARRAY_PARTITION variable=tx_delay_q complete
     static ap_uint<2> phase = 0;   // current sub-filter phase (0..3)
 
+    // AXI-Lite control registers are `volatile ap_uint<N>&`, and clang-16
+    // (Vitis HLS 2026.1) no longer converts those implicitly to bool:
+    //   ERROR: [HLS 207-4589] no viable conversion from 'volatile ap_uint<1>' to 'bool'
+    // Sampling each register once into a local is both the fix and the
+    // better hardware: a volatile reference re-reads the register on every
+    // access, so a control value could otherwise change midway through the
+    // computation it is steering.
+    const ap_uint<1> tx_raw   = enabled;     // copy out of volatile first;
+    const ap_uint<2> bpsk_raw = bpsk_mode;   // ap_uint has no volatile compare
+    const bool       tx_en    = (tx_raw   != 0);
+    const bool       bpsk_en  = (bpsk_raw != 0);
+
     // When no input is ready, output zero (keeps DMA happy)
     if (s_axis_bits.empty()) {
         // Drain sub-filters with zeros until phase rolls over
@@ -322,7 +367,7 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
             ap_uint<2> bits = (in.data >> (6 - sym*2)) & 0x3;
             fixp_t i_sym, q_sym;
 
-            if (bpsk_mode) {
+            if (bpsk_en) {
                 // BPSK: I = ±1, Q = 0
                 i_sym = bits[1] ? fixp_t(-1.0f) : fixp_t(1.0f);
                 q_sym = fixp_t(0.0f);
@@ -352,8 +397,8 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
                     acc_q += (acc_t)(tx_delay_q[t] * RRC_H[t]);
                 }
                 IQSample out;
-                out.i    = enabled ? (ap_int<16>)((fixp_t)acc_i * fixp_t(32767)) : ap_int<16>(0);
-                out.q    = enabled ? (ap_int<16>)((fixp_t)acc_q * fixp_t(32767)) : ap_int<16>(0);
+                out.i    = tx_en ? (ap_int<16>)((fixp_t)acc_i * fixp_t(32767)) : ap_int<16>(0);
+                out.q    = tx_en ? (ap_int<16>)((fixp_t)acc_q * fixp_t(32767)) : ap_int<16>(0);
                 out.last = (sym == 3 && k == 3 && in.last) ? 1 : 0;
                 m_axis_iq.write(out);
             }

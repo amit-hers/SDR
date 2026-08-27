@@ -59,3 +59,11 @@ __pycache__/
 # ── OS ────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# Vitis HLS build output (project dirs are named after the core, plus logs)
+fpga/hls/*/logs/
+fpga/hls/*/vitis-run.log
+fpga/hls/rssi_meter/rssi_meter/
+fpga/hls/gain_block/gain_block/
+fpga/hls/sync_detector/sync_detector/
+fpga/hls/qpsk_modem/qpsk_modem/

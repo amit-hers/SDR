@@ -22,6 +22,7 @@ add_library(sdr_core STATIC
     transport/UDPSocket.cpp
     stats/LinkStats.cpp
     stats/StageProfiler.cpp
+    phy/SoftwarePhy.cpp
 )
 
 target_include_directories(sdr_core

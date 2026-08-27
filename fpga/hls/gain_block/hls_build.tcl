@@ -1,16 +1,23 @@
-set project_name "gain_block"
-set part         "xc7z020clg400-2"
-set clock_ns     5
+# gain_block -- Vitis HLS build for the Zynq-7000 in the PlutoSDR.
+#
+# Run with (2026.1 retired the standalone `vivado_hls` command):
+#
+#     fpga/hls/build.sh gain_block
+#
+# or directly:
+#
+#     source <install>/Vitis/settings64.sh
+#     vitis-run --mode hls --tcl fpga/hls/gain_block/hls_build.tcl
 
-open_project   $project_name
-set_top        gain_block_top
-add_files      gain_block.cpp
-open_solution  "solution1"
-set_part       $part
-create_clock   -period $clock_ns -name default
-config_interface -trim_dangling_ports
+source [file join [file dirname [info script]] .. common.tcl]
+
+set project_name "gain_block"
+open_project -reset $project_name
+add_files gain_block.cpp
+
+set_top gain_block_top
+sdr_solution "solution1"
 csynth_design
-export_design -format ip_catalog \
-    -description "Digital Gain / PA Safety Gate" \
-    -vendor "sdr-link" -library "dsp" -version "1.0"
-puts "gain_block IP → ./${project_name}/solution1/impl/ip/"
+sdr_export "Digital gain / PA gate" "1.0"
+
+puts "gain_block/gain_block_top IP -> ./${project_name}/solution1/impl/ip/"

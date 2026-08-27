@@ -52,8 +52,11 @@ void rssi_meter_top(
 #pragma HLS INTERFACE s_axilite   port=return       bundle=ctrl
 #pragma HLS PIPELINE II=1
 
-    // Use DSP48 for multiplications
-#pragma HLS BIND_OP variable=return op=mul impl=dsp
+    // No `#pragma HLS BIND_OP variable=return`. bind_op targets a
+    // variable, and 2026.1 rejects a function return outright:
+    //   ERROR: [HLS 207-6955] Bind_op should not be applied on return/function
+    // Multipliers map to DSP48 by inference anyway, so the pragma was
+    // asking for the default while making the design unsynthesisable.
 
     static ap_uint<32> accum    = 0;
     static ap_uint<32> peak     = 0;

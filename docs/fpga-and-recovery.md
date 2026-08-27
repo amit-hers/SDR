@@ -14,14 +14,47 @@ Vivado toolchain, boot chain, and risk of rendering a device unbootable.
 - timing-synchronizer RTL and test bench;
 - experimental analysis scripts and JTAG configuration.
 
-Typical HLS entry points are the `hls_build.tcl` files:
+Build the HLS cores with the wrapper, which sources the Vitis environment,
+points HLS at Vivado for IP packaging, and warns about the two things a bare
+install is missing:
 
 ```bash
-vivado_hls -f fpga/hls/rssi_meter/hls_build.tcl
-vivado_hls -f fpga/hls/gain_block/hls_build.tcl
-vivado_hls -f fpga/hls/sync_detector/hls_build.tcl
-vivado_hls -f fpga/hls/qpsk_modem/hls_build.tcl
+fpga/hls/build.sh                 # every core
+fpga/hls/build.sh qpsk_modem      # just one
 ```
+
+`vivado_hls` was retired; 2026.1 runs HLS through `vitis-run --mode hls`. To
+drive it directly:
+
+```bash
+source /home/amither/Documents/vivado/2026.1/Vitis/settings64.sh
+cd fpga/hls/rssi_meter && vitis-run --mode hls --tcl hls_build.tcl
+```
+
+Part and clock come from `fpga/hls/common.tcl` and can be overridden per run:
+
+| variable | default | note |
+|---|---|---|
+| `SDR_HLS_PART` | `xc7z020clg400-2` | the HamGeek Pluto+. A base ADALM-Pluto is `xc7z010clg400-1` and is **not** interchangeable |
+| `SDR_HLS_CLOCK` | `5` | ns, i.e. 200 MHz |
+| `XILINX_VITIS` | the 2026.1 install | point at another toolchain |
+
+### Two things a stock install still needs
+
+Verified on 2026.1: the scripts run, the tool executes every command through
+`set_part`, and then stops on both of these. Neither is a project problem.
+
+1. **Zynq-7000 device data.** `data/parts/xilinx/` ships artix7, kintex7,
+   spartan*, versal and virtex* but no zynq, so `xc7z020clg400-2` is unknown.
+   Re-run the AMD installer and tick Devices > SoCs > Zynq-7000.
+2. **A licence.** `ERROR: Vivado Design Suite cannot be launched because a
+   valid license was not found.` Zynq-7020 is covered by the free Vivado ML
+   Standard licence; generate one and place it at `~/.Xilinx/Xilinx.lic`, or
+   set `XILINXD_LICENSE_FILE`.
+
+`build.sh` checks for both up front and says so in one sentence each, because
+otherwise they surface as `[HLS 200-1023] Part ... is not supported`, which
+reads like a bad part number rather than a missing install.
 
 Tool versions, part numbers, IP catalog paths, and address assignments are
 encoded in the TCL and source files; inspect them before synthesis. The host
