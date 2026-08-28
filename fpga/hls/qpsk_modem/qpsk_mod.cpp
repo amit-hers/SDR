@@ -15,7 +15,21 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
 #pragma HLS INTERFACE s_axilite  port=enabled    offset=0x10 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=bpsk_mode  offset=0x14 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=return     bundle=ctrl
-#pragma HLS PIPELINE II=1
+/* No function-level PIPELINE II=1.
+ *
+ * That directive forces every loop below it to unroll completely, which
+ * replicated the pulse-shaping FIR 4 symbols x 4 phases over: 4*4*13*2 = 416
+ * multipliers, 224 of them mapped to DSP48s. On a 7z020 that is 101% of the
+ * device for the modulator alone, and the integrated design failed placement
+ * with "requires 322 DSP48E1 cells but only 220 are available".
+ *
+ * The throughput it bought was never needed. One call consumes a byte and
+ * emits SPS*4 = 16 samples, and the radio needs one sample per l_clk, so 16
+ * cycles per byte is exactly right. Rolling the symbol and phase loops lets
+ * all 16 outputs share a single 13-tap engine -- 26 multipliers rather than
+ * 416 -- at the same sample rate. The arithmetic is untouched; only the
+ * schedule changes, which is why the C simulation is bit-identical.
+ */
 
     /* RRC TX delay line, at the SYMBOL rate.
      *
@@ -53,7 +67,6 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
 
         /* Unpack byte → 4 QPSK symbols (2 bits each, MSB first) */
         for (int sym = 0; sym < 4; sym++) {
-#pragma HLS UNROLL
             ap_uint<2> bits = (in.data >> (6 - sym*2)) & 0x3;
             fixp_t i_sym, q_sym;
 
@@ -108,8 +121,12 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
              *   Q1.15 and int16 share a bit pattern, so the conversion is a
              *   reinterpretation -- the mirror of the receive-side fix.
              */
+            /* One output sample per iteration, II=1: this is the loop that
+             * sets the sample rate, and the only one that needs to pipeline.
+             * The tap loop inside stays unrolled so each sample is a single
+             * 13-tap multiply-accumulate. */
             for (int k = 0; k < RRC_SPS_HW; k++) {
-#pragma HLS UNROLL
+#pragma HLS PIPELINE II=1
                 acc_t acc_i = 0, acc_q = 0;
                 for (int t = 0; t < TAPS_PER_PHASE; t++) {
 #pragma HLS UNROLL
