@@ -114,6 +114,12 @@ int main(int argc, char** argv) {
     writeVector(dir, "clean", shaped, frame,
                 "host Modem(QPSK)+RRCInterp, pure QPSK, no impairment");
 
+    // Modulator vector: the SAME payload bytes, and the host's shaped IQ as
+    // the reference the fabric modulator must reproduce. Written unimpaired --
+    // a transmitter has no channel to fight.
+    writeVector(dir, "mod_ref", shaped, payload,
+                "host Modem(QPSK)+RRCInterp reference output for the modulator");
+
     auto impaired = shaped;
     // 200 Hz at 8 MS/s, and 25 dB SNR: both well inside what the live link
     // shows (measured residual CFO ~0.002 rad/sym, SNR ~35 dB), so a
@@ -121,5 +127,38 @@ int main(int argc, char** argv) {
     impair(impaired, 2.0 * M_PI * 200.0 / (2.0e6 * RRC_SPS), 25.0, 12345);
     writeVector(dir, "impaired", impaired, frame,
                 "same waveform, +200 Hz CFO, 25 dB SNR");
+
+    // A vector that actually exercises carrier recovery.
+    //
+    // "impaired" does not. Its 200 Hz is 6.3e-4 rad/symbol, which is BELOW the
+    // ~0.002 rad/sym residual the live link measures and some fifty times
+    // below the loop's own natural frequency -- the Costas loop barely has to
+    // move. Measured directly: four different Kp/Ki pairs, spanning a 2x range
+    // in both gains, all recover 253 of 256 bytes on it. A vector that cannot
+    // tell those apart cannot detect a carrier-loop regression either.
+    //
+    // 1600 Hz is 0.005027 rad/symbol: 8x the live residual, and the operating
+    // point was chosen by measurement rather than by taste. Sweeping CFO with
+    // the integrator disabled (a 1st-order loop, which tracks a frequency
+    // offset only at a standing phase error) gives, over five noise seeds:
+    //
+    //     cfo rad/sym    2nd-order              1st-order
+    //     0.003927       253 every seed         93 253 109 144 109   <- unusable
+    //     0.005027       253 every seed          67  67 109  97  66
+    //
+    // At 1250 Hz the broken loop survives on some noise realisations and not
+    // others, so the vector's verdict would have been a coin toss. At 1600 Hz
+    // the good loop is 253 on every seed and the broken one never clears 110.
+    // That separation, not the raw offset, is what makes this vector worth
+    // running: `clean` and `impaired` both pass a disabled integrator.
+    //
+    // SNR stays at 25 dB deliberately, so CFO is the ONLY difference from
+    // `impaired` and a failure here means carrier tracking and nothing else.
+    // Stacking 20 dB on top was tried and rejected: it made the PASS itself
+    // realisation-dependent (253 bytes on one seed, 244 on another).
+    auto stressed = shaped;
+    impair(stressed, 2.0 * M_PI * 1600.0 / (2.0e6 * RRC_SPS), 25.0, 6789);
+    writeVector(dir, "stress", stressed, frame,
+                "same waveform, +1600 Hz CFO, 25 dB SNR -- carrier-loop stress");
     return 0;
 }

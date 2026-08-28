@@ -1,162 +1,133 @@
-# pluto_sdr_bd.tcl  —  Vivado IP Integrator block diagram for PlutoSDR SDR-Datalink
+# pluto_sdr_bd.tcl -- insert the QPSK modem into ADI's PlutoSDR reference design.
 #
-# Based on ADI HDL reference design for PlutoSDR (analogdevicesinc/hdl, branch main).
-# Inserts four custom HLS IP cores into the existing data path:
+#   git clone https://github.com/analogdevicesinc/hdl
+#   cd hdl/projects/pluto && vivado -mode batch -source system_project.tcl
+#   # then, with the block design open:
+#   source <this-repo>/fpga/bd/pluto_sdr_bd.tcl ; sdr_insert_datalink
 #
-#   RX path:
-#     cf-ad9361-lpc  →  [rssi_meter]  →  [gain_block(RX)]  →  [qpsk_demod]
-#                                     →  [sync_detector]   →  AXI DMA  →  PS DDR
+# This PATCHES ADI's design rather than recreating it. The previous version of
+# this file tried to build the radio path from scratch and got the interface
+# wrong in every particular: axi_ad9361 does not expose AXI4-Stream `adc_data`
+# / `dac_data` interfaces. It presents parallel adc_data_i0/q0 and dac_data_i0
+# /q0, 16 bits each, qualified by adc_valid/adc_enable and dac_valid/dac_enable,
+# in the l_clk domain, and ADI's own design packs them with util_cpack2 into
+# axi_dmac. Everything downstream of that mistake -- the stream connections,
+# the DMA choice, the clocking -- was wrong too.
 #
-#   TX path:
-#     PS DDR  →  AXI DMA  →  [gain_block(TX)]  →  [qpsk_mod]  →  cf-ad9361-dds-core-lpc
+# Verified against analogdevicesinc/hdl main:
+#   projects/pluto/system_bd.tcl, library/axi_ad9361/axi_ad9361.v
 #
-#   AXI4-Lite (all IPs):
-#     PS M_AXI_GP0 → AXI Interconnect → rssi_meter | gain_block_rx | gain_block_tx
-#                                      | qpsk_demod | sync_detector
+# WHAT THIS CHANGES ABOUT THE SYSTEM, deliberately and visibly:
 #
-# Usage:
-#   1. Clone ADI HDL: git clone https://github.com/analogdevicesinc/hdl
-#   2. Open pluto project: cd hdl/projects/pluto && vivado -source system_project.tcl
-#   3. In the TCL console: source <path>/fpga/bd/pluto_sdr_bd.tcl
-#   4. Add each HLS IP to catalog first:
-#        set_property ip_repo_paths {
-#            fpga/hls/rssi_meter/rssi_meter/solution1/impl/ip
-#            fpga/hls/gain_block/gain_block/solution1/impl/ip
-#            fpga/hls/sync_detector/sync_detector/solution1/impl/ip
-#            fpga/hls/qpsk_modem/qpsk_modem/solution_demod/impl/ip
-#            fpga/hls/qpsk_modem/qpsk_modem/solution_mod/impl/ip
-#        } [current_project]
-#        update_ip_catalog
+#   ADI's DMAs carry raw IQ to userspace, which is what libiio's cf-ad9361-lpc
+#   device is. This repurposes both to carry BYTES instead, because the whole
+#   point of putting the modem in fabric is that the ARM should never see IQ:
+#   at 8 MS/s complex 16-bit that is 32 MB/s of DMA and DDR traffic to deliver
+#   0.5 MB/s of payload. The consequence is that the stock IIO buffer interface
+#   no longer yields samples -- userspace reads demodulated bytes. Anything
+#   expecting to capture IQ through libiio needs the raw path restored, so
+#   treat this as a fork of the reference design, not a drop-in addition.
 #
-# AXI4-Lite base addresses (PS GP0 view):
-#   rssi_meter        0x43C0_0000  (4 KB)
-#   gain_block_rx     0x43C1_0000  (4 KB)
-#   gain_block_tx     0x43C2_0000  (4 KB)
-#   qpsk_demod        0x43C3_0000  (4 KB)
-#   sync_detector     0x43C4_0000  (4 KB)
+# CLOCKING: the modem runs in the converter's l_clk domain, where samples
+# already arrive qualified by adc_valid and no crossing is needed. qpsk_demod
+# closes timing at 44.41 MHz, so l_clk MUST stay below that. At this link's
+# 8 MS/s it does, with room to spare; a Pluto reconfigured for 61.44 MS/s
+# would violate it. Check, do not assume.
 #
-# To read from Linux:
-#   devmem2 0x43C00018 w      # read rssi_meter power_accum
-#   devmem2 0x43C40004 w      # read sync_detector match_count
+# Register map added by this script (PS GP0):
+#   qpsk_demod   0x43C0_0000   0x10 enable, 0x18 lock_count (RO), 0x20 soft_reset
+#   qpsk_mod     0x43C1_0000   0x10 enable, 0x14 bpsk_mode
+# ADI's own map is untouched: axi_ad9361 0x7902_0000, DMAs 0x7C40/0x7C42_0000.
 
-proc sdr_create_bd {} {
-    # ── Create top-level BD ───────────────────────────────────────────
-    set bd_name "sdr_datalink_bd"
-    create_bd_design $bd_name
-
-    # ── Zynq PS ───────────────────────────────────────────────────────
-    set zynq [create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 ps7]
-    apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
-        -config {make_external "FIXED_IO, DDR" apply_board_preset "1"} $zynq
-    set_property -dict [list \
-        CONFIG.PCW_USE_M_AXI_GP0 {1} \
-        CONFIG.PCW_USE_S_AXI_HP0 {1} \
-        CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64}] $zynq
-
-    # ── AXI DMA (RX: PS ← FPGA) ──────────────────────────────────────
-    set dma_rx [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_rx]
-    set_property -dict [list \
-        CONFIG.c_include_sg          {0} \
-        CONFIG.c_sg_include_stscntrl_strm {0} \
-        CONFIG.c_include_mm2s        {0} \
-        CONFIG.c_include_s2mm        {1} \
-        CONFIG.c_s2mm_burst_size     {256}] $dma_rx
-
-    # ── AXI DMA (TX: PS → FPGA) ──────────────────────────────────────
-    set dma_tx [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_tx]
-    set_property -dict [list \
-        CONFIG.c_include_sg          {0} \
-        CONFIG.c_sg_include_stscntrl_strm {0} \
-        CONFIG.c_include_mm2s        {1} \
-        CONFIG.c_include_s2mm        {0} \
-        CONFIG.c_mm2s_burst_size     {256}] $dma_tx
-
-    # ── ADI AXI AD9361 IP (from ADI HDL repo) ────────────────────────
-    # NOTE: add axi_ad9361 from the ADI IP catalog before running this script
-    set ad9361 [create_bd_cell -type ip -vlnv analog.com:user:axi_ad9361:1.0 axi_ad9361_0]
-    set_property CONFIG.ID {0} $ad9361
-
-    # ── HLS IP cores ─────────────────────────────────────────────────
-    set rssi   [create_bd_cell -type ip -vlnv sdr-link:dsp:rssi_meter_top:1.0    rssi_meter_0]
-    set gain_rx [create_bd_cell -type ip -vlnv sdr-link:dsp:gain_block_top:1.0   gain_block_rx]
-    set gain_tx [create_bd_cell -type ip -vlnv sdr-link:dsp:gain_block_top:1.0   gain_block_tx]
-    set demod  [create_bd_cell -type ip -vlnv sdr-link:dsp:qpsk_demod_top:2.0   qpsk_demod_0]
-    set sync   [create_bd_cell -type ip -vlnv sdr-link:dsp:sync_detector_top:1.0 sync_det_0]
-    set modtx  [create_bd_cell -type ip -vlnv sdr-link:dsp:qpsk_mod_top:2.0     qpsk_mod_0]
-
-    # ── AXI4-Lite interconnect (GP0 → all HLS ctrl ports) ─────────────
-    set axil_ic [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axil_ic]
-    set_property CONFIG.NUM_SI {1} $axil_ic
-    set_property CONFIG.NUM_MI {5} $axil_ic
-
-    # ── AXI4-Stream connections: RX path ─────────────────────────────
-    # ad9361 RX → rssi_meter → gain_block_rx → qpsk_demod → sync_detector → dma_rx
-    connect_bd_intf_net [get_bd_intf_pins axi_ad9361_0/adc_data]      \
-                        [get_bd_intf_pins rssi_meter_0/s_axis_iq]
-    connect_bd_intf_net [get_bd_intf_pins rssi_meter_0/m_axis_iq]     \
-                        [get_bd_intf_pins gain_block_rx/s_axis_iq]
-    connect_bd_intf_net [get_bd_intf_pins gain_block_rx/m_axis_iq]    \
-                        [get_bd_intf_pins qpsk_demod_0/s_axis_iq]
-    connect_bd_intf_net [get_bd_intf_pins qpsk_demod_0/m_axis_bits]   \
-                        [get_bd_intf_pins sync_det_0/s_axis]
-    connect_bd_intf_net [get_bd_intf_pins sync_det_0/m_axis]          \
-                        [get_bd_intf_pins axi_dma_rx/S_AXIS_S2MM]
-
-    # ── AXI4-Stream connections: TX path ─────────────────────────────
-    # dma_tx → gain_block_tx → qpsk_mod → ad9361 TX
-    connect_bd_intf_net [get_bd_intf_pins axi_dma_tx/M_AXIS_MM2S]     \
-                        [get_bd_intf_pins gain_block_tx/s_axis_iq]
-    connect_bd_intf_net [get_bd_intf_pins gain_block_tx/m_axis_iq]    \
-                        [get_bd_intf_pins qpsk_mod_0/s_axis_bits]
-    connect_bd_intf_net [get_bd_intf_pins qpsk_mod_0/m_axis_iq]       \
-                        [get_bd_intf_pins axi_ad9361_0/dac_data]
-
-    # ── AXI4-Lite connections (GP0 → HLS ctrl) ────────────────────────
-    connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0]              \
-                        [get_bd_intf_pins axil_ic/S00_AXI]
-    set mi_list {rssi_meter_0 gain_block_rx gain_block_tx qpsk_demod_0 sync_det_0}
-    set mi_idx 0
-    foreach ip $mi_list {
-        set mi_port [format "M%02d_AXI" $mi_idx]
-        connect_bd_intf_net [get_bd_intf_pins axil_ic/${mi_port}]     \
-                            [get_bd_intf_pins ${ip}/ctrl]
-        incr mi_idx
+proc sdr_insert_datalink {{repo_root ""}} {
+    if {$repo_root eq ""} {
+        set repo_root [file normalize [file join [file dirname [info script]] ..]]
     }
 
-    # ── AXI HP0 for DMA ──────────────────────────────────────────────
-    connect_bd_intf_net [get_bd_intf_pins axi_dma_rx/M_AXI_S2MM]     \
-                        [get_bd_intf_pins ps7/S_AXI_HP0]
-    connect_bd_intf_net [get_bd_intf_pins axi_dma_tx/M_AXI_MM2S]     \
-                        [get_bd_intf_pins ps7/S_AXI_HP0]
+    # HLS IP. One project per core since the split -- the old path
+    # qpsk_modem/solution_demod has not existed since, and pointing the catalog
+    # at it silently yields no IP rather than an error.
+    set_property ip_repo_paths [concat [get_property ip_repo_paths [current_project]] [list \
+        [file join $repo_root hls qpsk_modem qpsk_demod solution1 impl ip] \
+        [file join $repo_root hls qpsk_modem qpsk_mod   solution1 impl ip]]] [current_project]
+    update_ip_catalog -rebuild
 
-    # ── Address map ───────────────────────────────────────────────────
-    assign_bd_address [get_bd_addr_segs rssi_meter_0/ctrl/Reg]
-    set_property offset 0x43C00000 [get_bd_addr_segs ps7/Data/SEG_rssi_meter_0_Reg]
-    set_property range  4K         [get_bd_addr_segs ps7/Data/SEG_rssi_meter_0_Reg]
+    add_files -norecurse [glob [file join $repo_root rtl *.v]]
+    update_compile_order -fileset sources_1
 
-    assign_bd_address [get_bd_addr_segs gain_block_rx/ctrl/Reg]
-    set_property offset 0x43C10000 [get_bd_addr_segs ps7/Data/SEG_gain_block_rx_Reg]
-    set_property range  4K         [get_bd_addr_segs ps7/Data/SEG_gain_block_rx_Reg]
+    # ── Remove ADI's IQ transport ────────────────────────────────────────
+    # cpack/upack and the sample-rate FIRs exist to move IQ to and from the
+    # ARM. Nothing downstream of the modem wants them, and leaving them
+    # instantiated but unconnected fails validation.
+    foreach c {cpack tx_upack rx_fir_decimator tx_fir_interpolator decim_slice interp_slice logic_or} {
+        set obj [get_bd_cells -quiet $c]
+        if {[llength $obj]} { delete_bd_objs $obj }
+    }
 
-    assign_bd_address [get_bd_addr_segs gain_block_tx/ctrl/Reg]
-    set_property offset 0x43C20000 [get_bd_addr_segs ps7/Data/SEG_gain_block_tx_Reg]
-    set_property range  4K         [get_bd_addr_segs ps7/Data/SEG_gain_block_tx_Reg]
+    # ── Repurpose ADI's DMAs to byte streams ─────────────────────────────
+    # axi_dmac takes a stream directly, so no second pair of DMAs is needed --
+    # which matters on a 7z020 already at 47% DSP with the modem in place.
+    set_property -dict [list CONFIG.DMA_TYPE_SRC  {1} CONFIG.DMA_DATA_WIDTH_SRC  {8}] \
+        [get_bd_cells axi_ad9361_adc_dma]
+    set_property -dict [list CONFIG.DMA_TYPE_DEST {1} CONFIG.DMA_DATA_WIDTH_DEST {8}] \
+        [get_bd_cells axi_ad9361_dac_dma]
 
-    assign_bd_address [get_bd_addr_segs qpsk_demod_0/ctrl/Reg]
-    set_property offset 0x43C30000 [get_bd_addr_segs ps7/Data/SEG_qpsk_demod_0_Reg]
-    set_property range  4K         [get_bd_addr_segs ps7/Data/SEG_qpsk_demod_0_Reg]
+    # ── Modem and adapters ───────────────────────────────────────────────
+    create_bd_cell -type ip -vlnv sdr-link:dsp:qpsk_demod_top:2.0 qpsk_demod_0
+    create_bd_cell -type ip -vlnv sdr-link:dsp:qpsk_mod_top:2.0   qpsk_mod_0
+    create_bd_cell -type module -reference adi_iq_to_axis  iq_to_axis
+    create_bd_cell -type module -reference axis_to_adi_iq  axis_to_iq
+    create_bd_cell -type module -reference axis_packetizer rx_packetizer
 
-    assign_bd_address [get_bd_addr_segs sync_det_0/ctrl/Reg]
-    set_property offset 0x43C40000 [get_bd_addr_segs ps7/Data/SEG_sync_det_0_Reg]
-    set_property range  4K         [get_bd_addr_segs ps7/Data/SEG_sync_det_0_Reg]
+    # ── RX: radio -> adapter -> demod -> packetizer -> DMA ───────────────
+    foreach {src dst} {
+        axi_ad9361/adc_valid_i0  iq_to_axis/adc_valid
+        axi_ad9361/adc_enable_i0 iq_to_axis/adc_enable_i
+        axi_ad9361/adc_enable_q0 iq_to_axis/adc_enable_q
+        axi_ad9361/adc_data_i0   iq_to_axis/adc_data_i
+        axi_ad9361/adc_data_q0   iq_to_axis/adc_data_q
+    } { ad_connect $src $dst }
+    ad_connect iq_to_axis/m_axis        qpsk_demod_0/s_axis_iq
+    ad_connect qpsk_demod_0/m_axis_bits rx_packetizer/s_axis
+    ad_connect rx_packetizer/m_axis     axi_ad9361_adc_dma/s_axis
 
-    # ── Validate and save ─────────────────────────────────────────────
+    # ── TX: DMA -> modulator -> adapter -> radio ─────────────────────────
+    # Modulator first, then anything that touches IQ. The old script had an IQ
+    # gain block ahead of the modulator, feeding it IQ where it expects bytes.
+    ad_connect axi_ad9361_dac_dma/m_axis qpsk_mod_0/s_axis_bits
+    ad_connect qpsk_mod_0/m_axis_iq      axis_to_iq/s_axis
+    foreach {src dst} {
+        axi_ad9361/dac_valid_i0  axis_to_iq/dac_valid
+        axi_ad9361/dac_enable_i0 axis_to_iq/dac_enable_i
+        axi_ad9361/dac_enable_q0 axis_to_iq/dac_enable_q
+    } { ad_connect $src $dst }
+    ad_connect axis_to_iq/dac_data_i axi_ad9361/dac_data_i0
+    ad_connect axis_to_iq/dac_data_q axi_ad9361/dac_data_q0
+
+    # ── Clocks and resets: everything here is l_clk ──────────────────────
+    # ADI's design already provides l_clk and an active-high rst; the adapters
+    # and HLS cores want active-low, hence the inverter.
+    create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic sdr_rst_inv
+    set_property -dict [list CONFIG.C_OPERATION {not} CONFIG.C_SIZE {1}] [get_bd_cells sdr_rst_inv]
+    ad_connect axi_ad9361/rst sdr_rst_inv/Op1
+    foreach p {iq_to_axis axis_to_iq rx_packetizer} {
+        ad_connect axi_ad9361/l_clk   $p/clk
+        ad_connect sdr_rst_inv/Res    $p/resetn
+    }
+    foreach p {qpsk_demod_0 qpsk_mod_0} {
+        ad_connect axi_ad9361/l_clk   $p/ap_clk
+        ad_connect sdr_rst_inv/Res    $p/ap_rst_n
+    }
+
+    # ── AXI-Lite ─────────────────────────────────────────────────────────
+    # ad_cpu_interconnect handles the clock-domain crossing to l_clk itself.
+    # The HLS slave pin is s_axi_ctrl -- named for the `bundle=ctrl` pragma --
+    # not `ctrl`, which is what the old script asked for on every core.
+    ad_cpu_interconnect 0x43C00000 qpsk_demod_0
+    ad_cpu_interconnect 0x43C10000 qpsk_mod_0
+
     validate_bd_design
     save_bd_design
-    puts "Block diagram '${bd_name}' created and validated."
-    puts ""
-    puts "Next: Vivado → Generate Bitstream"
-    puts "Then: copy boot.bin to PlutoSDR SD card or use pluto_update.sh"
+    puts "qpsk modem inserted: demod 0x43C00000, mod 0x43C10000"
+    puts "NOTE: the ADI DMAs now carry bytes, not IQ -- libiio will not return samples."
 }
-
-sdr_create_bd

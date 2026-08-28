@@ -60,11 +60,20 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Vitis HLS build output (project dirs are named after the core, plus logs)
+# Vitis HLS build output.
+#
+# Matched by shape, not by name. HLS writes one project directory per core at
+# fpga/hls/<core>/<project>/ and regenerates every byte of it from the .cpp/.h
+# /.tcl that sit alongside in fpga/hls/<core>/. This list used to name each
+# project explicitly and went stale the moment qpsk_modem was split into the
+# separate qpsk_demod and qpsk_mod projects: 127 MB of generated output was
+# neither tracked nor ignored, and showed up as untracked noise on every
+# status. A pattern cannot go stale that way.
+#
+# Source never lives two levels deep here, so nothing real is hidden. If that
+# ever changes, `git add -f fpga/hls/<core>/<dir>` overrides this.
+fpga/hls/*/*/
 fpga/hls/*/logs/
 fpga/hls/*/vitis-run.log
-fpga/hls/rssi_meter/rssi_meter/
-fpga/hls/gain_block/gain_block/
-fpga/hls/sync_detector/sync_detector/
-fpga/hls/qpsk_modem/qpsk_modem/
+fpga/hls/*/build.log
 baselines/

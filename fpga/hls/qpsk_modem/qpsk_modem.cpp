@@ -76,6 +76,11 @@ struct BitByte {
  * transmitted pulse and nothing decoded at any sampling phase.
  */
 #define NTAPS 49
+/* Samples per symbol in fabric, and the depth of each polyphase sub-filter.
+ * Sub-filter k uses taps k, k+SPS, k+2*SPS, ... so it needs ceil(NTAPS/SPS)
+ * symbol history, not NTAPS. */
+#define RRC_SPS_HW      4
+#define TAPS_PER_PHASE  ((NTAPS + RRC_SPS_HW - 1) / RRC_SPS_HW)
 static const fixp_t RRC_H[NTAPS] = {
     -0.000967f, -0.000741f,  0.000454f,  0.001516f,
      0.001238f, -0.000392f, -0.001919f, -0.001695f,
@@ -150,17 +155,44 @@ static bool rrc_filter_decim(fixp_t i_in, fixp_t q_in,
 static void agc(fixp_t& i, fixp_t& q)
 {
 #pragma HLS INLINE
-    static acc_t gain = 1.0f;
-    static acc_t env  = 0.5f;
-    const acc_t  bw   = acc_t(1.0f / 1024.0f);
+    static acc_t gain = acc_t(1.0f);
+    static acc_t env  = acc_t(0.5f);
+    const  acc_t bw     = acc_t(1.0f / 1024.0f);
+    const  acc_t target = acc_t(0.5f);
 
-    i = (fixp_t)(i * gain);
-    q = (fixp_t)(q * gain);
-
-    acc_t mag = hls::sqrt((acc_t)(i*i + q*q));
+    /* Measure the INPUT envelope, then set the gain from it.
+     *
+     * This was `gain = gain * (0.707 / env)`, applied every sample. That is a
+     * repeated multiply, not a loop step: whenever env < 0.707 the gain grows
+     * without bound. The scaled sample then left fixp_t's [-1,1) range and
+     * WRAPPED, which inverts the sign -- and a QPSK decision is nothing but a
+     * pair of sign tests, so every wrapped sample became a wrong symbol.
+     * Measured: 253 of 256 bytes correct with the AGC bypassed, 2 with it in
+     * circuit.
+     *
+     * Setting the gain directly from a smoothed envelope is both correct and
+     * self-limiting, and the clamps make overflow structurally impossible
+     * rather than merely unlikely. */
+    acc_t mag = hls::sqrt((acc_t)((acc_t)i * (acc_t)i + (acc_t)q * (acc_t)q));
     env = env + (mag - env) * bw;
-    if (env > acc_t(1e-4f))
-        gain = gain * (acc_t(0.707f) / env);
+
+    if (env > acc_t(1e-3f)) {
+        acc_t g = target / env;
+        if (g > acc_t(4.0f))  g = acc_t(4.0f);
+        if (g < acc_t(0.05f)) g = acc_t(0.05f);
+        gain = g;
+    }
+
+    /* Saturate explicitly into fixp_t. An implicit cast wraps. */
+    acc_t oi = (acc_t)i * gain;
+    acc_t oq = (acc_t)q * gain;
+    const acc_t LIM = acc_t(0.999f);
+    if (oi >  LIM) oi =  LIM;
+    if (oi < -LIM) oi = -LIM;
+    if (oq >  LIM) oq =  LIM;
+    if (oq < -LIM) oq = -LIM;
+    i = (fixp_t)oi;
+    q = (fixp_t)oq;
 }
 
 /* ── QPSK symbol decision → 2 bits ─────────────────────────────────
@@ -203,13 +235,21 @@ static void costas_loop(fixp_t& i, fixp_t& q)
     acc_t ir =  (acc_t)i * cos_p + (acc_t)q * sin_p;
     acc_t qr = -(acc_t)i * sin_p + (acc_t)q * cos_p;
 
-    /* Phase error, decision-directed. The +-1 decisions are held in acc_t:
-     * fixp_t is ap_fixed<16,1> with range [-1,1), so fixp_t(1.0f) is not
-     * representable and the previous code was feeding the loop a saturated
-     * constant instead of unity. */
+    /* Phase error, decision-directed: e = sgn(I)*Q - sgn(Q)*I.
+     *
+     * This was `sq*ir - si*qr`, which is the NEGATIVE of that. The loop was
+     * therefore positive feedback: for a constellation rotated by +theta it
+     * produced -2*theta and drove the phase further from lock instead of
+     * toward it. On a vector with no carrier offset at all -- where an ideal
+     * loop is a no-op -- enabling it dropped the clean match from 100% to
+     * 53.8%, which is the signature of a loop settling on a wrong lock point
+     * rather than of random corruption.
+     *
+     * The +-1 decisions are held in acc_t: fixp_t is ap_fixed<16,1> with range
+     * [-1,1), so fixp_t(1.0f) is not representable. */
     acc_t si = (ir >= acc_t(0)) ? acc_t(1.0f) : acc_t(-1.0f);
     acc_t sq = (qr >= acc_t(0)) ? acc_t(1.0f) : acc_t(-1.0f);
-    acc_t err = sq * ir - si * qr;
+    acc_t err = si * qr - sq * ir;
 
     /* 2nd order loop filter */
     freq  = freq  + (phase_t)(Ki * err);
@@ -222,6 +262,14 @@ static void costas_loop(fixp_t& i, fixp_t& q)
     if (phase >  PI) phase -= TAU;
     if (phase < -PI) phase += TAU;
 
+    /* Saturate into fixp_t. A rotation can raise the magnitude of either
+     * component to sqrt(2) times the input, which leaves [-1,1) and wraps --
+     * the same sign-flipping failure the AGC had. */
+    const acc_t LIM = acc_t(0.999f);
+    if (ir >  LIM) ir =  LIM;
+    if (ir < -LIM) ir = -LIM;
+    if (qr >  LIM) qr =  LIM;
+    if (qr < -LIM) qr = -LIM;
     i = (fixp_t)ir;
     q = (fixp_t)qr;
 }
@@ -456,19 +504,48 @@ void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
             tx_delay_i[0] = i_sym;
             tx_delay_q[0] = q_sym;
 
-            // Output SPS=4 samples per symbol via polyphase FIR
-            for (int k = 0; k < 4; k++) {
+            /* Output SPS samples per symbol through a real polyphase FIR.
+             *
+             * Two defects here, and they compounded:
+             *
+             *   The accumulation did not depend on k. All four "phases"
+             *   summed the same taps over the same delay line, so the core
+             *   emitted four identical samples per symbol -- a zero-order
+             *   hold, not pulse shaping. Sub-filter k must use every SPS'th
+             *   tap starting at k.
+             *
+             *   The output scaling was `(ap_int<16>)(x * fixp_t(32767))`.
+             *   fixp_t is ap_fixed<16,1> with range [-1,1), so 32767 is not
+             *   representable; the product stayed inside [-1,1) and the cast
+             *   to ap_int<16> truncated it to 0. The modulator emitted zeros.
+             *   Q1.15 and int16 share a bit pattern, so the conversion is a
+             *   reinterpretation -- the mirror of the receive-side fix.
+             */
+            for (int k = 0; k < RRC_SPS_HW; k++) {
 #pragma HLS UNROLL
                 acc_t acc_i = 0, acc_q = 0;
-                for (int t = 0; t < NTAPS; t++) {
+                for (int t = 0; t < TAPS_PER_PHASE; t++) {
 #pragma HLS UNROLL
-                    acc_i += (acc_t)(tx_delay_i[t] * RRC_H[t]);
-                    acc_q += (acc_t)(tx_delay_q[t] * RRC_H[t]);
+                    const int ti = t * RRC_SPS_HW + k;
+                    if (ti < NTAPS) {
+                        acc_i += (acc_t)(tx_delay_i[t] * RRC_H[ti]);
+                        acc_q += (acc_t)(tx_delay_q[t] * RRC_H[ti]);
+                    }
                 }
+                /* Saturate into Q1.15, then reinterpret those bits as int16. */
+                const acc_t LIM = acc_t(0.999f);
+                if (acc_i >  LIM) acc_i =  LIM;
+                if (acc_i < -LIM) acc_i = -LIM;
+                if (acc_q >  LIM) acc_q =  LIM;
+                if (acc_q < -LIM) acc_q = -LIM;
+                fixp_t si_ = (fixp_t)acc_i, sq_ = (fixp_t)acc_q;
                 IQSample out;
-                out.i    = tx_en ? (ap_int<16>)((fixp_t)acc_i * fixp_t(32767)) : ap_int<16>(0);
-                out.q    = tx_en ? (ap_int<16>)((fixp_t)acc_q * fixp_t(32767)) : ap_int<16>(0);
-                out.last = (sym == 3 && k == 3 && in.last) ? 1 : 0;
+                out.i = 0; out.q = 0;
+                if (tx_en) {
+                    out.i.range(15, 0) = si_.range(15, 0);
+                    out.q.range(15, 0) = sq_.range(15, 0);
+                }
+                out.last = (sym == 3 && k == RRC_SPS_HW - 1 && in.last) ? 1 : 0;
                 m_axis_iq.write(out);
             }
         }
