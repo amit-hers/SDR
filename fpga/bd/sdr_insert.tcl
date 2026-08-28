@@ -140,7 +140,7 @@ ad_connect axis_to_iq/underflow axi_ad9361/dac_dunf
 # converters. Everything byte-side runs at the modem clock, so the DMA path
 # needs no second crossing.
 ad_ip_parameter sys_ps7 CONFIG.PCW_EN_CLK2_PORT 1
-ad_ip_parameter sys_ps7 CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ 40.0
+ad_ip_parameter sys_ps7 CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ 30.0
 ad_ip_instance proc_sys_reset modem_rstgen
 ad_connect sys_ps7/FCLK_CLK2     modem_rstgen/slowest_sync_clk
 ad_connect sys_ps7/FCLK_RESET0_N modem_rstgen/ext_reset_in
