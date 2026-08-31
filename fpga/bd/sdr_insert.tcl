@@ -139,12 +139,39 @@ ad_connect axis_to_iq/underflow axi_ad9361/dac_dunf
 # Only the two IQ sample streams cross domains, through async clock
 # converters. Everything byte-side runs at the modem clock, so the DMA path
 # needs no second crossing.
-ad_ip_parameter sys_ps7 CONFIG.PCW_EN_CLK2_PORT 1
-ad_ip_parameter sys_ps7 CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ 30.0
+# The modem clock is generated INSIDE the PL, not requested from the PS.
+#
+# Asking the PS for a new FCLK does not survive a PL-only reload. PS clock
+# configuration lives in ps7_init, executed by the FSBL out of BOOT.bin at
+# boot; a bitstream cannot change it. Setting PCW_FPGA2_PERIPHERAL_FREQMHZ in
+# this block design only affects generated boot code, so on a board booted with
+# the stock image FCLK_CLK2 kept the divisors the original design left it with:
+#
+#   FPGA2_CLK_CTRL 0xF8000190 = 0x00101800  -> div0=24, div1=1 -> 41.67 MHz
+#
+# against the 30.3 MHz this design is built for. The modem was overclocked by
+# 33%, which is why its AXI-Lite answered while idle and then bus-errored once
+# the core was started. Measured on hardware, not inferred.
+#
+# A Clocking Wizard off sys_cpu_clk removes the dependency entirely: the clock
+# exists because the fabric makes it, whatever firmware the board booted. That
+# also keeps the design loadable by the reversible PL-only path, which matters
+# for bring-up -- the alternative is a DFU flash for every iteration.
+ad_ip_instance clk_wiz modem_clk_wiz [list \
+  PRIM_IN_FREQ               100.000 \
+  CLKOUT1_REQUESTED_OUT_FREQ  30.000 \
+  USE_LOCKED                 true \
+  USE_RESET                  false \
+  PRIMITIVE                  MMCM]
+ad_connect sys_cpu_clk modem_clk_wiz/clk_in1
+
+# The reset generator is released by the MMCM's locked output, so nothing in
+# the modem domain runs before its clock is stable.
 ad_ip_instance proc_sys_reset modem_rstgen
-ad_connect sys_ps7/FCLK_CLK2     modem_rstgen/slowest_sync_clk
-ad_connect sys_ps7/FCLK_RESET0_N modem_rstgen/ext_reset_in
-set modem_clk  sys_ps7/FCLK_CLK2
+ad_connect modem_clk_wiz/clk_out1 modem_rstgen/slowest_sync_clk
+ad_connect modem_clk_wiz/locked   modem_rstgen/dcm_locked
+ad_connect sys_ps7/FCLK_RESET0_N  modem_rstgen/ext_reset_in
+set modem_clk  modem_clk_wiz/clk_out1
 set modem_rstn modem_rstgen/peripheral_aresetn
 
 # The adapters stay on l_clk: they touch the AD9361's parallel ports, which
