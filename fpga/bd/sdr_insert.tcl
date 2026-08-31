@@ -249,7 +249,25 @@ ad_ip_instance axis_dwidth_converter tx_narrow \
 ad_connect $modem_clk                tx_narrow/aclk
 ad_connect $modem_rstn               tx_narrow/aresetn
 ad_connect axi_ad9361_dac_dma/m_axis tx_narrow/S_AXIS
-ad_connect tx_narrow/M_AXIS          qpsk_mod_0/s_axis_bits
+# ── Byte-stream elasticity between the DMA and the modulator ─────────────
+# axi_dmac delivers in 4096-byte bursts with gaps between transfers. The
+# modulator consumes one byte per 16 IQ samples (480 kB/s at 7.68 MS/s) and has
+# no input buffer of its own, so a burst gap drains it and it emits zero-driven
+# output -- `if (s_axis_bits.empty()) goto rrc_out`. Measured on hardware: the
+# DMA sustained 475-483 kB/s and the captured waveform matched the frozen
+# reference at correlation 1.000000 in two runs of three, but the third showed
+# one 23-sample (~1.4 byte) starvation. The stream RESYNCHRONISED after it, so
+# no bytes were lost -- it is a timing gap, not a data defect.
+#
+# This FIFO absorbs that gap. It sits in the byte transport, upstream of
+# qpsk_mod, so the verified modem and IQ clock-converter path is untouched.
+# 2048 bytes is ~4 ms of runway at 480 kB/s, far more than any observed gap.
+ad_ip_instance axis_data_fifo tx_byte_fifo [list \
+  TDATA_NUM_BYTES 1 FIFO_DEPTH 2048 HAS_TLAST 1 HAS_TKEEP 1 IS_ACLK_ASYNC 0]
+ad_connect $modem_clk  tx_byte_fifo/s_axis_aclk
+ad_connect $modem_rstn tx_byte_fifo/s_axis_aresetn
+ad_connect tx_narrow/M_AXIS          tx_byte_fifo/S_AXIS
+ad_connect tx_byte_fifo/M_AXIS       qpsk_mod_0/s_axis_bits
 
 # ── AXI-Lite control ─────────────────────────────────────────────────────
 # ad_cpu_interconnect crosses to the l_clk domain itself. The HLS slave pin is
