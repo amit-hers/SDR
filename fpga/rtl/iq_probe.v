@@ -73,6 +73,7 @@ module iq_probe #(
     (* ram_style = "block" *) reg [31:0] mem [0:DEPTH-1];
     reg [DEPTH_LOG2-1:0] waddr;
     reg                  running;
+    reg                  done;      // latched full; blocks the restart below
     reg [31:0]           rdata;
 
     always @(posedge clk) begin
@@ -82,16 +83,29 @@ module iq_probe #(
         end else if (!arm_s[1]) begin           // disarmed: ready to re-arm
             waddr   <= {DEPTH_LOG2{1'b0}};
             running <= 1'b0;
-        end else if (!running && waddr == {DEPTH_LOG2{1'b0}}) begin
+            done    <= 1'b0;
+        end else if (!running && !done) begin
+            waddr   <= {DEPTH_LOG2{1'b0}};
             running <= 1'b1;                    // armed, start
         end else if (running && beat) begin
             mem[waddr] <= s_axis_tdata;
-            if (&waddr) running <= 1'b0;        // buffer full: stop, hold data
+            // A full buffer must latch DONE, not merely clear `running`.
+            // Without it, waddr wraps to 0 and "stopped at address 0" is
+            // indistinguishable from "armed and ready", so the one-shot
+            // restarts immediately and overwrites itself forever. Every
+            // readback was then a blend of fragments from different passes --
+            // which is what made the captured spectrum look broadband and
+            // held correlation against mod_ref.iq down at chance level.
+            if (&waddr) begin
+                running <= 1'b0;
+                done    <= 1'b1;
+            end
             waddr <= waddr + 1'b1;
         end
         rdata <= mem[raddr];
     end
 
     // Readback is stable once capture has stopped, so no sync is needed here.
-    assign stat = sel ? {{(32-DEPTH_LOG2-1){1'b0}}, running, waddr} : rdata;
+    // stat[DEPTH_LOG2+1] = done, [DEPTH_LOG2] = running, [DEPTH_LOG2-1:0] = waddr
+    assign stat = sel ? {{(32-DEPTH_LOG2-2){1'b0}}, done, running, waddr} : rdata;
 endmodule
