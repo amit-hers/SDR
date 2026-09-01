@@ -11,4 +11,6 @@
 # set_clock_groups -asynchronous between clk_fpga_0 and rx_clk would also
 # "fix" it while hiding genuine crossings inside ADI's logic.
 set_false_path -to   [get_cells -quiet -hier -regexp {.*tx_iq_probe.*/ctrl_s1_reg.*}]
-set_false_path -from [get_cells -quiet -hier -regexp {.*tx_iq_probe.*/(rdata_reg|waddr_reg|running_reg).*}]
+set_false_path -to   [get_cells -quiet -hier -regexp {.*rx_iq_probe.*/ctrl_s1_reg.*}]
+set_false_path -from [get_cells -quiet -hier -regexp {.*tx_iq_probe.*/(rdata_reg|waddr_reg|running_reg|done_reg).*}]
+set_false_path -from [get_cells -quiet -hier -regexp {.*rx_iq_probe.*/(rdata_reg|waddr_reg|running_reg|done_reg).*}]
