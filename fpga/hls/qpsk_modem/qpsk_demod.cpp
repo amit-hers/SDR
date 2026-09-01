@@ -186,36 +186,31 @@ static void agc(fixp_t& i, fixp_t& q, bool rst)
 
     if (env > acc_t(1e-3f)) {
         acc_t g = target / env;
-        /* Clamp 4. This limits acquisition at hardware signal levels and the
-         * reason is understood, but no better value has been found yet.
+        /* Clamp 4. Do NOT raise this above 8: acc_t is ap_fixed<32,4>, whose
+         * range is [-8, 8), so acc_t(8.0f) is not representable. The comparison
+         * below then misfires, the gain is forced to the 0.05 lower clamp, and
+         * the demodulator collapses -- measured mean_gain 0.05 with stress
+         * falling from best_run 253 to 18. That looked like "high gain breaks
+         * the loops" and is nothing of the kind.
          *
-         * The AD9363 puts 12-bit samples in a 16-bit word, so a full-scale
-         * input is near 0.06 in Q1.15 against the ~0.25 the csim vectors use.
-         * Reaching the 0.5 target from there wants a gain near 16; the clamp
-         * stops at 4, so the demodulator runs ~4x below its design amplitude.
-         * Both loop discriminators are products of two samples, so their error
-         * scales as amplitude SQUARED and the loops run ~16x slower than their
-         * gains assume -- slow acquisition, and over a long hardware capture,
-         * intermittent lock.
+         * The clamp is not what limits acquisition at hardware signal levels.
+         * Measured mean gain is only ~2 even on a vector scaled to hardware
+         * amplitude, so it never reaches 4, and every representable clamp from
+         * 4.0 to 7.9 gives byte-identical results on all six vectors.
          *
-         * Raising the clamp fixes that and breaks other things. Measured with
-         * best_run (longest unbroken run of correct bytes, so it shows
-         * acquisition rather than steady-state accuracy):
+         * What does limit it is CONVERGENCE TIME. env starts at 0.5 and adapts
+         * at bw = 1/1024 per sample, so on a low-amplitude input it is still
+         * travelling for most of a 4096-sample vector -- and acquisition
+         * happens during that transient. best_run drops from 253 to 169 on
+         * clean.iq scaled down 8x (vector lowamp8), with the errors at the
+         * START rather than spread through the run.
          *
-         *   target/clamp   clean impaired stress  shift50  lowamp8
-         *   0.5  / 4       253   253      253     251      169     <- current
-         *   0.25 / 4       251   251      217     251      251
-         *   any  / >=8     252   252       18       7      252
-         *
-         * At clamp >= 8 the collapse is IDENTICAL for every target tried
-         * (0.5, 0.25, 0.125), which rules out the obvious explanation that
-         * higher gain drives peaks into the +/-0.999 saturation below. The real
-         * mechanism is not yet known, so the validated defaults stay.
-         *
-         * The clean fix is probably not here at all: scale the 12-bit input up
-         * to the range the core was tuned for, so the AGC never needs the extra
-         * gain. That decouples signal level from loop dynamics instead of
-         * trading one against the other. */
+         * Widening bw is not the fix either: 1/64 helps low amplitude (169 ->
+         * 242) but pushes impaired below its gate, and 1/256 is worse than both
+         * its neighbours, so the response is not even monotonic. The fix
+         * belongs upstream -- scale the 12-bit converter data so the AGC starts
+         * near the right gain instead of hunting for it. See RX_SHIFT in
+         * fpga/rtl/adi_iq_to_axis.v. */
         if (g > acc_t(4.0f))  g = acc_t(4.0f);
         if (g < acc_t(0.05f)) g = acc_t(0.05f);
         gain = g;
