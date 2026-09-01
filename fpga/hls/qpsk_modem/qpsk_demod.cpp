@@ -186,6 +186,36 @@ static void agc(fixp_t& i, fixp_t& q, bool rst)
 
     if (env > acc_t(1e-3f)) {
         acc_t g = target / env;
+        /* Clamp 4. This limits acquisition at hardware signal levels and the
+         * reason is understood, but no better value has been found yet.
+         *
+         * The AD9363 puts 12-bit samples in a 16-bit word, so a full-scale
+         * input is near 0.06 in Q1.15 against the ~0.25 the csim vectors use.
+         * Reaching the 0.5 target from there wants a gain near 16; the clamp
+         * stops at 4, so the demodulator runs ~4x below its design amplitude.
+         * Both loop discriminators are products of two samples, so their error
+         * scales as amplitude SQUARED and the loops run ~16x slower than their
+         * gains assume -- slow acquisition, and over a long hardware capture,
+         * intermittent lock.
+         *
+         * Raising the clamp fixes that and breaks other things. Measured with
+         * best_run (longest unbroken run of correct bytes, so it shows
+         * acquisition rather than steady-state accuracy):
+         *
+         *   target/clamp   clean impaired stress  shift50  lowamp8
+         *   0.5  / 4       253   253      253     251      169     <- current
+         *   0.25 / 4       251   251      217     251      251
+         *   any  / >=8     252   252       18       7      252
+         *
+         * At clamp >= 8 the collapse is IDENTICAL for every target tried
+         * (0.5, 0.25, 0.125), which rules out the obvious explanation that
+         * higher gain drives peaks into the +/-0.999 saturation below. The real
+         * mechanism is not yet known, so the validated defaults stay.
+         *
+         * The clean fix is probably not here at all: scale the 12-bit input up
+         * to the range the core was tuned for, so the AGC never needs the extra
+         * gain. That decouples signal level from loop dynamics instead of
+         * trading one against the other. */
         if (g > acc_t(4.0f))  g = acc_t(4.0f);
         if (g < acc_t(0.05f)) g = acc_t(0.05f);
         gain = g;
