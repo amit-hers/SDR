@@ -199,9 +199,30 @@ int main(int argc, char** argv) {
     std::printf("qpsk_demod_top C simulation (vectors from the host TX path)\n");
     int rc = 0;
     struct Case { const char* name; size_t min_run; };
-    const Case cases[] = {Case{"clean",    252},   // bit-exact
-                          Case{"impaired", 252},   // bit-exact
-                          Case{"stress",   240}};  // locks and holds under 8x CFO
+    // All seven vectors, not three. The four that were missing are the ones
+    // that exercise the timing loop -- which is exactly why nothing caught the
+    // loop being inert for as long as it was. shift25/shift50 vary the sampling
+    // phase; lowamp4/lowamp8 vary the amplitude.
+    //
+    // clean and impaired are no longer bit-exact, and that is the fix working
+    // rather than a regression. The timing loop now ACQUIRES instead of
+    // relying on these vectors being generated already aligned to its reset
+    // phase, and acquisition costs symbols 2 and 4 -- after which the run is
+    // 1007 consecutive exact symbols out of the 1012 available. The old 252
+    // gate encoded "the loop never moves", which was true and was the defect.
+    //
+    // Gates sit ~3 bytes under the measured figure, far above the ~10 a broken
+    // loop scores at any alignment; the failure is bimodal, so this has room
+    // without losing power. Measured at the committed gains:
+    //   clean 251  impaired 251  stress 253  shift25 253
+    //   shift50 244  lowamp4 253  lowamp8 168
+    const Case cases[] = {Case{"clean",    248},
+                          Case{"impaired", 248},
+                          Case{"stress",   240},   // locks and holds under 8x CFO
+                          Case{"shift25",  240},   // quarter-sample phase offset
+                          Case{"shift50",  230},   // half-sample phase offset
+                          Case{"lowamp4",  240},   // 4x below nominal amplitude
+                          Case{"lowamp8",  150}};  // 8x below -- AGC convergence limited
     // An optional second argument runs one case on its own. That is how the
     // reset path is checked: each vector run alone must give the same numbers
     // as the full sequence, which is only true if reset really does return the

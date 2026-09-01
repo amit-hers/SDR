@@ -14,3 +14,7 @@ set_false_path -to   [get_cells -quiet -hier -regexp {.*tx_iq_probe.*/ctrl_s1_re
 set_false_path -to   [get_cells -quiet -hier -regexp {.*rx_iq_probe.*/ctrl_s1_reg.*}]
 set_false_path -from [get_cells -quiet -hier -regexp {.*tx_iq_probe.*/(rdata_reg|waddr_reg|running_reg|done_reg).*}]
 set_false_path -from [get_cells -quiet -hier -regexp {.*rx_iq_probe.*/(rdata_reg|waddr_reg|running_reg|done_reg).*}]
+
+# dac_pin_probe: same cross-domain structure as the two IQ probes.
+set_false_path -to   [get_cells -quiet -hier -regexp {.*dac_probe.*/ctrl_s1_reg.*}]
+set_false_path -from [get_cells -quiet -hier -regexp {.*dac_probe.*/(rdata_reg|waddr_reg|running_reg|done_reg).*}]

@@ -381,60 +381,78 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
                             bool rst)
 {
 #pragma HLS INLINE
-    /* Gardner timing recovery with a fractional interpolator.
+    /* Gardner timing recovery, RATE-controlled modulo-1 NCO.
      *
-     * The previous version computed a Gardner error, integrated it into `tau`,
-     * and never read `tau` -- an open loop. The symbol instant stayed frozen
-     * wherever reset left it, so the core could not re-centre on the eye.
-     * csim measures the cost by delaying clean.iq a fraction of a sample:
-     * aligned 100.0%, quarter-sample 99.6%, half-sample 42.3%. The quarter
-     * case matches the 99.4% seen over coax, where 6 symbols per 1024 failed
-     * at identical positions in all 255 blocks -- a fixed phase, not noise.
+     * The previous version kept `mu` as a [0,1) fractional index and slipped a
+     * whole sample whenever it left that interval:
      *
-     * Skipping or repeating whole samples was tried first and reverted: it
-     * rescued the offset cases but regressed the aligned one (100% -> 83-94%)
-     * because a correction quantised to whole samples cannot settle, so the
-     * loop hunts. Steering a fractional delay lets it converge and STAY there,
-     * which is what keeps the aligned case bit-exact.
+     *     if (mu >= 1) { mu -= 1; cnt = 1; }   // skip a sample
+     *     else if (mu < 0) { mu += 1; cnt = 7; }  // repeat one
      *
-     * Cubic (Catmull-Rom) interpolation over a 4-sample window. The history is
-     * one sample deeper than the arithmetic needs so that mu can reach both
-     * ends of its interval without the window running off the buffer.
+     * mu starts at 0, which is ON that boundary, so every noise excursion fired
+     * a slip. Measured on a real hardware capture: 553 skips and 554 repeats in
+     * 4096 symbols -- they cancel, so the sampling phase never moved, and each
+     * one teleported the loop onto a different branch of the S-curve before it
+     * could build any drift. mu was never once in [0.05,0.95].
+     *
+     * The loop was therefore not a loop at all: the core behaved as a
+     * fixed-phase decimator whose phase was whatever reset left behind. Proof,
+     * by changing only mu's reset value:
+     *
+     *   mu reset   clean  impaired  stress  |  hw@0.00  hw@0.25  hw@0.50  hw@0.75
+     *   0.0          253       253     253  |       13       51      182      182
+     *   0.5           15        15       7  |      182      182      182      182
+     *
+     * Mirror images. Neither value is right; the loop simply never adapts, and
+     * the csim vectors pass only because they are generated aligned to the
+     * phase mu=0 happens to select.
+     *
+     * Raising the gain cannot fix this. The Gardner error on hardware has
+     * mean/rms = 0.245 -- noise-dominated -- and Kp scales drift and noise
+     * identically. Sweeping Kp over 64x and Ki over 64x moved hw@0.00 not at
+     * all (11..21 bytes across 18 combinations). Pre-filtering the
+     * discriminator reached 30 and cost the clean vector. Both were tried and
+     * rejected before this rewrite.
+     *
+     * THE FIX is to control the symbol RATE rather than clamp a phase. A
+     * modulo-1 accumulator counts down by w each sample; a symbol strobes when
+     * it underflows, and the fractional part at underflow IS the interpolation
+     * index. There is no special skip/repeat path, so there is no
+     * discontinuity for noise to trip, and the phase can slew without limit --
+     * the accumulator wraps as a matter of course. This is the standard
+     * interpolator-control structure (Gardner TED + NCO), and it is CHEAPER
+     * than what it replaces: one add and one compare per sample against the
+     * old branchy wrap plus its 3-bit counter games.
      */
+    static acc_t  nco   = 0;          /* modulo-1 timing accumulator        */
+    static acc_t  mu    = 0;          /* fractional index, set at each strobe */
+    static acc_t  wctl  = 0;          /* loop correction to the nominal rate */
+    static acc_t  integ = 0;          /* PI integrator (rate error)         */
     static fixp_t hi[5], hq[5];
-    static acc_t  mu    = 0;          /* fractional delay within a sample   */
-    static acc_t  integ = 0;          /* PI integrator (frequency estimate) */
     static fixp_t im_i = 0, im_q = 0; /* interpolated mid-symbol sample     */
     static fixp_t ip_i = 0, ip_q = 0; /* previous interpolated symbol       */
-    static ap_uint<3> cnt = 0;
+    static ap_uint<3> since = 0;      /* samples since the last strobe      */
 
-    /* Loop gains. Ki is far below Kp so the integrator only trims a slow rate
-     * error; damping comes from that separation. Both are powers of two: the
-     * Costas loop above documents why that matters for timing closure. */
-    /* Chosen by sweeping both gains against every vector at once. The pair
-     * matters more than either value: a fast Kp rescues a badly offset signal
-     * but hunts on an aligned one (Kp 2^-5 took clean from 100% to 91.7%),
-     * while Ki must stay far below it or the integrator winds up and drags the
-     * instant off the eye centre. At 2^-9 / 2^-16 the loop settles:
+    /* Nominal rate: one strobe every RRC_SPS_HW samples. */
+    const acc_t W0 = acc_t(1.0f / (float)RRC_SPS_HW);
+    /* Loop gains, both powers of two -- the same timing-closure argument the
+     * Costas loop documents. Chosen by sweeping both against every vector AND
+     * against 24 randomised hardware initial conditions at once; the pair below
+     * was the best worst-case, and the response is flat around it (Kp 2^-3 and
+     * 2^-2 differ by 4 bytes of mean). Kp 2^-1 destabilises: clean falls to
+     * 136.
      *
-     *   vector    open loop            closed loop
-     *   clean     run 253 100.0%       run 253 100.0%   (bit-exact, unchanged)
-     *   impaired  run 253 100.0%       run 253 100.0%   (bit-exact, unchanged)
-     *   stress    run 253 100.0%       run 253 100.0%
-     *   shift25   run 127  99.6%       run 251  99.6%
-     *   shift50   run  10  42.3%       run 251  99.6%
-     *
-     * best_run is the figure that counts: it is the longest unbroken stretch of
-     * correct bytes, so it separates "acquires and holds" from "never locks".
-     */
-    const acc_t Kp = acc_t(0.001953125f);      /* 2^-9  */
-    const acc_t Ki = acc_t(0.0000152587890625f); /* 2^-16 */
+     * These are NOT the old gains rescaled. The old loop steered a POSITION
+     * (mu) and these steer a RATE (w), so the units differ; 2^-9 here would
+     * leave the loop unable to correct shift50 (measured 11 bytes). */
+    const acc_t Kp = acc_t(0.25f);          /* 2^-2 */
+    const acc_t Ki = acc_t(0.001953125f);   /* 2^-9 */
 
     if (rst) {
         for (int k = 0; k < 5; k++) { hi[k] = 0; hq[k] = 0; }
-        mu = 0; integ = 0;
+        nco = 0; mu = 0; wctl = 0; integ = 0;
         im_i = 0; im_q = 0; ip_i = 0; ip_q = 0;
-        cnt = 0;
+        since = 0;
         i_out = 0; q_out = 0;
         return false;
     }
@@ -448,33 +466,37 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
     hi[0] = i;
     hq[0] = q;
 
-    cnt++;
+    since++;
 
-    /* Catmull-Rom at fractional position mu between hi[2] and hi[1]. */
-    const acc_t x0 = (acc_t)hi[3], x1 = (acc_t)hi[2];
-    const acc_t x2 = (acc_t)hi[1], x3 = (acc_t)hi[0];
-    const acc_t y0 = (acc_t)hq[3], y1 = (acc_t)hq[2];
-    const acc_t y2 = (acc_t)hq[1], y3 = (acc_t)hq[0];
-    /* LINEAR, not cubic.
-     *
-     * Cubic (Catmull-Rom) interpolation was measured first and is better in
-     * simulation, but its mu -> mu^2 -> mu^3 -> 4-term polynomial chain is a
-     * single combinational dependency that scheduling cannot split: estimated
-     * Fmax fell to 28.41 MHz at II=1 and only 29.19 MHz at II=2, both BELOW the
-     * 30 MHz modem clock, so the core would not have closed timing. Relaxing II
-     * does not help a chain that is deep rather than wide.
-     *
-     * Linear interpolation is one multiply per axis. It is less exact between
-     * samples, but the loop only has to steer to the eye centre, and at SPS=4
-     * the RRC pulse is smooth enough over one sample that the residual error is
-     * small -- see the csim table beside the loop gains. */
-    (void)x0; (void)x3; (void)y0; (void)y3;
+    /* Advance the timing NCO. Underflow marks the symbol instant, and the
+     * residue scaled by SPS is where inside the sample it fell. */
+    const acc_t w = W0 + wctl;
+    nco = nco - w;
+    bool strobe = false;
+    if (nco < acc_t(0.0f)) {
+        nco = nco + acc_t(1.0f);
+        /* nco/w, approximated as nco*SPS: w departs from 1/SPS only by the
+         * loop correction, which is small, and a divide would infer a divider
+         * on the critical path for no accuracy that matters here. */
+        mu = nco * acc_t((float)RRC_SPS_HW);
+        if (mu > acc_t(0.999f)) mu = acc_t(0.999f);
+        if (mu < acc_t(0.0f))   mu = acc_t(0.0f);
+        strobe = true;
+    }
+
+    /* LINEAR interpolation, as before: the cubic form put a
+     * mu -> mu^2 -> mu^3 chain on the critical path and dropped estimated Fmax
+     * below the 30 MHz modem clock. */
+    const acc_t x1 = (acc_t)hi[2], x2 = (acc_t)hi[1];
+    const acc_t y1 = (acc_t)hq[2], y2 = (acc_t)hq[1];
     const acc_t ii = x1 + (x2 - x1) * mu;
     const acc_t qq = y1 + (y2 - y1) * mu;
 
-    if (cnt == 2) { im_i = (fixp_t)ii; im_q = (fixp_t)qq; }
-    if (cnt < 4) return false;
-    cnt = 0;
+    /* Mid-symbol sample, half a symbol before the strobe. */
+    if (since == 2) { im_i = (fixp_t)ii; im_q = (fixp_t)qq; }
+
+    if (!strobe) return false;
+    since = 0;
 
     const fixp_t si = (fixp_t)ii;
     const fixp_t sq = (fixp_t)qq;
@@ -484,19 +506,23 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
     acc_t err = (acc_t)(si - ip_i) * (acc_t)im_i
               + (acc_t)(sq - ip_q) * (acc_t)im_q;
 
+    /* PI on the RATE. integ carries any standing rate error; Kp supplies the
+     * phase correction. Both stay powers of two -- see costas_loop for why
+     * that matters to timing closure. */
     integ = integ + Ki * err;
-    mu    = mu + Kp * err + integ;
+    wctl  = Kp * err + integ;
 
-    /* Keep mu inside one sample by moving the interpolation window instead. */
-    if (mu >= acc_t(1.0f))      { mu = mu - acc_t(1.0f); cnt = 1; }
-    else if (mu < acc_t(0.0f))  { mu = mu + acc_t(1.0f); cnt = 7; }
+    /* Bound the correction so a transient cannot invert or stall the strobe:
+     * w must stay positive and well inside one sample per strobe. */
+    const acc_t WLIM = acc_t(0.15f);
+    if (wctl >  WLIM) wctl =  WLIM;
+    if (wctl < -WLIM) wctl = -WLIM;
 
     ip_i = si; ip_q = sq;
     i_out = si;
     q_out = sq;
     return true;
 }
-
 
 /* ═══════════════════════════════════════════════════════════════════
  * Top-level HLS function
