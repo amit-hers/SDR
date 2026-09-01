@@ -1,0 +1,5 @@
+host Modem(QPSK)+RRCInterp, pure QPSK, no impairment
+samples=4096
+expect_bytes=256
+sps=4
+tx_scale=8192
