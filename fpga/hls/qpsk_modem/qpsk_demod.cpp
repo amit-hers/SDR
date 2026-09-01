@@ -430,16 +430,22 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
     const acc_t x2 = (acc_t)hi[1], x3 = (acc_t)hi[0];
     const acc_t y0 = (acc_t)hq[3], y1 = (acc_t)hq[2];
     const acc_t y2 = (acc_t)hq[1], y3 = (acc_t)hq[0];
-    const acc_t m2 = mu * mu;
-    const acc_t m3 = m2 * mu;
-    const acc_t ii = acc_t(0.5f) * ((acc_t(2.0f) * x1) +
-                     (-x0 + x2) * mu +
-                     (acc_t(2.0f)*x0 - acc_t(5.0f)*x1 + acc_t(4.0f)*x2 - x3) * m2 +
-                     (-x0 + acc_t(3.0f)*x1 - acc_t(3.0f)*x2 + x3) * m3);
-    const acc_t qq = acc_t(0.5f) * ((acc_t(2.0f) * y1) +
-                     (-y0 + y2) * mu +
-                     (acc_t(2.0f)*y0 - acc_t(5.0f)*y1 + acc_t(4.0f)*y2 - y3) * m2 +
-                     (-y0 + acc_t(3.0f)*y1 - acc_t(3.0f)*y2 + y3) * m3);
+    /* LINEAR, not cubic.
+     *
+     * Cubic (Catmull-Rom) interpolation was measured first and is better in
+     * simulation, but its mu -> mu^2 -> mu^3 -> 4-term polynomial chain is a
+     * single combinational dependency that scheduling cannot split: estimated
+     * Fmax fell to 28.41 MHz at II=1 and only 29.19 MHz at II=2, both BELOW the
+     * 30 MHz modem clock, so the core would not have closed timing. Relaxing II
+     * does not help a chain that is deep rather than wide.
+     *
+     * Linear interpolation is one multiply per axis. It is less exact between
+     * samples, but the loop only has to steer to the eye centre, and at SPS=4
+     * the RRC pulse is smooth enough over one sample that the residual error is
+     * small -- see the csim table beside the loop gains. */
+    (void)x0; (void)x3; (void)y0; (void)y3;
+    const acc_t ii = x1 + (x2 - x1) * mu;
+    const acc_t qq = y1 + (y2 - y1) * mu;
 
     if (cnt == 2) { im_i = (fixp_t)ii; im_q = (fixp_t)qq; }
     if (cnt < 4) return false;
@@ -496,7 +502,16 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 #pragma HLS INTERFACE s_axilite  port=lock_count     offset=0x18 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=soft_reset     offset=0x20 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=return         bundle=ctrl
-#pragma HLS PIPELINE II=1   /* initiation interval = 1 clock */
+/* II=2, not 1.
+ *
+ * The cubic interpolator added for timing recovery put its multiply chain on
+ * the critical path and dropped the estimated Fmax from 44.41 MHz to 28.41 MHz
+ * -- below the 30 MHz modem clock, so the core would not have closed timing.
+ * The throughput was never needed at II=1: the RX sample rate is 7.68 MS/s and
+ * II=2 still gives 15 MS/s of capacity at 30 MHz, about 2x margin. Relaxing II
+ * lets the scheduler spread the interpolator over two cycles instead of
+ * demanding it in one. */
+#pragma HLS PIPELINE II=2   /* see the interpolator note in timing_recovery */
 
     static ap_uint<32> locks = 0;
     /* Declared here, not at the packing code below, so the reset path can
