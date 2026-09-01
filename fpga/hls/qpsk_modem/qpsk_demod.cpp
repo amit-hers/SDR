@@ -356,39 +356,116 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
                             bool rst)
 {
 #pragma HLS INLINE
-    static fixp_t i_prev = 0, q_prev = 0;
-    static fixp_t i_mid  = 0, q_mid  = 0;
-    static acc_t  tau    = 0;
-    /* Three bits for the same reason as `phase` in rrc_filter_decim: `cnt < 4`
-     * can never be false for an ap_uint<2>, so this returned false forever. */
+    /* Gardner timing recovery with a fractional interpolator.
+     *
+     * The previous version computed a Gardner error, integrated it into `tau`,
+     * and never read `tau` -- an open loop. The symbol instant stayed frozen
+     * wherever reset left it, so the core could not re-centre on the eye.
+     * csim measures the cost by delaying clean.iq a fraction of a sample:
+     * aligned 100.0%, quarter-sample 99.6%, half-sample 42.3%. The quarter
+     * case matches the 99.4% seen over coax, where 6 symbols per 1024 failed
+     * at identical positions in all 255 blocks -- a fixed phase, not noise.
+     *
+     * Skipping or repeating whole samples was tried first and reverted: it
+     * rescued the offset cases but regressed the aligned one (100% -> 83-94%)
+     * because a correction quantised to whole samples cannot settle, so the
+     * loop hunts. Steering a fractional delay lets it converge and STAY there,
+     * which is what keeps the aligned case bit-exact.
+     *
+     * Cubic (Catmull-Rom) interpolation over a 4-sample window. The history is
+     * one sample deeper than the arithmetic needs so that mu can reach both
+     * ends of its interval without the window running off the buffer.
+     */
+    static fixp_t hi[5], hq[5];
+    static acc_t  mu    = 0;          /* fractional delay within a sample   */
+    static acc_t  integ = 0;          /* PI integrator (frequency estimate) */
+    static fixp_t im_i = 0, im_q = 0; /* interpolated mid-symbol sample     */
+    static fixp_t ip_i = 0, ip_q = 0; /* previous interpolated symbol       */
     static ap_uint<3> cnt = 0;
-    const acc_t Kt = acc_t(0.01f);
 
-    /* cnt matters most here: it is the symbol phase. Leaving it set means the
-     * first symbol after a reset is declared at the wrong sample offset, which
-     * shifts every byte boundary downstream. */
+    /* Loop gains. Ki is far below Kp so the integrator only trims a slow rate
+     * error; damping comes from that separation. Both are powers of two: the
+     * Costas loop above documents why that matters for timing closure. */
+    /* Chosen by sweeping both gains against every vector at once. The pair
+     * matters more than either value: a fast Kp rescues a badly offset signal
+     * but hunts on an aligned one (Kp 2^-5 took clean from 100% to 91.7%),
+     * while Ki must stay far below it or the integrator winds up and drags the
+     * instant off the eye centre. At 2^-9 / 2^-16 the loop settles:
+     *
+     *   vector    open loop            closed loop
+     *   clean     run 253 100.0%       run 253 100.0%   (bit-exact, unchanged)
+     *   impaired  run 253 100.0%       run 253 100.0%   (bit-exact, unchanged)
+     *   stress    run 253 100.0%       run 253 100.0%
+     *   shift25   run 127  99.6%       run 251  99.6%
+     *   shift50   run  10  42.3%       run 251  99.6%
+     *
+     * best_run is the figure that counts: it is the longest unbroken stretch of
+     * correct bytes, so it separates "acquires and holds" from "never locks".
+     */
+    const acc_t Kp = acc_t(0.001953125f);      /* 2^-9  */
+    const acc_t Ki = acc_t(0.0000152587890625f); /* 2^-16 */
+
     if (rst) {
-        i_prev = 0; q_prev = 0; i_mid = 0; q_mid = 0;
-        tau = 0; cnt = 0;
+        for (int k = 0; k < 5; k++) { hi[k] = 0; hq[k] = 0; }
+        mu = 0; integ = 0;
+        im_i = 0; im_q = 0; ip_i = 0; ip_q = 0;
+        cnt = 0;
         i_out = 0; q_out = 0;
         return false;
     }
 
+    /* newest sample enters at index 0 */
+    for (int k = 4; k > 0; k--) {
+#pragma HLS UNROLL
+        hi[k] = hi[k-1];
+        hq[k] = hq[k-1];
+    }
+    hi[0] = i;
+    hq[0] = q;
+
     cnt++;
-    if (cnt == 2) { i_mid = i; q_mid = q; }
-    if (cnt < 4)  { i_prev = i; q_prev = q; return false; }
+
+    /* Catmull-Rom at fractional position mu between hi[2] and hi[1]. */
+    const acc_t x0 = (acc_t)hi[3], x1 = (acc_t)hi[2];
+    const acc_t x2 = (acc_t)hi[1], x3 = (acc_t)hi[0];
+    const acc_t y0 = (acc_t)hq[3], y1 = (acc_t)hq[2];
+    const acc_t y2 = (acc_t)hq[1], y3 = (acc_t)hq[0];
+    const acc_t m2 = mu * mu;
+    const acc_t m3 = m2 * mu;
+    const acc_t ii = acc_t(0.5f) * ((acc_t(2.0f) * x1) +
+                     (-x0 + x2) * mu +
+                     (acc_t(2.0f)*x0 - acc_t(5.0f)*x1 + acc_t(4.0f)*x2 - x3) * m2 +
+                     (-x0 + acc_t(3.0f)*x1 - acc_t(3.0f)*x2 + x3) * m3);
+    const acc_t qq = acc_t(0.5f) * ((acc_t(2.0f) * y1) +
+                     (-y0 + y2) * mu +
+                     (acc_t(2.0f)*y0 - acc_t(5.0f)*y1 + acc_t(4.0f)*y2 - y3) * m2 +
+                     (-y0 + acc_t(3.0f)*y1 - acc_t(3.0f)*y2 + y3) * m3);
+
+    if (cnt == 2) { im_i = (fixp_t)ii; im_q = (fixp_t)qq; }
+    if (cnt < 4) return false;
     cnt = 0;
 
-    /* Early-late error */
-    acc_t err = (acc_t)(i - i_prev) * (acc_t)i_mid
-              + (acc_t)(q - q_prev) * (acc_t)q_mid;
-    tau = tau + Kt * err;
+    const fixp_t si = (fixp_t)ii;
+    const fixp_t sq = (fixp_t)qq;
 
-    i_out = i;
-    q_out = q;
-    i_prev = i; q_prev = q;
+    /* Gardner: the error vanishes when the mid sample sits on the zero
+     * crossing, i.e. when the symbol sample sits on the eye centre. */
+    acc_t err = (acc_t)(si - ip_i) * (acc_t)im_i
+              + (acc_t)(sq - ip_q) * (acc_t)im_q;
+
+    integ = integ + Ki * err;
+    mu    = mu + Kp * err + integ;
+
+    /* Keep mu inside one sample by moving the interpolation window instead. */
+    if (mu >= acc_t(1.0f))      { mu = mu - acc_t(1.0f); cnt = 1; }
+    else if (mu < acc_t(0.0f))  { mu = mu + acc_t(1.0f); cnt = 7; }
+
+    ip_i = si; ip_q = sq;
+    i_out = si;
+    q_out = sq;
     return true;
 }
+
 
 /* ═══════════════════════════════════════════════════════════════════
  * Top-level HLS function
