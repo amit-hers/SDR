@@ -157,7 +157,20 @@ ad_connect axis_to_iq/underflow axi_ad9361/dac_dunf
 # exists because the fabric makes it, whatever firmware the board booted. That
 # also keeps the design loadable by the reversible PL-only path, which matters
 # for bring-up -- the alternative is a DFU flash for every iteration.
-# 40 MHz, raised from 30 to reach the 8 Mbit/s payload target.
+# 30 MHz. RAISING THIS REGRESSES THE LINK -- measured, not assumed.
+#
+#   30 MHz II=2   BER 1.9e-6   (measured twice)
+#   30 MHz II=1   BER 8.8e-3   (measured twice, two scripts)
+#   40 MHz II=2   BER 6.8e-2   (measured with a verified-clean harness)
+#
+# Both routes to more capacity made the link worse, and neither is explained.
+# csim cannot see either change: II is a scheduling directive and the clock is
+# not modelled at all, so the C code is identical in all three. Something in the
+# demodulator is sensitive to its clock rate or pipeline schedule in a way the
+# functional model does not capture -- worth finding before chasing throughput.
+#
+# Leaving the known-good configuration in place: 15 MS/s of demod capacity,
+# 7.5 Mbit/s of QPSK payload at sps=4.
 #
 # At sps=4 and 2 bits/symbol the payload is modem_clk/II/4*2 bit/s, and the
 # demodulator runs at II=2, so 30 MHz gave 15 MS/s = 7.5 Mbit/s -- just short of
@@ -170,7 +183,7 @@ ad_connect axis_to_iq/underflow axi_ad9361/dac_dunf
 # clock path is the one whose effect is understood and measurable.
 ad_ip_instance clk_wiz modem_clk_wiz [list \
   PRIM_IN_FREQ               100.000 \
-  CLKOUT1_REQUESTED_OUT_FREQ  40.000 \
+  CLKOUT1_REQUESTED_OUT_FREQ  30.000 \
   USE_LOCKED                 true \
   USE_RESET                  false \
   PRIMITIVE                  MMCM]
