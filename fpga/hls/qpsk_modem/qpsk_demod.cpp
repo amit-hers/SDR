@@ -511,13 +511,19 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
  * II=2 still gives 15 MS/s of capacity at 30 MHz, about 2x margin. Relaxing II
  * lets the scheduler spread the interpolator over two cycles instead of
  * demanding it in one. */
-/* II=1. The linear interpolator is short enough that the full rate costs
- * almost nothing: Fmax 54.49 MHz at II=1 against 57.40 at II=2. At the 30 MHz
- * modem clock that is 30 MS/s of capacity, i.e. 15 Mbit/s of QPSK payload,
- * which covers the 8 Mbit/s target (16 MS/s) with 1.9x margin. II=2 was only
- * ever needed for the cubic interpolator, whose multiply chain could not be
- * scheduled in one cycle. */
-#pragma HLS PIPELINE II=1
+/* II=2, and it must stay 2.
+ *
+ * II=1 schedules and meets timing (Fmax 54.49 MHz, WNS +0.552 in the
+ * integrated design) but MEASURES WORSE ON HARDWARE: BER 8.8e-3 against
+ * 1.9e-6 at II=2, reproduced with two different test scripts at the same
+ * 7.68 MS/s. csim cannot see the difference because II is a scheduling
+ * directive, so the C model is identical either way. The cause is not
+ * understood; the measurement is repeatable, so the throughput is bought by
+ * raising the modem clock instead, where the effect is understood.
+ *
+ * Capacity at II=2 is modem_clk/2 samples per second: 15 MS/s at 30 MHz,
+ * 20 MS/s at 40 MHz. The 8 Mbit/s target needs 16 MS/s. */
+#pragma HLS PIPELINE II=2
 
     static ap_uint<32> locks = 0;
     /* Declared here, not at the packing code below, so the reset path can
