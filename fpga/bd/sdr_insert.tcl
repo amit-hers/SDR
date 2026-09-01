@@ -157,30 +157,21 @@ ad_connect axis_to_iq/underflow axi_ad9361/dac_dunf
 # exists because the fabric makes it, whatever firmware the board booted. That
 # also keeps the design loadable by the reversible PL-only path, which matters
 # for bring-up -- the alternative is a DFU flash for every iteration.
-# 30 MHz. RAISING THIS REGRESSES THE LINK -- measured, not assumed.
+# 30 MHz.
 #
-#   30 MHz II=2   BER 1.9e-6   (measured twice)
-#   30 MHz II=1   BER 8.8e-3   (measured twice, two scripts)
-#   40 MHz II=2   BER 6.8e-2   (measured with a verified-clean harness)
+# An earlier version of this comment claimed the link regressed at 40 MHz and at
+# II=1. That claim is WITHDRAWN. Those numbers were single runs, and the
+# demodulator's lock turned out to be intermittent: two consecutive runs on a
+# freshly booted board, same bitstream and same script, measured BER 8.8e-3 and
+# then no sync at all. The "regressions" sit inside that spread, so they measured
+# nothing about the clock or the schedule.
 #
-# Both routes to more capacity made the link worse, and neither is explained.
-# csim cannot see either change: II is a scheduling directive and the clock is
-# not modelled at all, so the C code is identical in all three. Something in the
-# demodulator is sensitive to its clock rate or pipeline schedule in a way the
-# functional model does not capture -- worth finding before chasing throughput.
+# Nothing in qpsk_demod observes its clock anyway: the AGC adapts per SAMPLE,
+# the Costas and timing loops update per SYMBOL, and no counter ticks on clocks.
 #
-# Leaving the known-good configuration in place: 15 MS/s of demod capacity,
-# 7.5 Mbit/s of QPSK payload at sps=4.
-#
-# At sps=4 and 2 bits/symbol the payload is modem_clk/II/4*2 bit/s, and the
-# demodulator runs at II=2, so 30 MHz gave 15 MS/s = 7.5 Mbit/s -- just short of
-# 8. 40 MHz gives 20 MS/s = 10 Mbit/s. The demod's estimated Fmax with the
-# linear interpolator is 57.40 MHz, so 40 MHz keeps 1.4x margin.
-#
-# Raising the clock rather than dropping to II=1: II=1 also yields the capacity
-# on paper and meets timing, but MEASURED WORSE ON HARDWARE (BER 8.8e-3 against
-# 1.9e-6 at II=2, reproduced with two scripts). csim cannot see II at all. The
-# clock path is the one whose effect is understood and measurable.
+# 30 MHz is simply the rate this design has been exercised at. Raising it for
+# more throughput is untested rather than known-bad -- but fix the acquisition
+# problem first, or the measurement will not be trustworthy either way.
 ad_ip_instance clk_wiz modem_clk_wiz [list \
   PRIM_IN_FREQ               100.000 \
   CLKOUT1_REQUESTED_OUT_FREQ  30.000 \
