@@ -169,12 +169,27 @@ ad_connect axis_to_iq/underflow axi_ad9361/dac_dunf
 # Nothing in qpsk_demod observes its clock anyway: the AGC adapts per SAMPLE,
 # the Costas and timing loops update per SYMBOL, and no counter ticks on clocks.
 #
-# 30 MHz is simply the rate this design has been exercised at. Raising it for
-# more throughput is untested rather than known-bad -- but fix the acquisition
-# problem first, or the measurement will not be trustworthy either way.
+# 35 MHz, raised from 30 once the acquisition problem was fixed (the caveat
+# this comment used to carry) and the link measured end to end.
+#
+# Fabric capacity is modem_clk / II, and II is 2, so the clock sets the sample
+# rate ceiling directly:
+#
+#   30 MHz -> 15.00 MS/s -> 7.50 Mbit/s raw ceiling
+#   35 MHz -> 17.50 MS/s -> 8.75 Mbit/s raw ceiling
+#
+# Measured at 30 MHz: 14.40 MS/s carries 7147 kbit/s and locks, 15.36 MS/s
+# fails outright -- the byte rate collapses to 72% of theory because the
+# demodulator cannot consume samples fast enough and the symbol stream breaks.
+# That cliff is exactly the 15.00 MS/s capacity. 35 MHz moves it above 15.36
+# so the standard rate fits with margin.
+#
+# Why not higher: implementation measured WNS +6.345 ns on a 33.33 ns period,
+# so the real critical path is ~27.0 ns and the ceiling is about 37 MHz. 40 MHz
+# cannot close (25 ns period against a 27 ns path). 35 MHz leaves ~1.6 ns.
 ad_ip_instance clk_wiz modem_clk_wiz [list \
   PRIM_IN_FREQ               100.000 \
-  CLKOUT1_REQUESTED_OUT_FREQ  30.000 \
+  CLKOUT1_REQUESTED_OUT_FREQ  35.000 \
   USE_LOCKED                 true \
   USE_RESET                  false \
   PRIMITIVE                  MMCM]
