@@ -8,14 +8,19 @@
 void qpsk_mod_top(hls::stream<BitByte>&  s_axis_bits,
                   hls::stream<IQSample>& m_axis_iq,
                   volatile ap_uint<1>&   enabled,       // 0x10: gate TX output
-                  volatile ap_uint<2>&   bpsk_mode,     // 0x14: 0=QPSK, 1=BPSK
-                  volatile ap_uint<1>&   diff_mode)     // 0x1C: 1=differential
+                  volatile ap_uint<2>&   bpsk_mode,     // 0x18: 0=QPSK, 1=BPSK
+                  volatile ap_uint<1>&   diff_mode)     // 0x20: 1=differential
 {
 #pragma HLS INTERFACE axis       port=s_axis_bits
 #pragma HLS INTERFACE axis       port=m_axis_iq
 #pragma HLS INTERFACE s_axilite  port=enabled    offset=0x10 bundle=ctrl
-#pragma HLS INTERFACE s_axilite  port=bpsk_mode  offset=0x14 bundle=ctrl
-#pragma HLS INTERFACE s_axilite  port=diff_mode  offset=0x1C bundle=ctrl
+/* Offsets are on HLS's 8-byte grid (each scalar gets data + a reserved word),
+ * so they are actually honoured. bpsk_mode was requested at 0x14 and silently
+ * placed at 0x18; asking for 0x14 again while adding a second register pushed
+ * it to 0x24 and broke every script writing 0x43C10018. Request what the tool
+ * will grant, and check the generated *_hw.h after any interface change. */
+#pragma HLS INTERFACE s_axilite  port=bpsk_mode  offset=0x18 bundle=ctrl
+#pragma HLS INTERFACE s_axilite  port=diff_mode  offset=0x20 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=return     bundle=ctrl
 /* PIPELINE II=16, not II=1.
  *
