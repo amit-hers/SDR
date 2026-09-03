@@ -416,27 +416,26 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
      *
      * VALIDATED ON HARDWARE 2026-09-03, which is the evidence that counts.
      * UNIT-A transmits mod_ref.iq through its stock-PL DMA path, UNIT-B runs
-     * this core, 434 MHz, RSSI 64-65 dB with the AGC regulating, 8 independent
-     * acquisitions per arm (soft reset between each), same signal and same
-     * procedure for both bitstreams:
+     * this core, 434 MHz, RSSI 65.25 dB constant with the AGC regulating, 30
+     * independent acquisitions per arm. The soft reset only takes if the output
+     * is being drained -- a stalled core stops re-reading its AXI-Lite
+     * registers -- so every trial verifies it; see fpga/scripts/rx_acq_test.sh.
      *
-     *                       lock rate   min    median   mean
-     *   old slip-based loop     6/8      112     1019    723.4
-     *   this NCO loop           8/8      700     1019    979.1
+     *                       lock rate   min   p25   median   mean   full payload
+     *   old slip-based loop    70.0%     19    97      998   646.3     15/30
+     *   this NCO loop         100.0%    834  1019     1019  1012.8     29/30
      *
-     * The old loop's per-trial figures are 112, 1019, 1019, 1019, 1019, 415,
-     * 165, 1019 -- BIMODAL, and that bimodality is precisely the intermittent
-     * lock this work set out to fix. Every trial locks now, and the worst case
-     * improves 6.3x. 1019 of 1024 symbols is the whole payload less the
+     * The old loop's distribution is starkly BIMODAL -- 19, 36, 68, 75, 77, 86,
+     * 93, 93, 110, 236 ... then fifteen trials at 1019 -- with NINE outright
+     * failures below 200 symbols. That bimodality is precisely the intermittent
+     * lock this work set out to fix. This loop has none: zero failures, and the
+     * worst case improves 44x. 1019 of 1024 symbols is the whole payload less
      * matched-filter fill. The csim prediction (mean 100.4 -> 159.8, min
      * 10 -> 127, bimodality gone) holds on real hardware.
      *
      * C/RTL co-simulation also PASSES at best_run 251, identical to csim, so
      * the synthesised core matches the C model -- there is no static-state
      * divergence of the kind qpsk_mod.cpp documents.
-     *
-     * Caveat: 8 trials per arm is a small sample. The effect is unambiguous but
-     * the lock-rate figure itself deserves a longer run.
      *
      * THE FIX is to control the symbol RATE rather than clamp a phase. A
      * modulo-1 accumulator counts down by w each sample; a symbol strobes when
