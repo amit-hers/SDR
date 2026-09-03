@@ -568,13 +568,15 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
                     hls::stream<BitByte>&  m_axis_bits,
                     volatile ap_uint<1>&   demod_enabled,
                     volatile ap_uint<32>&  lock_count,
-                    volatile ap_uint<1>&   soft_reset)
+                    volatile ap_uint<1>&   soft_reset,
+                    volatile ap_uint<1>&   diff_mode)
 {
 #pragma HLS INTERFACE axis       port=s_axis_iq
 #pragma HLS INTERFACE axis       port=m_axis_bits
 #pragma HLS INTERFACE s_axilite  port=demod_enabled  offset=0x10 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=lock_count     offset=0x18 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=soft_reset     offset=0x20 bundle=ctrl
+#pragma HLS INTERFACE s_axilite  port=diff_mode      offset=0x28 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=return         bundle=ctrl
 /* II=2, not 1.
  *
@@ -617,8 +619,22 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
     // computation it is steering.
     const ap_uint<1> demod_raw = demod_enabled;   // copy out of volatile first
     const ap_uint<1> rst_raw   = soft_reset;
+    const ap_uint<1> diff_raw  = diff_mode;
     const bool       demod_en  = (demod_raw != 0);
     const bool       rst_en    = (rst_raw   != 0);
+    const bool       diff_en   = (diff_raw  != 0);
+
+    /* Differential decoding, the receive half of qpsk_mod's diff_mode. Must
+     * match the transmitter: both ends absolute, or both differential.
+     *
+     * data[n] = sym[n] - sym[n-1] (mod 4). A constant rotation r adds r to
+     * every received symbol and cancels in the difference, which is what makes
+     * the four-fold QPSK phase ambiguity disappear without a preamble
+     * correlator. See qpsk_mod.cpp for the full rationale and the cost.
+     *
+     * This sits on the SYMBOL path -- once every four samples -- not on the
+     * per-sample critical path, so it costs nothing that matters. */
+    static ap_uint<2> prev_phase = 0;   // differential phase reference
 
     /* ── Soft reset (0x20) ───────────────────────────────────────────
      * Level sensitive: while it is high the core holds every stage at its
@@ -653,9 +669,10 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
         (void)rrc_filter_decim(r0, r1, r2, r3, true);
         (void)timing_recovery(r0, r1, r2, r3, true);
         costas_loop(r2, r3, true);
-        locks   = 0;
-        bit_acc = 0;
-        sym_cnt = 0;
+        locks    = 0;
+        bit_acc  = 0;
+        sym_cnt  = 0;
+        prev_phase = 0;
 #if SDR_BYPASS_TIMING
         fixed_phase = 0;
 #endif
@@ -714,6 +731,15 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 
     /* QPSK symbol decision */
     ap_uint<2> sym = qpsk_decision(ti, tq);
+    if (diff_en) {
+        /* Gray -> binary, then difference in PHASE. For two bits the Gray
+         * decode is the same operation as the encode, g ^ (g>>1). Differencing
+         * the raw symbol INDEX does not work: the index walks the circle as
+         * 0, 1, 3, 2, so a rotation is not a constant offset in it. */
+        const ap_uint<2> ph = (ap_uint<2>)(sym ^ (sym >> 1));
+        sym = (ap_uint<2>)(ph - prev_phase);
+        prev_phase = ph;
+    }
 
     /* Pack four 2-bit symbols into one output byte.
      *

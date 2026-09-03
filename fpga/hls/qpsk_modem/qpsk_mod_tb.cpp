@@ -31,7 +31,8 @@ typedef ap_axiu<32, 0, 0, 0> IQSample;   // data[15:0] = I, data[31:16] = Q
 typedef ap_axiu<8, 0, 0, 0>  BitByte;    // data = one payload byte
 
 void qpsk_mod_top(hls::stream<BitByte>&, hls::stream<IQSample>&,
-                  volatile ap_uint<1>&, volatile ap_uint<2>&);
+                  volatile ap_uint<1>&, volatile ap_uint<2>&,
+                  volatile ap_uint<1>&);
 
 namespace {
 std::vector<uint8_t> readFile(const std::string& p) {
@@ -58,6 +59,7 @@ int main(int argc, char** argv) {
     hls::stream<IQSample> out("out");
     volatile ap_uint<1> en = 1;
     volatile ap_uint<2> bpsk = 0;
+    volatile ap_uint<1> diff = 0;   // reference vectors are absolute
 
     std::vector<std::complex<double>> got;
     for (size_t n = 0; n < bytes.size(); ++n) {
@@ -65,7 +67,7 @@ int main(int argc, char** argv) {
         b.keep = -1; b.strb = -1;
         b.last = (n + 1 == bytes.size()) ? 1 : 0;
         in.write(b);
-        qpsk_mod_top(in, out, en, bpsk);
+        qpsk_mod_top(in, out, en, bpsk, diff);
         while (!out.empty()) {
             IQSample s = out.read();
             got.push_back({double((int16_t)(uint16_t)s.data.range(15,  0)),
