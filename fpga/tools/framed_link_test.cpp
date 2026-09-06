@@ -4,7 +4,7 @@
 //               fpga/tools/framed_link_test.cpp build/src/core/libsdr_core.a -lliquid -lcrypto
 //
 //   gen <n> <out.iq> <out.bytes>       numbered frames -> int16 IQ for iio_writedev
-//   acq <cap...>                       cold-start acquisition, one file per trial
+//   acq <pkt> <brate> <cap...>         cold-start acquisition, one file per trial
 //   ser <cap> <ref.bytes> <txlen> [pkt] channel byte/symbol error rate
 //   per <cap> <ref.bytes> <txlen> [pkt] per-frame loss, scoped to whole frames
 //
@@ -142,11 +142,16 @@ struct Variant { size_t paylen; bool fec; bool zeros; };
 // Edit this table to ask a different question -- a payload-length sweep, say.
 // It is left on the zero-run stress because that is the failure the scrambler
 // was added to fix, so re-running the tool re-checks the fix by default.
+// Throughput configuration: 1200-byte payloads, the largest that still leaves
+// the 1270-byte wire frame comfortably inside one 8192-byte DMA packet. Frame
+// efficiency is 1200/1270 = 94.5%; the 70 bytes of overhead are 32 preamble,
+// 18 header, 4 CRC and 16 postamble. One variant stays all-zero as a standing
+// check that the scrambler is still doing its job at the higher symbol rate.
 static const Variant VARIANTS[4] = {
-    { 200, false, false },   // control:  pseudorandom, unprotected
-    { 200, false, true  },   // 200 bytes of 0x00 -- 800 identical symbols
-    { 200, true,  false },   // pseudorandom + Reed-Solomon, 23 bytes of padding
-    {  32, true,  false },   // short + Reed-Solomon, 191 bytes of zero padding
+    { 1200, false, false },
+    { 1200, false, true  },   // 1200 bytes of 0x00 -- scrambler regression guard
+    { 1200, false, false },
+    { 1200, false, false },
 };
 static const int NVAR = 4;
 
@@ -571,14 +576,16 @@ static int doPer(int argc, char** argv) {
 // had to get before a frame decoded. Only the first packet counts -- every
 // later one begins after a DMA re-arm, which is a warm restart, not a cold one.
 static int doAcq(int argc, char** argv) {
-    double brate = 480000.0;
+    if (argc < 5) { fprintf(stderr, "acq <pkt_bytes> <byte_rate> <cap.bin...>\n"); return 2; }
+    const size_t PKT = (size_t)atol(argv[2]);
+    double brate = atof(argv[3]);
     printf("  trial   first frame   sync starts at   acquisition\n");
     std::vector<double> acq;
     ReedSolomon rs;
-    for (int a = 2; a < argc; ++a) {
+    for (int a = 4; a < argc; ++a) {
         FILE* f = fopen(argv[a], "rb"); if (!f) continue;
-        std::vector<uint8_t> cap(1024);
-        size_t n = fread(cap.data(), 1, 1024, f); fclose(f);
+        std::vector<uint8_t> cap(PKT);
+        size_t n = fread(cap.data(), 1, PKT, f); fclose(f);
         cap.resize(n);
         long bestpos = -1; uint32_t bestseq = 0;
         for (int off = 0; off < 4; ++off) {
@@ -594,16 +601,16 @@ static int doAcq(int argc, char** argv) {
                 break;
             }
         }
-        if (bestpos < 0) { printf("  %5d   %11s\n", a-1, "none"); continue; }
+        if (bestpos < 0) { printf("  %5d   %11s\n", a-3, "none"); continue; }
         if (bestpos < 0) bestpos = 0;
         acq.push_back((double)bestpos);
         printf("  %5d   seq %7u   %10ld B      %6.2f ms\n",
-               a-1, bestseq, bestpos, bestpos / brate * 1000.0);
+               a-3, bestseq, bestpos, bestpos / brate * 1000.0);
     }
     if (acq.empty()) { printf("\nno trial acquired\n"); return 0; }
     std::sort(acq.begin(), acq.end());
     double mean = 0; for (double v : acq) mean += v; mean /= acq.size();
-    printf("\nacquired in %zu of %d trials\n", acq.size(), argc-2);
+    printf("\nacquired in %zu of %d trials\n", acq.size(), argc-4);
     printf("acquisition bytes: median %.0f  mean %.0f  p90 %.0f  worst %.0f\n",
            acq[acq.size()/2], mean, acq[(size_t)(acq.size()*0.9)], acq.back());
     printf("acquisition time : median %.2f ms  mean %.2f ms  worst %.2f ms\n",

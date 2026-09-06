@@ -93,7 +93,7 @@ create_bd_cell -type module -reference adi_iq_to_axis  iq_to_axis
 create_bd_cell -type module -reference axis_to_adi_iq  axis_to_iq
 create_bd_cell -type module -reference axis_packetizer rx_packetizer
 
-# PKT_BYTES 8192, not the module's 1024 default.
+# PKT_BYTES 32768, not the module's 1024 default.
 #
 # The packet boundary is where a captured frame dies. The DMA is re-armed after
 # every transfer and the demodulator does not stop for it, so a couple of bytes
@@ -104,18 +104,23 @@ create_bd_cell -type module -reference axis_packetizer rx_packetizer
 # for the 270-770 byte frames measured is 26% to 75%.
 #
 # Frames that landed wholly inside a packet decoded at 99.85%, so the boundary,
-# not the radio, was the dominant loss. Eight times the packet cuts the straddle
-# probability eight times over, to 3.3%-9.4%.
+# not the radio, has been the dominant loss throughout. 1024 -> 8192 took frame
+# loss from 0.19% to 0.02% and recovered a third of the frames outright.
+#
+# 8192 was not enough for throughput. At 17.28 MS/s with 1200-byte payloads the
+# wire frame is 1270 B, so 1270/8192 = 15.5% of frames still straddled and
+# delivery capped at 84.8% -- 6.93 Mbit/s against a 7 Mbit/s target that the
+# radio itself was comfortably meeting (PER 0.04%, zero CRC failures). At 32768
+# the straddle is 3.9%, which puts delivery at 96.1% and goodput near 7.8.
 #
 # The cost is latency: a transfer does not complete until PKT_BYTES bytes have
-# accumulated, which at 480 kB/s is 17 ms against 2 ms. Larger is tempting --
-# 32768 would leave under 2.5% -- but 68 ms of buffering starts to matter to the
-# ARQ round trip, and this is a parameter, not a rewrite.
+# accumulated, 30 ms at 1.08 MB/s. That is affordable for video; 65536 would buy
+# only another 0.15 Mbit/s for twice the buffering, so this is the knee.
 #
 # The IIO buffer must be at least this large or the transfer is truncated
-# instead: scan size is 4 bytes, so buffer/length needs >= 2048. See
-# fpga/scripts/rx_framed.sh, which sets 8192.
-set_property CONFIG.PKT_BYTES {8192} [get_bd_cells rx_packetizer]
+# instead: scan size is 4 bytes, so buffer/length needs >= 8192. See
+# fpga/scripts/rx_framed.sh, which sets 16384 for headroom.
+set_property CONFIG.PKT_BYTES {32768} [get_bd_cells rx_packetizer]
 
 # ── RX: radio -> adapter -> demod -> packetizer -> DMA ───────────────────
 ad_connect axi_ad9361/adc_valid_i0  iq_to_axis/adc_valid
