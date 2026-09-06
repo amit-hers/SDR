@@ -64,16 +64,28 @@ echo "  l_clk_mon=$LC  datarate=$(devmem $((DB+0x4C)) 32)  src=$(devmem $((DB+0x
 echo "  mod AP=$(devmem 0x43C10000 32)  ready for a byte stream on /dev/iio:device3"
 
 # ---- RX side: ADC channel control MUST include the data-format bits --------
-# bit0 enable, bit4 dfmt_enable, bit5 dfmt_type, bit6 dfmt_se  =>  0x71
+# bit0 enable, bit4 dfmt_enable, bit5 dfmt_type, bit6 dfmt_se  =>  0x51
 #
 # With only bit0 set, axi_ad9361 passes raw OFFSET-BINARY to the demodulator,
 # which expects signed two's complement. Every negative sample wraps positive
-# and the constellation is destroyed. Measured at qpsk_demod's input:
-#   0x01 -> I in [16, 4093]   (unsigned)   demod symbol accuracy ~48%
-#   0x71 -> I in [-2043,2035] (signed)     demod symbol accuracy  99.4%
-# DATAFORMAT_DISABLE is 0, so the conversion hardware is present and was simply
-# switched off. csim never caught this because its vectors are already signed,
-# and the TX-side IQ probe could not see it because it taps the transmit path.
+# and the constellation is destroyed.
+#
+# dfmt_type (bit 5) must be 0 on this core. Measured by sweeping the register
+# with the RX IQ probe on the demodulator's own input, transmitter off, so the
+# truth is amplified noise:
+#
+#   0x01 -> I in [0, 32760]        offset binary, all positive
+#   0x31 -> I in [16128, 16648]    offset binary read as signed
+#   0x51 -> I in [-232, +272]      CORRECT: sane signed noise
+#   0x71 -> I in [-16384, 16368]   pinned on the 12-bit rails
+#
+# 0x71 was measured correct on an EARLIER ADC core; the core in this PL reports
+# version 0x000A0300 (10.03) at 0x79020000, and with 0x71 it rails the demod
+# input at 12-bit full scale regardless of RF -- identical with the transmitter
+# off, at every RX gain and every TX power -- which looks exactly like a dead
+# digital interface and is not (the PN monitor reads 0x0 under BIST INJ_RX).
+# Re-measure these bits after any core version change; do not carry the value
+# forward. With 0x51 the input is clean: rms 4465, peak 7648, 0% clipped.
 rx_channels_on() {
-  for ch in 0 1 2 3; do devmem $((0x79020400 + 64*ch)) 32 0x71; done
+  for ch in 0 1 2 3; do devmem $((0x79020400 + 64*ch)) 32 0x51; done
 }

@@ -377,6 +377,11 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
 /* ── Symbol timing recovery (early-late gate, simplified) ───────────
  * Returns true at the correct symbol sampling instant.
  */
+/* Set by timing_recovery when a strobe's fractional index hits the clamp; read
+ * by the top function into the mu_clamped diagnostic register. A file-scope
+ * flag rather than an out-parameter so the stage's signature stays as it is. */
+static bool g_mu_clamped = false;
+
 static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
                             bool rst)
 {
@@ -515,8 +520,9 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
          * correction, and a real divide would infer a divider on the critical
          * path for no accuracy that matters. */
         mu  = (nco + w) * acc_t((float)RRC_SPS_HW);
-        if (mu > acc_t(0.999f)) mu = acc_t(0.999f);
-        if (mu < acc_t(0.0f))   mu = acc_t(0.0f);
+        g_mu_clamped = false;
+        if (mu > acc_t(0.999f)) { mu = acc_t(0.999f); g_mu_clamped = true; }
+        if (mu < acc_t(0.0f))   { mu = acc_t(0.0f);   g_mu_clamped = true; }
         nco = nco + acc_t(1.0f);
         strobe = true;
     }
@@ -583,7 +589,8 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
                     volatile ap_uint<1>&   demod_enabled,
                     volatile ap_uint<32>&  lock_count,
                     volatile ap_uint<1>&   soft_reset,
-                    volatile ap_uint<1>&   diff_mode)
+                    volatile ap_uint<1>&   diff_mode,
+                    volatile ap_uint<32>&  mu_clamped)
 {
 #pragma HLS INTERFACE axis       port=s_axis_iq
 #pragma HLS INTERFACE axis       port=m_axis_bits
@@ -591,6 +598,15 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 #pragma HLS INTERFACE s_axilite  port=lock_count     offset=0x18 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=soft_reset     offset=0x20 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=diff_mode      offset=0x28 bundle=ctrl
+/* mu_clamped: strobes whose fractional index hit the [0,0.999] clamp.
+ *
+ * There is no other way to see from software whether the fractional
+ * interpolator is actually steering. When mu was derived from the post-wrap
+ * residue it sat at the clamp on EVERY strobe -- the interpolator was inert --
+ * and nothing observable on the board distinguished that from a working loop
+ * until frames failed. A healthy loop clamps rarely; a pinned one clamps on
+ * essentially every symbol, so the ratio against lock_count is the tell. */
+#pragma HLS INTERFACE s_axilite  port=mu_clamped     offset=0x30 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=return         bundle=ctrl
 /* II=2, not 1.
  *
@@ -616,6 +632,7 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 #pragma HLS PIPELINE II=2
 
     static ap_uint<32> locks = 0;
+    static ap_uint<32> muclamp = 0;
     /* Declared here, not at the packing code below, so the reset path can
      * reach them. The width rationale for both still lives with the packing. */
     static ap_uint<8>  bit_acc = 0;
@@ -684,6 +701,8 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
         (void)timing_recovery(r0, r1, r2, r3, true);
         costas_loop(r2, r3, true);
         locks    = 0;
+        muclamp  = 0;
+        mu_clamped = 0;
         bit_acc  = 0;
         sym_cnt  = 0;
         prev_phase = 0;
@@ -775,6 +794,8 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
      */
     bit_acc = (bit_acc << 2) | sym;
     sym_cnt++;
+
+    if (g_mu_clamped) { muclamp++; mu_clamped = muclamp; }
 
     if (sym_cnt == 4) {
         sym_cnt = 0;
