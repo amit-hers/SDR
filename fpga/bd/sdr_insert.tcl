@@ -93,6 +93,30 @@ create_bd_cell -type module -reference adi_iq_to_axis  iq_to_axis
 create_bd_cell -type module -reference axis_to_adi_iq  axis_to_iq
 create_bd_cell -type module -reference axis_packetizer rx_packetizer
 
+# PKT_BYTES 8192, not the module's 1024 default.
+#
+# The packet boundary is where a captured frame dies. The DMA is re-armed after
+# every transfer and the demodulator does not stop for it, so a couple of bytes
+# go missing at each boundary -- measured median 2 B, p90 3 B, so the stream
+# itself is 99.8% continuous. What that tiny gap costs is every frame UNLUCKY
+# ENOUGH TO STRADDLE it, and at 1024 bytes that was 43% of the frames on the
+# air: a frame of wire length W straddles with probability W/PKT_BYTES, which
+# for the 270-770 byte frames measured is 26% to 75%.
+#
+# Frames that landed wholly inside a packet decoded at 99.85%, so the boundary,
+# not the radio, was the dominant loss. Eight times the packet cuts the straddle
+# probability eight times over, to 3.3%-9.4%.
+#
+# The cost is latency: a transfer does not complete until PKT_BYTES bytes have
+# accumulated, which at 480 kB/s is 17 ms against 2 ms. Larger is tempting --
+# 32768 would leave under 2.5% -- but 68 ms of buffering starts to matter to the
+# ARQ round trip, and this is a parameter, not a rewrite.
+#
+# The IIO buffer must be at least this large or the transfer is truncated
+# instead: scan size is 4 bytes, so buffer/length needs >= 2048. See
+# fpga/scripts/rx_framed.sh, which sets 8192.
+set_property CONFIG.PKT_BYTES {8192} [get_bd_cells rx_packetizer]
+
 # ── RX: radio -> adapter -> demod -> packetizer -> DMA ───────────────────
 ad_connect axi_ad9361/adc_valid_i0  iq_to_axis/adc_valid
 ad_connect axi_ad9361/adc_enable_i0 iq_to_axis/adc_enable_i

@@ -388,3 +388,8 @@ ad_cpu_interrupt ps-11 mb-11 axi_spi/ip2intc_irpt
 # carrying the MEASURED AD9363 pin map, validated 2026-08-31 by the
 # axi_ad9361 PN monitor locking with zero errors on all four channels.
 source /home/amither/Documents/SDR/fpga/bd/sdr_insert.tcl
+
+# TEMPORARY diagnostic: TX IQ capture point (remove once TX IQ is proven)
+source /home/amither/Documents/SDR/fpga/bd/sdr_tx_iq_probe.tcl
+source /home/amither/Documents/SDR/fpga/bd/sdr_rx_iq_probe.tcl
+source /home/amither/Documents/SDR/fpga/bd/sdr_dac_pin_probe.tcl

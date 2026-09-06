@@ -19,6 +19,9 @@ devmem $((D+0x00)) 32 0x81          # ap_start + auto_restart
 for ch in 0 1 2 3; do devmem $((0x79020400 + 64*ch)) 32 0x51; done
 echo 1 > $R/scan_elements/in_voltage0_en 2>/dev/null
 echo 1 > $R/scan_elements/in_voltage1_en 2>/dev/null
+# At least PKT_BYTES (8192) worth, or the DMA transfer is truncated before the
+# packetizer's TLAST arrives. Scan size is 4 bytes, so 8192 here is 32768 bytes
+# -- four packets' headroom.
 echo 8192 > $R/buffer/length
 echo 1 > $R/buffer/enable 2>/dev/null
 sleep 1

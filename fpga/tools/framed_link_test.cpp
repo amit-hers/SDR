@@ -5,8 +5,13 @@
 //
 //   gen <n> <out.iq> <out.bytes>       numbered frames -> int16 IQ for iio_writedev
 //   acq <cap...>                       cold-start acquisition, one file per trial
-//   ser <cap> <ref.bytes> <txlen>      channel byte/symbol error rate
-//   per <cap> <ref.bytes> <txlen>      per-frame loss, scoped to whole frames
+//   ser <cap> <ref.bytes> <txlen> [pkt] channel byte/symbol error rate
+//   per <cap> <ref.bytes> <txlen> [pkt] per-frame loss, scoped to whole frames
+//
+// [pkt] is axis_packetizer's PKT_BYTES, default 1024. It is not cosmetic: the
+// byte grid is only continuous WITHIN one DMA transfer, so every alignment and
+// every "was this frame wholly captured" decision is scoped to it. Passing the
+// wrong value silently measures the wrong thing.
 //
 // Transmit the .iq with fpga/scripts/tx_cyclic.sh and receive with
 // fpga/scripts/rx_framed.sh; <txlen> is the byte-stream length that actually
@@ -357,7 +362,7 @@ static bool predictAnchor(const std::vector<uint8_t>& win,
 // across a packet boundary, because the demodulator keeps emitting through the
 // gap and an unknown number of bytes never reach the buffer.
 static int doSer(int argc, char** argv) {
-    if (argc < 5) { fprintf(stderr, "ser <cap.bin> <ref.bytes> <txlen>\n"); return 2; }
+    if (argc < 5) { fprintf(stderr, "ser <cap.bin> <ref.bytes> <txlen> [pkt_bytes]\n"); return 2; }
     auto slurp = [](const char* fn) {
         std::vector<uint8_t> v; FILE* f = fopen(fn, "rb");
         if (!f) { perror(fn); exit(1); }
@@ -375,7 +380,7 @@ static int doSer(int argc, char** argv) {
     for (int n = 0; n < 100000; ++n) { startOf.push_back(acc); acc += wireLen(VARIANTS[n % NVAR]); }
     (void)0;
 
-    const size_t PKT = 1024;
+    const size_t PKT = (argc > 5) ? (size_t)atol(argv[5]) : 1024;
     size_t tot_bytes = 0, tot_err = 0, pkts = 0, anchored = 0;
     std::vector<double> per_pkt;
 
@@ -420,6 +425,7 @@ static int doSer(int argc, char** argv) {
     double byte_er = (double)tot_err / (double)tot_bytes;
     // Four symbols to a byte, so a byte survives only if all four do.
     double ser = 1.0 - std::pow(1.0 - byte_er, 0.25);
+    printf("packet size %zu B\n", PKT);
     printf("anchored %zu of %zu packets (%.1f%%)\n", anchored, pkts, 100.0*anchored/pkts);
     printf("byte error rate %.4f%%   -> symbol error rate %.4f%%\n", byte_er*100, ser*100);
     printf("per-packet byte error: median %.4f%%  p90 %.4f%%  worst %.4f%%\n",
@@ -438,7 +444,7 @@ static int doSer(int argc, char** argv) {
 // exactly which frames were WHOLLY PRESENT in it; those, and only those, had a
 // chance to decode. The difference is not small -- it is most of the loss.
 static int doPer(int argc, char** argv) {
-    if (argc < 5) { fprintf(stderr, "per <cap.bin> <ref.bytes> <txlen>\n"); return 2; }
+    if (argc < 5) { fprintf(stderr, "per <cap.bin> <ref.bytes> <txlen> [pkt_bytes]\n"); return 2; }
     auto slurp = [](const char* fn) {
         std::vector<uint8_t> v; FILE* f = fopen(fn, "rb");
         if (!f) { perror(fn); exit(1); }
@@ -460,7 +466,7 @@ static int doPer(int argc, char** argv) {
         startOf.push_back(acc); acc += wireLen(VARIANTS[nseq % NVAR]); ++nseq;
     }
 
-    const size_t PKT = 1024;
+    const size_t PKT = (argc > 5) ? (size_t)atol(argv[5]) : 1024;
     size_t capturable[NVAR] = {0}, decoded[NVAR] = {0}, badpay = 0;
     size_t pkts = 0, anchored = 0, rescued = 0, crcfail = 0;
     std::vector<long> gaps; long prev_shift = 0; bool have_prev = false;
@@ -531,6 +537,7 @@ static int doPer(int argc, char** argv) {
         }
     }
 
+    printf("packet size %zu B\n", PKT);
     printf("packets %zu, anchored %zu (%.1f%%)  -- %zu of them by prediction "
            "because no frame in them decoded; %zu could not be placed at all\n"
            "reference stream %zu B\n\n",
