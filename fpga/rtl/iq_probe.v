@@ -22,7 +22,12 @@
 //   ctrl[15:0]  raddr  -- word to present on stat
 //   stat[31:0]         -- {Q[15:0], I[15:0]} at raddr, or the count when sel=1
 module iq_probe #(
-    parameter integer DEPTH_LOG2 = 11          // 2048 samples = 512 QPSK symbols
+    // 14 not 11: 2048 samples is 512 symbols, which is long enough to show
+    // ACQUISITION but far too short to show whether the loop HOLDS. A 512-symbol
+    // window of a real capture reads 4.69% SER while the DMA byte stream over
+    // 32768 symbols reads 65% -- the loss happens outside the window. 16384
+    // samples = 4096 symbols = four payload periods, enough to catch it.
+    parameter integer DEPTH_LOG2 = 14          // 16384 samples = 4096 QPSK symbols
 ) (
     input  wire        clk,                    // l_clk: the M_AXIS side
     input  wire        resetn,
