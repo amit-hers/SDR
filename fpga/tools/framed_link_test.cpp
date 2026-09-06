@@ -134,14 +134,14 @@ static void fillPayload(std::vector<uint8_t>& p, uint32_t seq, bool zeros) {
 // different road: it zero-pads a short payload out to 223 bytes, which is why
 // the 32-byte RS variant is here alongside the 200-byte one.
 struct Variant { size_t paylen; bool fec; bool zeros; };
-// Payload-length sweep at realistic video frame sizes. Every wire length stays
-// under the DMA's 1024-byte packet so that a frame can be wholly contained in
-// one capture and its loss attributed to the link rather than to the boundary.
+// Edit this table to ask a different question -- a payload-length sweep, say.
+// It is left on the zero-run stress because that is the failure the scrambler
+// was added to fix, so re-running the tool re-checks the fix by default.
 static const Variant VARIANTS[4] = {
-    {  64, false, false },   // wire 134
-    { 256, false, false },   // wire 326
-    { 512, false, false },   // wire 582
-    { 700, false, false },   // wire 770
+    { 200, false, false },   // control:  pseudorandom, unprotected
+    { 200, false, true  },   // 200 bytes of 0x00 -- 800 identical symbols
+    { 200, true,  false },   // pseudorandom + Reed-Solomon, 23 bytes of padding
+    {  32, true,  false },   // short + Reed-Solomon, 191 bytes of zero padding
 };
 static const int NVAR = 4;
 
@@ -481,7 +481,15 @@ static int doPer(int argc, char** argv) {
                 std::vector<uint8_t> pay(v.paylen);
                 fillPayload(pay, r->seq, v.zeros);
                 if (r->payload.size() != v.paylen ||
-                    std::memcmp(pay.data(), r->payload.data(), v.paylen) != 0) ++badpay;
+                    std::memcmp(pay.data(), r->payload.data(), v.paylen) != 0) {
+                    ++badpay;
+                    size_t nd = 0;
+                    for (size_t z = 0; z < v.paylen && z < r->payload.size(); ++z)
+                        if (pay[z] != r->payload[z]) ++nd;
+                    printf("    ! seq %u passed CRC but %zu of %zu payload bytes differ"
+                           " (len %zu vs %zu)\n",
+                           r->seq, nd, v.paylen, r->payload.size(), v.paylen);
+                }
                 if (!got.count(r->seq)) got[r->seq] = n;
                 if (!have) {
                     size_t refend = (startOf[r->seq] + wireLen(v) - POSTAMBLE_LEN) % RL;

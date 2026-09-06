@@ -1,4 +1,5 @@
 #include "sdr/framing/Framer.hpp"
+#include "sdr/framing/Scrambler.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include <cstring>
@@ -46,7 +47,15 @@ std::vector<uint8_t> Framer::encode(const uint8_t* payload, size_t payload_len,
         aes->crypt(encoded_payload.data(), encoded_payload.size(),
                    static_cast<uint64_t>(seq));
 
-    // 3. Build frame. Preamble first, so AGC/timing/carrier loops have a
+    // 3. Energy dispersal. After FEC so it covers Reed-Solomon's zero padding,
+    // after AES so neither transform can reintroduce a long constant run, and
+    // before the CRC so the CRC covers exactly the bytes that go on the wire.
+    // Unconditional: it is not a feature to negotiate but a property the
+    // differential modulator requires of anything it is asked to carry. See
+    // Scrambler.hpp for the measurements.
+    Scrambler::apply(encoded_payload.data(), encoded_payload.size(), seq);
+
+    // 4. Build frame. Preamble first, so AGC/timing/carrier loops have a
     // cold-start runway before the sync word; postamble last, so the
     // matched-filter/decimator chain has room to flush its group delay
     // instead of clipping the tail (including the CRC) — see Frame.hpp.

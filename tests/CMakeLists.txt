@@ -8,6 +8,7 @@ add_executable(sdr-tests
     test_arq.cpp
     test_splitmod.cpp
     test_aggregate.cpp
+    test_scramble.cpp
 )
 
 target_include_directories(sdr-tests PRIVATE
@@ -28,3 +29,4 @@ add_test(NAME dsp     COMMAND sdr-tests dsp)
 add_test(NAME arq     COMMAND sdr-tests arq)
 add_test(NAME splitmod COMMAND sdr-tests splitmod)
 add_test(NAME aggregate COMMAND sdr-tests aggregate)
+add_test(NAME scramble COMMAND sdr-tests scramble)

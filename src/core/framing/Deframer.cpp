@@ -1,4 +1,5 @@
 #include "sdr/framing/Deframer.hpp"
+#include "sdr/framing/Scrambler.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
 #include "sdr/crypto/AESCipher.hpp"
 #include <cstring>
@@ -129,6 +130,14 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
             bool crc_ok = (got == expected);
             std::vector<uint8_t> raw;
 
+            // Undo the transmitter's energy dispersal. The CRC above was
+            // deliberately checked FIRST, against the bytes as they arrived,
+            // because that is what the transmitter computed it over; from here
+            // on everything works on plaintext. The seed comes from the
+            // sequence number in the header, which is not scrambled -- a frame
+            // whose header did not survive is already lost on the CRC.
+            Scrambler::apply(wire.data(), wire.size(), seq_saved);
+
             if (fec && (flags_saved & FL_FEC)) {
                 std::vector<uint8_t> tryw = wire;
                 if (aes && (flags_saved & FL_ENCRYPT))
@@ -141,6 +150,14 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
                         // codeword the transmitter sent?
                         std::vector<uint8_t> fixed = fec->encode(raw.data(), raw.size());
                         if (fixed.size() == static_cast<size_t>(wire_len)) {
+                            // Reproduce the WIRE bytes, not the plaintext ones.
+                            // The CRC being compared against was computed after
+                            // AES and after scrambling, so the reconstruction
+                            // has to pass back through both, in that order.
+                            if (aes && (flags_saved & FL_ENCRYPT))
+                                aes->crypt(fixed.data(), fixed.size(),
+                                           static_cast<uint64_t>(seq_saved));
+                            Scrambler::apply(fixed.data(), fixed.size(), seq_saved);
                             std::vector<uint8_t> body2(HEADER_SIZE + fixed.size());
                             std::memcpy(body2.data(), hdr_buf_, HEADER_SIZE);
                             std::memcpy(body2.data() + HEADER_SIZE, fixed.data(), fixed.size());
