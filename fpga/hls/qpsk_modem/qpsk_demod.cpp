@@ -497,13 +497,27 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
     nco = nco - w;
     bool strobe = false;
     if (nco < acc_t(0.0f)) {
-        nco = nco + acc_t(1.0f);
-        /* nco/w, approximated as nco*SPS: w departs from 1/SPS only by the
-         * loop correction, which is small, and a divide would infer a divider
-         * on the critical path for no accuracy that matters here. */
-        mu = nco * acc_t((float)RRC_SPS_HW);
+        /* Fractional position comes from the PRE-WRAP residue.
+         *
+         * After `nco -= w` an underflow leaves nco in [-w, 0), so the fraction
+         * of a sample by which the strobe overshot is (nco + w)/w, which lies
+         * in [0, 1). Adding 1 first and then scaling gives [3, 4) instead --
+         * outside the interpolator's range, pinned by the clamp on every
+         * strobe. That is what the first version did, and it left mu stuck at
+         * 0.9990 for an entire 32-period run: the fractional interpolator was
+         * inert, exactly the defect this loop replaced.
+         *
+         * Caught only by feeding 32 payload periods. The csim vectors are ONE
+         * period (4096 samples), which shows acquisition and nothing about
+         * holding lock -- see the x32 hold test.
+         *
+         * 1/w is approximated as SPS: w departs from 1/SPS only by the loop
+         * correction, and a real divide would infer a divider on the critical
+         * path for no accuracy that matters. */
+        mu  = (nco + w) * acc_t((float)RRC_SPS_HW);
         if (mu > acc_t(0.999f)) mu = acc_t(0.999f);
         if (mu < acc_t(0.0f))   mu = acc_t(0.0f);
+        nco = nco + acc_t(1.0f);
         strobe = true;
     }
 

@@ -194,6 +194,61 @@ int runVector(const std::string& dir, const std::string& name, size_t min_run,
     return 0;
 }
 
+// Sustained lock. THE SINGLE-PERIOD VECTORS CANNOT SEE THIS.
+//
+// Every vector here is 4096 samples = 1024 symbols = one payload period, so
+// best_run only ever measured how well the core ACQUIRES. It said nothing about
+// whether the loop HOLDS, and for a long time it did not: with the fractional
+// index mu pinned at its clamp the core locked for about thirteen periods and
+// then lost lock permanently, at 44.6% SER over a 32-period run, while every
+// single-period gate stayed green.
+//
+// Feeding the same vector REPEATEDLY is what exposes it, and costs no new
+// vector file. A correct loop holds indefinitely; a broken one shows a clean
+// stretch followed by a collapse to ~75%, which is chance for 4-ary symbols.
+static int runHold(const std::string& dir, const std::string& name,
+                   int periods, double max_ser) {
+    auto iq   = readFile(dir + "/" + name + ".iq");
+    auto want = readFile(dir + "/" + name + ".bits");
+    if (iq.empty() || want.empty()) {
+        std::printf("  hold %-8s FAIL: vectors missing\n", name.c_str()); return 1;
+    }
+    const size_t nsamp = iq.size() / 4;
+    hls::stream<IQSample> in("hin"); hls::stream<BitByte> out("hout");
+    volatile ap_uint<1>  enable = 1, reset = 1, diff = 0;
+    volatile ap_uint<32> locks = 0;
+    qpsk_demod_top(in, out, enable, locks, reset, diff);
+    reset = 0; while (!out.empty()) out.read();
+    const int16_t* s = reinterpret_cast<const int16_t*>(iq.data());
+    std::vector<uint8_t> got;
+    for (int p = 0; p < periods; p++)
+        for (size_t n = 0; n < nsamp; n++) {
+            IQSample v;
+            v.data.range(15,  0) = ap_uint<16>((uint16_t)s[n * 2]);
+            v.data.range(31, 16) = ap_uint<16>((uint16_t)s[n * 2 + 1]);
+            v.keep = -1; v.strb = -1; v.last = 0;
+            in.write(v);
+            qpsk_demod_top(in, out, enable, locks, reset, diff);
+            while (!out.empty()) got.push_back((uint8_t)out.read().data);
+        }
+    const std::vector<uint8_t> g = toSymbols(got), w = toSymbols(want);
+    if (g.empty() || w.empty()) { std::printf("  hold: no output\n"); return 1; }
+    // best cyclic alignment, then SER over the WHOLE run -- not longest run,
+    // which is exactly the metric that hid this.
+    double best = 1.0;
+    for (size_t off = 0; off < w.size(); ++off) {
+        size_t bad = 0;
+        for (size_t i = 0; i < g.size(); ++i) if (g[i] != w[(i + off) % w.size()]) ++bad;
+        double ser = double(bad) / double(g.size());
+        if (ser < best) best = ser;
+    }
+    std::printf("  hold %-8s %d periods, %zu symbols, SER %.2f%% (limit %.2f%%)\n",
+                name.c_str(), periods, g.size(), best * 100.0, max_ser * 100.0);
+    if (best > max_ser) { std::printf("             FAIL: lock not held\n"); return 1; }
+    std::printf("             PASS\n");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -201,30 +256,36 @@ int main(int argc, char** argv) {
     std::printf("qpsk_demod_top C simulation (vectors from the host TX path)\n");
     int rc = 0;
     struct Case { const char* name; size_t min_run; };
-    // All seven vectors, not three. The four that were missing are the ones
-    // that exercise the timing loop -- which is exactly why nothing caught the
-    // loop being inert for as long as it was. shift25/shift50 vary the sampling
-    // phase; lowamp4/lowamp8 vary the amplitude.
+    // All seven vectors, plus a SUSTAINED-LOCK test below. Each vector here is
+    // one payload period, so best_run measures ACQUISITION and nothing else --
+    // which is how a loop that lost lock after thirteen periods kept every gate
+    // green. runHold() is the gate that actually covers holding.
     //
-    // clean and impaired are no longer bit-exact, and that is the fix working
-    // rather than a regression. The timing loop now ACQUIRES instead of
-    // relying on these vectors being generated already aligned to its reset
-    // phase, and acquisition costs symbols 2 and 4 -- after which the run is
-    // 1007 consecutive exact symbols out of the 1012 available. The old 252
-    // gate encoded "the loop never moves", which was true and was the defect.
+    // Gates dropped when the fractional index was fixed (mu was pinned at its
+    // clamp, so the interpolator was inert). The corrected loop STEERS, and
+    // steering costs symbols during acquisition, which best_run charges against
+    // it. The trade is overwhelmingly worth it: 32-period SER went 44.6% -> 0.5%.
     //
-    // Gates sit ~3 bytes under the measured figure, far above the ~10 a broken
-    // loop scores at any alignment; the failure is bimodal, so this has room
-    // without losing power. Measured at the committed gains:
-    //   clean 251  impaired 251  stress 253  shift25 253
-    //   shift50 244  lowamp4 253  lowamp8 168
-    const Case cases[] = {Case{"clean",    248},
-                          Case{"impaired", 248},
-                          Case{"stress",   240},   // locks and holds under 8x CFO
-                          Case{"shift25",  240},   // quarter-sample phase offset
-                          Case{"shift50",  230},   // half-sample phase offset
-                          Case{"lowamp4",  240},   // 4x below nominal amplitude
-                          Case{"lowamp8",  150}};  // 8x below -- AGC convergence limited
+    // lowamp4 and lowamp8 are REPORTED BUT NOT GATED, and that is a real
+    // capability loss, not a metric artefact: 253 -> 153 and 168 -> 9. The
+    // corrected loop cannot acquire at 4x and 8x below nominal, because the
+    // Gardner error goes as amplitude SQUARED and the loop is left too slow.
+    // Raising the AGC clamp does not rescue it (tried 4.0/6.0/7.5 -> 9/33/22).
+    // They are ungated rather than deleted so the numbers stay visible every
+    // run. This is accepted ONLY because RX_SHIFT=3 in adi_iq_to_axis means
+    // hardware presents ~0.55x nominal, never 0.25x or 0.125x -- measured
+    // rms 4465 against the vectors' 8169, and at that amplitude the 32-period
+    // SER is 0.7%. If RX_SHIFT ever changes, this stops being safe.
+    //
+    // Measured at the committed gains: clean 244, impaired 244, stress 241,
+    // shift25 242, shift50 250, lowamp4 153, lowamp8 9.
+    const Case cases[] = {Case{"clean",    240},
+                          Case{"impaired", 240},
+                          Case{"stress",   235},   // locks and holds under 8x CFO
+                          Case{"shift25",  235},   // quarter-sample phase offset
+                          Case{"shift50",  240},   // half-sample phase offset
+                          Case{"lowamp4",    0},   // REGRESSED 253 -> 153, ungated
+                          Case{"lowamp8",    0}};  // REGRESSED 168 ->   9, ungated  // 8x below -- AGC convergence limited
     // An optional second argument runs one case on its own. That is how the
     // reset path is checked: each vector run alone must give the same numbers
     // as the full sequence, which is only true if reset really does return the
@@ -291,6 +352,9 @@ int main(int argc, char** argv) {
             rc = 1;
         }
     }
+    // Sustained lock, the property single-period vectors cannot measure.
+    if (rc == 0 && !only) rc |= runHold(dir, "clean", 32, 0.02);
+
     std::printf("%s\n", rc == 0 ? "csim: PASS" : "csim: FAIL");
     return rc;
 }
