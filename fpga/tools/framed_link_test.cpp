@@ -7,6 +7,7 @@
 //   acq <pkt> <brate> <cap...>         cold-start acquisition, one file per trial
 //   ser <cap> <ref.bytes> <txlen> [pkt] channel byte/symbol error rate
 //   per <cap> <ref.bytes> <txlen> [pkt] per-frame loss, scoped to whole frames
+//   head <cap> <ref.bytes> <txlen> <pkt> <brate>  re-acquisition after each DMA gap
 //
 // [pkt] is axis_packetizer's PKT_BYTES, default 1024. It is not cosmetic: the
 // byte grid is only continuous WITHIN one DMA transfer, so every alignment and
@@ -620,6 +621,78 @@ static int doAcq(int argc, char** argv) {
     return 0;
 }
 
+// Re-acquisition after a DMA packet boundary, measured as the leading error
+// burst at the head of each packet.
+//
+// The demodulator keeps running through the re-arm gap while the bytes it emits
+// go nowhere, so every packet begins with the loops briefly out of step -- the
+// same convergence the cold-start test probes, but happening hundreds of times
+// per capture instead of once per trial. That makes it measurable at any
+// PKT_BYTES, whereas the cold-start test cannot resolve anything shorter than
+// one packet (30 ms at 32768) and so needs a small-packet bitstream.
+static int doHead(int argc, char** argv) {
+    if (argc < 6) { fprintf(stderr, "head <cap> <ref.bytes> <txlen> <pkt> <brate>\n"); return 2; }
+    auto slurp = [](const char* fn) {
+        std::vector<uint8_t> v; FILE* f = fopen(fn, "rb");
+        if (!f) { perror(fn); exit(1); }
+        uint8_t b[65536]; size_t n;
+        while ((n = fread(b,1,sizeof b,f))) v.insert(v.end(), b, b+n);
+        fclose(f); return v;
+    };
+    std::vector<uint8_t> cap = slurp(argv[2]), ref = slurp(argv[3]);
+    size_t txlen = (size_t)atol(argv[4]);
+    if (txlen && txlen < ref.size()) ref.resize(txlen);
+    const size_t PKT = (size_t)atol(argv[5]);
+    double brate = atof(argv[6]);
+    ReedSolomon rs;
+
+    std::vector<size_t> startOf; size_t acc = 0;
+    for (int n = 0; n < 100000; ++n) { startOf.push_back(acc); acc += wireLen(VARIANTS[n % NVAR]); }
+
+    std::vector<double> heads;
+    const size_t QUIET = 64;   // a clean stretch this long ends the leading burst
+    for (size_t pk = 0; pk + PKT <= cap.size(); pk += PKT) {
+        std::vector<uint8_t> win(cap.begin()+pk, cap.begin()+pk+PKT);
+        long shift = 0; bool have = false; int off = 0;
+        for (off = 0; off < 4 && !have; ++off) {
+            std::vector<uint8_t> s2 = off ? realign(win, off*2) : win;
+            Deframer d;
+            for (size_t n = 0; n < s2.size() && !have; ++n) {
+                auto r = d.push(s2[n], &rs, nullptr);
+                if (!r) continue;
+                size_t refend = (startOf[r->seq] + wireLen(VARIANTS[r->seq % NVAR])
+                                 - POSTAMBLE_LEN) % ref.size();
+                shift = (long)refend - 1 - (long)n; have = true;
+            }
+        }
+        if (!have) continue;
+        std::vector<uint8_t> s2 = (off-1) ? realign(win, (off-1)*2) : win;
+        long last_err = -1; size_t clean = 0;
+        for (size_t k = 0; k < s2.size(); ++k) {
+            long ri = (shift + (long)k) % (long)ref.size(); if (ri < 0) ri += (long)ref.size();
+            if (s2[k] != ref[(size_t)ri]) { last_err = (long)k; clean = 0; }
+            else if (++clean >= QUIET && last_err >= 0) break;
+        }
+        heads.push_back((double)(last_err + 1));
+    }
+    if (heads.empty()) { printf("no packet could be anchored\n"); return 0; }
+    std::sort(heads.begin(), heads.end());
+    double mean = 0; for (double v : heads) mean += v; mean /= heads.size();
+    size_t zero = 0; for (double v : heads) if (v == 0) ++zero;
+    printf("re-acquisition after a DMA boundary, over %zu packets of %zu B\n", heads.size(), PKT);
+    printf("  leading error burst: median %.0f B, mean %.0f B, p90 %.0f B, worst %.0f B\n",
+           heads[heads.size()/2], mean, heads[(size_t)(heads.size()*0.9)], heads.back());
+    printf("  in time:             median %.3f ms, p90 %.3f ms, worst %.3f ms\n",
+           heads[heads.size()/2]/brate*1000, heads[(size_t)(heads.size()*0.9)]/brate*1000,
+           heads.back()/brate*1000);
+    printf("  in symbols:          median %.0f, worst %.0f\n",
+           heads[heads.size()/2]*4, heads.back()*4);
+    printf("  packets with NO leading burst: %zu (%.1f%%)\n", zero, 100.0*zero/heads.size());
+    printf("  (the 32-byte preamble absorbs a burst shorter than itself, which is\n"
+           "   why frame loss stays at 0.00%% while these bursts are non-zero)\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: framedtest gen|rx ...\n"); return 2; }
     if (!strcmp(argv[1], "gen")) return doGen(argc, argv);
@@ -627,5 +700,6 @@ int main(int argc, char** argv) {
     if (!strcmp(argv[1], "ser")) return doSer(argc, argv);
     if (!strcmp(argv[1], "per")) return doPer(argc, argv);
     if (!strcmp(argv[1], "acq")) return doAcq(argc, argv);
+    if (!strcmp(argv[1], "head")) return doHead(argc, argv);
     fprintf(stderr, "unknown mode %s\n", argv[1]); return 2;
 }
