@@ -1,0 +1,107 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, e.g. v1.3.0'
+        required: true
+      build_type:
+        description: 'dev | rc | release'
+        required: true
+        default: rc
+
+# A permanent release is rebuilt FROM THE TAG, never uploaded from a developer
+# workstation. That is the whole point of doing it here.
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # build-release.sh needs tags and full history
+
+      - name: Resolve version and type
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "build_type=release"        >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}"       >> "$GITHUB_OUTPUT"
+            echo "build_type=${{ inputs.build_type }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd
+
+      - name: Build software
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
+
+      # VIVADO DOES NOT RUN ON A GITHUB RUNNER. The bitstream is therefore an
+      # INPUT to the release, not a product of it: it is built on the licensed
+      # machine (the licence is node-locked to a USB NIC) and committed under
+      # fpga/prebuilt/ as part of preparing the tag. The manifest records the
+      # fpga_commit, so the bitstream is still tied to a reviewable revision.
+      - name: Check the tagged bitstream is present
+        run: |
+          if [ ! -f fpga/prebuilt/system_top.bit ]; then
+            echo "ERROR: fpga/prebuilt/system_top.bit is missing."
+            echo "A release must carry the bitstream that was hardware-validated."
+            echo "Build it on the licensed machine, commit it, then re-tag:"
+            echo "  cp .../libre.runs/impl_1/system_top.bit fpga/prebuilt/"
+            exit 1
+          fi
+
+      - name: Assemble the release bundle
+        env:
+          SDR_HDL_DIR: ${{ github.workspace }}/fpga/prebuilt-hdl
+        run: |
+          # build-release.sh expects the Vivado run layout; stage the committed
+          # bitstream into it so one code path serves CI and the workstation.
+          mkdir -p fpga/prebuilt-hdl/libre.runs/impl_1
+          cp fpga/prebuilt/system_top.bit fpga/prebuilt-hdl/libre.runs/impl_1/
+          ./release/build-release.sh "${{ steps.v.outputs.version }}" "${{ steps.v.outputs.build_type }}"
+
+      - name: Verify the bundle verifies itself
+        run: |
+          B="out/pluto-datalink-${{ steps.v.outputs.version }}"
+          ( cd "$B" && sha256sum -c --quiet checksums.sha256 )
+          ( cd out && sha256sum -c "pluto-datalink-${{ steps.v.outputs.version }}.sha256" )
+          python3 -c "import json;m=json.load(open('$B/manifest.json'));print(m)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-datalink-${{ steps.v.outputs.version }}
+          path: |
+            out/*.tar.zst
+            out/*.sha256
+          retention-days: 90
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.tar.zst
+            out/*.sha256
+          body: |
+            Deployment bundle for `${{ steps.v.outputs.version }}`.
+
+            ```
+            tar --zstd -xf pluto-datalink-${{ steps.v.outputs.version }}.tar.zst
+            cd pluto-datalink-${{ steps.v.outputs.version }}
+            ./scripts/flash.sh UNIT-A . --persist
+            ```
+
+            Verify before flashing:
+            `sha256sum -c pluto-datalink-${{ steps.v.outputs.version }}.sha256`

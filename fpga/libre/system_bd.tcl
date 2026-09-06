@@ -393,3 +393,7 @@ source /home/amither/Documents/SDR/fpga/bd/sdr_insert.tcl
 source /home/amither/Documents/SDR/fpga/bd/sdr_tx_iq_probe.tcl
 source /home/amither/Documents/SDR/fpga/bd/sdr_rx_iq_probe.tcl
 source /home/amither/Documents/SDR/fpga/bd/sdr_dac_pin_probe.tcl
+
+# Read-only identity block, so software can refuse a bitstream it does not
+# understand. Sourced last: it depends on nothing and nothing depends on it.
+source /home/amither/Documents/SDR/fpga/bd/sdr_version_id.tcl

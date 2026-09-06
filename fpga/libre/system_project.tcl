@@ -9,6 +9,7 @@ adi_project_files libre [list \
   "system_top.v" \
   "system_constr.xdc" \
   "$ad_hdl_dir/library/common/ad_iobuf.v" \
+  "/home/amither/Documents/SDR/fpga/rtl/axi_version_id.v" \
   "/home/amither/Documents/SDR/fpga/bd/sdr_clock_groups.xdc"]
 
 set_property is_enabled false [get_files  *system_sys_ps7_0.xdc]

@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd shellcheck
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Build the link-test tool
+        run: |
+          g++ -O2 -std=c++17 -I include -o build/framed_link_test \
+              fpga/tools/framed_link_test.cpp build/src/core/libsdr_core.a -lliquid -lcrypto
+
+      # These run on the board and cannot be exercised in CI, so at least prove
+      # they parse. A syntax error in a deployment script is only ever found at
+      # the worst possible moment otherwise.
+      - name: Shell scripts parse
+        run: |
+          for f in release/*.sh release/templates/*.sh fpga/scripts/*.sh scripts/*.sh; do
+            [ -f "$f" ] || continue
+            bash -n "$f" || sh -n "$f" || { echo "SYNTAX FAIL: $f"; exit 1; }
+          done
+
+      - name: Release tooling self-check
+        run: |
+          # A dev build needs no tag and no hardware, so the bundler itself is
+          # exercised on every push rather than only at release time.
+          ./release/build-release.sh v0.0.0-ci dev || true
+          test -f out/pluto-datalink-v0.0.0-ci/manifest.json
+          ( cd out/pluto-datalink-v0.0.0-ci && sha256sum -c --quiet checksums.sha256 )
+
+      - name: Checksum tamper detection must work
+        run: |
+          # Proves acceptance criterion 3: a modified artifact is detected.
+          B=out/pluto-datalink-v0.0.0-ci
+          printf 'tampered' >> "$B/config/ad936x.conf"
+          if ( cd "$B" && sha256sum -c --quiet checksums.sha256 ) 2>/dev/null; then
+            echo "FAIL: checksum verification did not detect a modified file"; exit 1
+          fi
+          echo "OK: tampering detected"

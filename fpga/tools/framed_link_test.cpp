@@ -8,6 +8,8 @@
 //   ser <cap> <ref.bytes> <txlen> [pkt] channel byte/symbol error rate
 //   per <cap> <ref.bytes> <txlen> [pkt] per-frame loss, scoped to whole frames
 //   head <cap> <ref.bytes> <txlen> <pkt> <brate>  re-acquisition after each DMA gap
+//   genvid <file> <out.bytes>          frame a real file (H.264) for transmission
+//   rxvid  <cap> <file> <pkt> <brate>  reassemble it and report what arrived
 //
 // [pkt] is axis_packetizer's PKT_BYTES, default 1024. It is not cosmetic: the
 // byte grid is only continuous WITHIN one DMA transfer, so every alignment and
@@ -693,6 +695,104 @@ static int doHead(int argc, char** argv) {
     return 0;
 }
 
+// ── Real payload: carry a file over the link ──────────────────────────────
+//
+// The sequence number doubles as the chunk index, so reassembly needs no side
+// channel: frame n carries bytes [n*VID_CHUNK, (n+1)*VID_CHUNK) of the source.
+// A frame that fails CRC leaves a hole of known position and size, which makes
+// "how much of the video arrived" answerable rather than merely "how many
+// frames decoded".
+static const size_t VID_CHUNK = 1200;
+
+static int doGenVid(int argc, char** argv) {
+    if (argc < 4) { fprintf(stderr, "genvid <file> <out.bytes>\n"); return 2; }
+    FILE* f = fopen(argv[2], "rb");
+    if (!f) { perror(argv[2]); return 1; }
+    std::vector<uint8_t> src;
+    { uint8_t b[65536]; size_t n; while ((n = fread(b,1,sizeof b,f))) src.insert(src.end(), b, b+n); }
+    fclose(f);
+
+    Framer fr;
+    std::vector<uint8_t> stream;
+    size_t nfr = (src.size() + VID_CHUNK - 1) / VID_CHUNK;
+    for (size_t n = 0; n < nfr; ++n) {
+        size_t off = n * VID_CHUNK;
+        size_t len = std::min(VID_CHUNK, src.size() - off);
+        auto fm = fr.encode(src.data() + off, len, 0, ModCode::QPSK,
+                            BwCode::BW_20, 0x5D0A, (uint32_t)n, nullptr, nullptr);
+        stream.insert(stream.end(), fm.begin(), fm.end());
+    }
+    FILE* o = fopen(argv[3], "wb");
+    fwrite(stream.data(), 1, stream.size(), o); fclose(o);
+    printf("source %zu B -> %zu frames of <=%zu B payload -> %zu B on the wire\n",
+           src.size(), nfr, VID_CHUNK, stream.size());
+    printf("overhead %.2f%%; at 1.08 MB/s that is %.2f s of airtime\n",
+           100.0*(stream.size()-src.size())/stream.size(), stream.size()/1080000.0);
+    return 0;
+}
+
+static int doRxVid(int argc, char** argv) {
+    if (argc < 6) { fprintf(stderr, "rxvid <cap> <file> <pkt> <brate>\n"); return 2; }
+    auto slurp = [](const char* fn) {
+        std::vector<uint8_t> v; FILE* f = fopen(fn, "rb");
+        if (!f) { perror(fn); exit(1); }
+        uint8_t b[65536]; size_t n;
+        while ((n = fread(b,1,sizeof b,f))) v.insert(v.end(), b, b+n);
+        fclose(f); return v;
+    };
+    std::vector<uint8_t> cap = slurp(argv[2]), src = slurp(argv[3]);
+    const size_t PKT = (size_t)atol(argv[4]);
+    double brate = atof(argv[5]);
+    size_t nfr = (src.size() + VID_CHUNK - 1) / VID_CHUNK;
+
+    // Track which chunks arrived rather than inferring it from the buffer: H.264
+    // is full of genuine zero runs, so "these bytes are zero" cannot distinguish
+    // a hole from real content.
+    std::vector<uint8_t> out(src.size(), 0);
+    std::vector<char> got(nfr, 0);
+    size_t crcfail = 0, badseq = 0, dup = 0;
+
+    for (size_t pk = 0; pk < cap.size(); pk += PKT) {
+        size_t end = std::min(pk + PKT, cap.size());
+        std::vector<uint8_t> win(cap.begin()+pk, cap.begin()+end);
+        for (int off = 0; off < 4; ++off) {
+            std::vector<uint8_t> s2 = off ? realign(win, off*2) : win;
+            Deframer d;
+            for (size_t n = 0; n < s2.size(); ++n) {
+                auto r = d.push(s2[n], nullptr, nullptr);
+                if (!r) continue;
+                if (r->seq >= nfr) { ++badseq; continue; }
+                if (got[r->seq]) { ++dup; continue; }
+                size_t o = r->seq * VID_CHUNK;
+                size_t len = std::min(r->payload.size(), src.size() - o);
+                std::memcpy(out.data() + o, r->payload.data(), len);
+                got[r->seq] = 1;
+            }
+            crcfail += d.crcErrors();
+        }
+    }
+    size_t have = 0; for (char c : got) if (c) ++have;
+
+    size_t bad = 0, cmp = 0;
+    for (size_t n = 0; n < nfr; ++n) {
+        if (!got[n]) continue;
+        size_t o = n * VID_CHUNK, len = std::min(VID_CHUNK, src.size() - o);
+        cmp += len;
+        if (std::memcmp(out.data()+o, src.data()+o, len) != 0) ++bad;
+    }
+    double dur = cap.size() / brate;
+    printf("capture %zu B = %.2f s of air\n", cap.size(), dur);
+    printf("chunks: %zu of %zu recovered (%.2f%%), %zu missing\n",
+           have, nfr, 100.0*have/nfr, nfr - have);
+    printf("CRC failures %zu, out-of-range seq %zu, duplicates %zu\n", crcfail, badseq, dup);
+    printf("byte-exact: %zu of %zu recovered chunks match the source (%zu differ)\n",
+           have - bad, have, bad);
+    printf("video bytes delivered: %zu of %zu (%.2f%%)\n",
+           cmp - bad*VID_CHUNK, src.size(), 100.0*(cmp - bad*VID_CHUNK)/src.size());
+    printf("GOODPUT over the capture: %.2f Mbit/s\n", cmp*8.0/dur/1e6);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: framedtest gen|rx ...\n"); return 2; }
     if (!strcmp(argv[1], "gen")) return doGen(argc, argv);
@@ -701,5 +801,7 @@ int main(int argc, char** argv) {
     if (!strcmp(argv[1], "per")) return doPer(argc, argv);
     if (!strcmp(argv[1], "acq")) return doAcq(argc, argv);
     if (!strcmp(argv[1], "head")) return doHead(argc, argv);
+    if (!strcmp(argv[1], "genvid")) return doGenVid(argc, argv);
+    if (!strcmp(argv[1], "rxvid"))  return doRxVid(argc, argv);
     fprintf(stderr, "unknown mode %s\n", argv[1]); return 2;
 }

@@ -77,3 +77,7 @@ fpga/hls/*/logs/
 fpga/hls/*/vitis-run.log
 fpga/hls/*/build.log
 baselines/
+
+# Release artifacts. Bundles are large and reproducible from a tag; the golden
+# copy lives in SDR_GOLDEN_MIRROR, not in git.
+/out/
