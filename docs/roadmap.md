@@ -21,16 +21,28 @@ protocol uncertainty.
 Done when a clean Debian/Ubuntu host can be installed, configured, deployed,
 restarted, and removed using documented commands.
 
-### 2. Unify daemon and dashboard runtime paths
+### 2. Unify daemon and dashboard runtime paths — PARTLY DONE
 
-- Use `stats_path` consistently rather than mixing config paths with
-  hard-coded per-node filenames.
-- Add a configurable reload path, or replace signal/file reload with a local
-  control socket.
-- Make the dashboard attach to an already-running service instead of assuming
-  it owns the daemon process.
+Done:
+
+- ~~Add a configurable reload path.~~ `SDR_RELOAD_FILE`, alongside the existing
+  `SDR_STATS_FILE` and `SDR_SCAN_FILE`. The daemon had hard-coded
+  `/tmp/sdr_reload.json` while the dashboard wrote `/tmp/sdr_reload_<node>.json`,
+  so a live retune went to a file nothing read and `SIGUSR2` appeared to do
+  nothing for every named node.
+- ~~Remove or properly build `src/tools/live_stats.cpp`.~~ Built as
+  `sdr-live-stats`; it reads IQ from the radio with no TAP and no root.
+
+Still outstanding:
+
+- Use `stats_path` consistently rather than mixing config paths with per-node
+  environment overrides. The override is now coherent and documented, but it is
+  still two mechanisms for one thing.
+- Replace signal/file reload with a local control socket, which would remove the
+  path coordination problem rather than parameterising it.
+- Make the dashboard attach to an already-running service instead of assuming it
+  owns the daemon process.
 - Add authentication or bind to loopback by default.
-- Remove or properly build `src/tools/live_stats.cpp`.
 
 Done when start/stop, statistics, scanning, and live frequency/attenuation
 changes work for one or two nodes without filename overrides.

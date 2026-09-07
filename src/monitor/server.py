@@ -69,10 +69,15 @@ def _start(nd: dict, mode: str | None = None) -> tuple[bool, str]:
             with open(nd["cfg_path"], "w") as f:
                 json.dump(cfg, f, indent=2)
 
-        # Patch stats/scan output paths into env so daemon writes per-node files
+        # Patch stats/scan/reload paths into env so each node uses its own files.
+        # SDR_RELOAD_FILE matters as much as the other two: without it the daemon
+        # falls back to /tmp/sdr_reload.json while this writes
+        # /tmp/sdr_reload_<node>.json, so a live retune is written to a file
+        # nothing reads and the SIGUSR2 appears to do nothing.
         env = os.environ.copy()
-        env["SDR_STATS_FILE"] = nd["stats_file"]
-        env["SDR_SCAN_FILE"]  = nd["scan_file"]
+        env["SDR_STATS_FILE"]  = nd["stats_file"]
+        env["SDR_SCAN_FILE"]   = nd["scan_file"]
+        env["SDR_RELOAD_FILE"] = nd["reload_file"]
 
         if not os.path.exists(BINARY):
             return False, f"binary not found: {BINARY}"

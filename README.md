@@ -160,10 +160,21 @@ python3 src/monitor/server.py --port 8080 --config config.json
 ```
 
 Open `http://localhost:8080`. The dashboard can launch a local daemon, which
-requires passwordless non-interactive `sudo` when the server is not root.
-Its current multi-node defaults use `config.json` and `config_node2.json`, but
-its default stats filenames differ from the checked-in configs; align the
-`stats_path` values before relying on dashboard data.
+requires passwordless non-interactive `sudo` when the server is not root. Its
+multi-node defaults use `config.json` and `config_node2.json`.
+
+When the dashboard launches a daemon it passes the per-node file paths through
+the environment — `SDR_STATS_FILE`, `SDR_SCAN_FILE` and `SDR_RELOAD_FILE` — and
+those take precedence over the config's `stats_path`. So node files do not
+collide and the `stats_path` in a config only applies when you run the daemon
+yourself.
+
+To read stats without a TAP device or root, use the standalone tool, which
+takes IQ straight from the radio:
+
+```bash
+build/src/tools/sdr-live-stats
+```
 
 ## Documentation
 
@@ -181,20 +192,17 @@ its default stats filenames differ from the checked-in configs; align the
 
 ## Important repository caveats
 
-- `scripts/deploy.sh` currently defaults to 10 MHz and writes `AUTO`
-  modulation. Both conflict with the validated settings; pass `--bw 1`, and
-  review the generated config before using the script.
-- `scripts/setup-service.sh` expects the in-tree build layout. The copy made by
-  `deploy.sh` has a different layout, so service deployment should be reviewed
-  before use.
-- `src/tools/live_stats.cpp` exists but is not a CMake target. Statistics are
-  produced by the daemon; commands referring to `build/live_stats` are stale.
-- The monitor writes per-node reload files, while the controller currently
-  reloads only `/tmp/sdr_reload.json`. Live tuning therefore needs that exact
-  path and `SIGUSR2` until the implementations are unified.
 - The checked-in `config.json` and `config_node2.json` are local lab examples
   containing link-local device addresses and intentionally different TX
   attenuation. Replace them for your hardware.
+- `scripts/deploy.sh` generates a config from its flags and copies the build to
+  two hosts. Review the generated config before relying on it; it is a
+  convenience wrapper, not a deployment system. For the radio firmware itself,
+  see [Deployment](docs/DEPLOYMENT.md), which is versioned and verified.
+- The fabric modem's transmit path has not yet been proven end to end over the
+  air, so live video over it is unvalidated. The modulator itself is verified
+  (correlation 1.0000 against the host modulator) — see
+  [Fabric modem](docs/fabric-modem.md#status-of-the-fabric-transmit-path).
 
 ## License
 

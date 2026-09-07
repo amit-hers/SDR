@@ -6,6 +6,8 @@
 #include "modes/P2PMode.hpp"
 #include "modes/ScanMode.hpp"
 #include <csignal>
+#include <cstdlib>
+#include <string>
 #include <stdexcept>
 #include <iostream>
 #include <thread>
@@ -98,7 +100,14 @@ void Controller::run() {
         if (reload_requested_.exchange(false)) {
             std::cout << "[sdr] SIGUSR2: reloading config\n";
             try {
-                Config fresh = Config::fromFile("/tmp/sdr_reload.json");
+                // Per-node path, matching the SDR_STATS_FILE/SDR_SCAN_FILE
+                // convention. This was hard-coded to /tmp/sdr_reload.json while
+                // the monitor writes /tmp/sdr_reload_<node>.json, so live
+                // tuning silently reloaded a stale file -- or none at all --
+                // for every node except an unnamed default.
+                const char* rp = std::getenv("SDR_RELOAD_FILE");
+                const std::string reload_path = (rp && *rp) ? rp : "/tmp/sdr_reload.json";
+                Config fresh = Config::fromFile(reload_path);
                 applyLive(fresh.tx_atten_db,
                           fresh.freq_tx_mhz * 1e6,
                           fresh.freq_rx_mhz * 1e6, 0);

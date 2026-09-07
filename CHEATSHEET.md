@@ -127,6 +127,26 @@ The radios need a route to 169.254.0.0/16 on the interface their RJ45 ports use;
 put the address in the NetworkManager profile or it gets flushed.
 2 MHz is unstable (identical runs vary ~4×).
 
+## Stats without root
+
+`sdr-live-stats` reads IQ straight from the radio and writes the stats JSON with
+no TAP device and no sudo — the tool to reach for when the question is whether
+the radio is producing sensible IQ at all, separately from whether the bridge
+works.
+
+```bash
+build/src/tools/sdr-live-stats
+```
+
+Per-node file paths, when the dashboard launches a daemon, come from the
+environment and override the config's `stats_path`:
+
+```bash
+SDR_STATS_FILE=/tmp/sdr_stats_A.json
+SDR_SCAN_FILE=/tmp/sdr_scan_A.json
+SDR_RELOAD_FILE=/tmp/sdr_reload_A.json   # SIGUSR2 reads this
+```
+
 ## Logs
 
 Live stats:

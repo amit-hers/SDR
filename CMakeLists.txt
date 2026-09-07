@@ -43,6 +43,7 @@ find_package(Threads REQUIRED)
 # ── Subdirectories ───────────────────────────────────────────────────────────
 add_subdirectory(src/core)
 add_subdirectory(src/daemon)
+add_subdirectory(src/tools)
 
 option(BUILD_TESTS "Build unit tests" ON)
 if(BUILD_TESTS)
