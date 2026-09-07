@@ -32,6 +32,9 @@ FPGA, and device-recovery components.
   fabric modem's differential QPSK — see
   [Architecture](docs/architecture.md#payload-scrambling).
 - JSON statistics plus a Flask/WebSocket monitoring dashboard.
+- A versioned state protocol and `sdrctl`, a CLI for reading live state and for
+  changing frequency, bandwidth, modulation, power and the radio's own network
+  settings — see [State protocol](docs/state-protocol.md).
 - A QPSK modem in the Pluto+ programmable logic, with an on-chip identity block
   so software refuses to run against an incompatible bitstream.
 - A versioned release and deployment system: one bundle carries FPGA, boot,
@@ -181,6 +184,8 @@ build/src/tools/sdr-live-stats
 - [Architecture](docs/architecture.md) — components, data flow, and frame format
 - [Configuration](docs/configuration.md) — complete configuration reference
 - [Operations](docs/operations.md) — setup, monitoring, diagnostics, and troubleshooting
+- [State protocol](docs/state-protocol.md) — the state report format, and
+  `sdrctl` for configuration and live status
 - [Fabric modem](docs/fabric-modem.md) — the PL QPSK modem: measured throughput,
   register map, bring-up order, measurement tools, and the traps that produced
   more than one false conclusion

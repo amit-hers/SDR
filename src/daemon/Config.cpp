@@ -114,6 +114,8 @@ Config Config::fromFile(const std::string& path) {
     c.stats_interval_ms= jsonInt   (json, "stats_interval_ms", c.stats_interval_ms);
     c.spectrum_interval_ms = jsonInt(json, "spectrum_interval_ms", c.spectrum_interval_ms);
     c.monitor_port     = jsonInt   (json, "monitor_port",      c.monitor_port);
+    c.telemetry_port   = jsonInt   (json, "telemetry_port",    c.telemetry_port);
+    c.telemetry_bind   = jsonStr   (json, "telemetry_bind",    c.telemetry_bind);
     c.node_id          = jsonStr   (json, "node_id",           c.node_id);
     c.scan_start_mhz   = jsonDouble(json, "scan_start_mhz",    c.scan_start_mhz);
     c.scan_step_mhz    = jsonDouble(json, "scan_step_mhz",     c.scan_step_mhz);

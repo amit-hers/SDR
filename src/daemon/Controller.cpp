@@ -57,6 +57,43 @@ Controller::Controller(Config cfg) : cfg_(std::move(cfg)) {
     std::cerr << "[sdr] coarse CFO estimator: " << cfg_.cfo_method << "\n";
 
     mode_     = makeMode();
+    // State reporting for sdrctl. Built from the same LinkStats the JSON
+    // exporter uses, so the two can never disagree about what the node is
+    // doing. A failure to bind is logged and ignored -- telemetry is a
+    // convenience and must not be able to stop the radio.
+    if (cfg_.telemetry_port > 0) {
+        const LinkStats& st = mode_->stats();
+        telemetry_ = std::make_unique<TelemetryServer>(
+            [this, &st](StatePacket& p) {
+                p.node_id     = cfg_.node_id_u32;
+                p.uptime_s    = static_cast<uint32_t>(st.uptime_s.load());
+                p.mode        = cfg_.mode == "bridge" ? 1 : cfg_.mode == "mesh"   ? 2
+                              : cfg_.mode == "p2p-tx" ? 3 : cfg_.mode == "p2p-rx" ? 4
+                              : cfg_.mode == "scan"   ? 5 : 0;
+                p.freq_tx_hz  = static_cast<uint32_t>(cfg_.freq_tx_mhz * 1e6);
+                p.freq_rx_hz  = static_cast<uint32_t>(cfg_.freq_rx_mhz * 1e6);
+                p.bw_hz       = static_cast<uint32_t>(cfg_.bw_mhz * 1e6);
+                p.sps         = static_cast<uint8_t>(cfg_.samples_per_symbol);
+                p.modulation  = static_cast<uint8_t>(st.cur_mod.load());
+                p.tx_atten_cdb= static_cast<int16_t>(cfg_.tx_atten_db * 100.0);
+                p.frames_tx      = st.frames_tx.load();
+                p.frames_rx_good = st.frames_rx_good.load();
+                p.frames_rx_bad  = st.frames_rx_bad.load();
+                p.dropped        = st.dropped.load();
+                p.bytes_tx       = st.bytes_tx.load();
+                p.bytes_rx       = st.bytes_rx.load();
+                p.fec_corrected  = st.fec_corrected.load();
+                p.rssi_cdbm   = static_cast<int16_t>(st.rssi_dbm.load() * 100.f);
+                p.snr_cdb     = static_cast<int16_t>(st.snr_db.load()   * 100.f);
+                p.tx_kbps     = static_cast<uint16_t>(st.tx_kbps.load());
+                p.rx_kbps     = static_cast<uint16_t>(st.rx_kbps.load());
+                p.tx_duty_pct = static_cast<uint8_t>(st.tx_duty_now.load() * 100.f);
+                p.temp_cc     = static_cast<int16_t>(st.temp_c.load() * 100.f);
+            },
+            cfg_.telemetry_bind, cfg_.telemetry_port);
+        telemetry_->start();
+    }
+
     exporter_ = std::make_unique<StatsExporter>(mode_->stats(), cfg_.stats_interval_ms,
                                                 cfg_.stats_path);
 }
@@ -118,6 +155,7 @@ void Controller::run() {
     }
 
     exporter_->stop();
+    if (telemetry_) telemetry_->stop();
     std::cout << "[sdr] Stopped.\n";
 }
 

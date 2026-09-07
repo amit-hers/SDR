@@ -127,6 +127,25 @@ The radios need a route to 169.254.0.0/16 on the interface their RJ45 ports use;
 put the address in the NetworkManager profile or it gets flushed.
 2 MHz is unstable (identical runs vary ~4×).
 
+## sdrctl
+
+```bash
+sdrctl show                                   # effective config
+sdrctl get freq_tx_mhz
+sdrctl set freq_tx_mhz 434 bw_mhz 1 modulation QPSK
+sdrctl apply --node A                         # push to a running daemon (SIGUSR2)
+sdrctl status --host 127.0.0.1 [--json]       # live state over UDP
+sdrctl net show
+sdrctl net set --ip 192.168.2.17 --mask 255.255.255.0
+```
+
+A multi-key `set` is all-or-nothing, and values are range-checked (`bw_mhz` must
+be 1|2|5|10|20, frequencies 325-3800 MHz, atten 0-89 dB).
+
+`net set` does NOT take effect until the mass-storage volume is **ejected**.
+
+Telemetry binds to loopback by default; `telemetry_port: 0` disables it.
+
 ## Stats without root
 
 `sdr-live-stats` reads IQ straight from the radio and writes the stats JSON with

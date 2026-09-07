@@ -3,6 +3,7 @@
 #include "StatsExporter.hpp"
 #include "modes/IMode.hpp"
 #include "sdr/hardware/PlutoSDR.hpp"
+#include "sdr/telemetry/TelemetryServer.hpp"
 #include <memory>
 #include <atomic>
 
@@ -30,6 +31,7 @@ private:
     std::unique_ptr<PlutoSDR>      radio_;
     std::unique_ptr<IMode>         mode_;
     std::unique_ptr<StatsExporter> exporter_;
+    std::unique_ptr<TelemetryServer> telemetry_;
 
     std::atomic<bool> reload_requested_{false};
 

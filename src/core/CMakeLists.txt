@@ -18,6 +18,8 @@ add_library(sdr_core STATIC
     dsp/FixedTimingSync.cpp
     fec/ReedSolomon.cpp
     crypto/AESCipher.cpp
+    telemetry/StatePacket.cpp
+    telemetry/TelemetryServer.cpp
     transport/TUNTAPDevice.cpp
     transport/UDPSocket.cpp
     stats/LinkStats.cpp

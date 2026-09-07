@@ -16,3 +16,10 @@ target_include_directories(sdr-live-stats
 target_link_libraries(sdr-live-stats PRIVATE sdr_core)
 
 install(TARGETS sdr-live-stats DESTINATION bin)
+
+# sdrctl: one place to read and change what the node is doing -- the config
+# file, a running daemon, and the radio's own network settings.
+add_executable(sdrctl sdrctl.cpp)
+target_include_directories(sdrctl PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(sdrctl PRIVATE sdr_core)
+install(TARGETS sdrctl DESTINATION bin)

@@ -111,3 +111,14 @@ sudo kill -USR2 "$(pidof sdr-datalink)"
 Only `tx_atten_db`, `freq_tx_mhz`, and `freq_rx_mhz` are applied. All other
 changes require a restart. This path is process-global, so it is unsuitable
 for independently tuning two daemons on the same host.
+
+## Telemetry
+
+| key | default | meaning |
+|---|---|---|
+| `telemetry_port` | `5140` | UDP port for state reports; `0` disables the server |
+| `telemetry_bind` | `127.0.0.1` | bind address |
+
+Loopback by default: the report names the node, its frequencies and its traffic
+volumes, and carries no authentication, so publishing it on a routable address
+is a deliberate choice. See [State protocol](state-protocol.md).

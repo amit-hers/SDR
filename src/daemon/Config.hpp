@@ -141,6 +141,12 @@ struct Config {
 
     // ── System ───────────────────────────────────────────────────────────────
     int         stats_interval_ms {1000};
+    // UDP state reporting for sdrctl. Loopback by default: the report names the
+    // node, its frequencies and its traffic volumes, and carries no
+    // authentication, so publishing it on a routable address is a deliberate
+    // choice rather than a default. 0 disables the server entirely.
+    int         telemetry_port    {5140};
+    std::string telemetry_bind    {"127.0.0.1"};
     // Minimum gap between FFT spectrum updates. The spectrum feeds the
     // monitor UI only -- it contributes nothing to decoding -- yet it ran on
     // every capture buffer and was measured at 73% of all CPU while the

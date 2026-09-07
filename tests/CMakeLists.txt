@@ -9,6 +9,7 @@ add_executable(sdr-tests
     test_splitmod.cpp
     test_aggregate.cpp
     test_scramble.cpp
+    test_telemetry.cpp
 )
 
 target_include_directories(sdr-tests PRIVATE
@@ -30,3 +31,4 @@ add_test(NAME arq     COMMAND sdr-tests arq)
 add_test(NAME splitmod COMMAND sdr-tests splitmod)
 add_test(NAME aggregate COMMAND sdr-tests aggregate)
 add_test(NAME scramble COMMAND sdr-tests scramble)
+add_test(NAME telemetry COMMAND sdr-tests telemetry)
