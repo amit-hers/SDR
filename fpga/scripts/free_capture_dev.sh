@@ -1,5 +1,5 @@
 #!/bin/sh
-# Release /dev/iio:device4 after an aborted capture. Run ON the Pluto.
+# Release $IIO_RX_DEV after an aborted capture. Run ON the Pluto.
 #
 # The device is SINGLE-OPEN. A drain left behind by an interrupted run holds it,
 # and every later capture then returns 0 bytes with EBUSY -- which reads like a
@@ -19,22 +19,29 @@
 #    not come back, reload the PL and re-run rx_framed.sh -- that is the
 #    reliable recovery, not more signals.
 set -u
-R=/sys/bus/iio/devices/iio:device4
+. "$(dirname "$0")/iio_lookup.sh"
+R=$IIO_RX
 
 for p in $(ps | grep '[a]cqframes.sh' | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
 for p in $(ps | grep '[r]xframes.sh'  | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
 sleep 1
 for p in $(ps | grep '[c]at /dev/iio'   | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
 for p in $(ps | grep '[d]d if=/dev/iio' | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
+for p in $(ps | grep '[t]x_feed.sh'     | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
+# A feed is `cat <file> > <chardev>`, so it does not match '/dev/iio' in ps.
+for p in $(ps | grep '[c]at /tmp/'      | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
 sleep 1
 
-# Unblock anything still inside the driver.
-if [ "$(ps | grep -c '[c]at /dev/iio')" != "0" ]; then
-  echo 0 > $R/buffer/enable 2>/dev/null
-  sleep 2
-fi
+# Dropping buffer/enable is what actually returns a process blocked inside the
+# driver; SIGKILL cannot reach it there. Do it for BOTH directions.
+echo 0 > "$R/buffer/enable" 2>/dev/null
+echo 0 > "$IIO_TX/buffer/enable" 2>/dev/null
+sleep 2
 
 echo "readers left: $(ps | grep -c '[c]at /dev/iio')"
-echo "buffer/enable: $(cat $R/buffer/enable 2>/dev/null)"
-echo "NOTE: if buffer/enable is 0, re-run rx_framed.sh; if reads still return 0,"
-echo "      reload the PL -- the modem core is stalled and cannot see a reset."
+echo "feeders left: $(ps | grep -c '[c]at /tmp/')"
+echo "rx buffer/enable: $(cat "$R/buffer/enable" 2>/dev/null)"
+echo "tx buffer/enable: $(cat "$IIO_TX/buffer/enable" 2>/dev/null)"
+echo "NOTE: re-run rx_framed.sh / tx_fabric.sh afterwards to re-enable the"
+echo "      buffers. If reads still return 0, reload the PL -- the modem core is"
+echo "      stalled and cannot see a soft reset."

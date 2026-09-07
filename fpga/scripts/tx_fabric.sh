@@ -26,9 +26,10 @@ set -e
 FS=${1:-17280000}
 LO=${2:-434000000}
 DIFF=${3:-1}
+. "$(dirname "$0")/iio_lookup.sh"
 AB=0x79020000; DB=0x79024000; T=0x7C420000; MOD=0x43C10000
-PHY=/sys/bus/iio/devices/iio:device0
-DDS=/sys/bus/iio/devices/iio:device3
+PHY=$IIO_PHY
+DDS=$IIO_TX
 
 echo "$FS" > $PHY/in_voltage_sampling_frequency
 echo "$FS" > $PHY/out_voltage_sampling_frequency
@@ -55,4 +56,4 @@ done
 echo "# fs=$(cat $PHY/out_voltage_sampling_frequency) lo=$(cat $PHY/out_altvoltage1_TX_LO_frequency)"
 echo "# l_clk_mon=$(devmem $((AB+0x54)) 32) datarate=$(devmem $((DB+0x4C)) 32)"
 echo "# mod ap=$(devmem $((MOD+0x00)) 32) en=$(devmem $((MOD+0x10)) 32) diff=$(devmem $((MOD+0x20)) 32)"
-echo "# ready for a BYTE stream on /dev/iio:device3"
+echo "# ready for a BYTE stream on $IIO_TX_DEV"

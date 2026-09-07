@@ -1,7 +1,8 @@
 #!/bin/sh
 # Continuous framed reception at 434 MHz. Run after every PL reload.
 FS=${1:-7680000}
-P=/sys/bus/iio/devices/iio:device0; R=/sys/bus/iio/devices/iio:device4; D=0x43C00000
+. "$(dirname "$0")/iio_lookup.sh"
+P=$IIO_PHY; R=$IIO_RX; D=0x43C00000
 echo 0 > $R/buffer/enable 2>/dev/null
 devmem 0x79020040 32 0x3            # ADC core out of reset: it gates all of l_clk
 devmem 0x7C400080 32 0              # DMA IRQ unmask -- re-masked by every PL reload

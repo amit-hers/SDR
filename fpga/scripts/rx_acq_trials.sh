@@ -12,7 +12,7 @@
 #    reading AXI-Lite and the write is silently lost, so a drain must be active
 #    while reset is asserted -- and lock_count is read back to PROVE it landed
 #    rather than assuming.
-#  * /dev/iio:device4 is SINGLE-OPEN, so the drain must be gone before the
+#  * $IIO_RX_DEV is SINGLE-OPEN, so the drain must be gone before the
 #    capture or the two collide and the reset appears to land on alternate
 #    trials only -- which reads as an intermittent hardware fault.
 #  * THE DRAIN IS BOUNDED, NOT KILLED, and reset is RELEASED BEFORE waiting on
@@ -36,18 +36,19 @@
 # If a run is interrupted anyway, the drain outlives the ssh client that started
 # it -- see free_capture_dev.sh.
 set -u
+. "$(dirname "$0")/iio_lookup.sh"
 N=${1:-20}; PKT=${2:-32768}
 D=0x43C00000
 rm -f /tmp/q*.bin
 ok=0; i=1
 while [ $i -le $N ]; do
-  dd if=/dev/iio:device4 of=/dev/null bs=$PKT count=64 2>/dev/null & CP=$!
+  dd if=$IIO_RX_DEV of=/dev/null bs=$PKT count=64 2>/dev/null & CP=$!
   sleep 1
   devmem $((D+0x20)) 32 1          # seen, because the drain above is still running
   L=$(devmem $((D+0x18)) 32)   # reset branch writes lock_count=0, so this proves it landed
   devmem $((D+0x20)) 32 0          # release FIRST: under reset the core emits
   wait $CP                         # nothing, so the drain would never finish
-  dd if=/dev/iio:device4 of=/tmp/q$i.bin bs=$PKT count=1 2>/dev/null
+  dd if=$IIO_RX_DEV of=/tmp/q$i.bin bs=$PKT count=1 2>/dev/null
   if [ "$L" = "0x00000000" ]; then ok=$((ok+1)); else echo "# trial $i RESET NOT SEEN ($L)"; fi
   i=$((i+1))
 done

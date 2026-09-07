@@ -18,21 +18,21 @@
 # at 434 MHz a good link reads 64-65 dB with the AGC regulating around 43 dB.
 N=${1:-8}
 D=0x43C00000
-R=/sys/bus/iio/devices/iio:device4
-P=/sys/bus/iio/devices/iio:device0
-pkill -f "cat /dev/iio:device4" 2>/dev/null
+R=$IIO_RX
+P=$IIO_PHY
+pkill -f "cat $IIO_RX_DEV" 2>/dev/null
 echo 1 > $R/buffer/enable 2>/dev/null
 echo "# GATE rssi=$(cat $P/in_voltage0_rssi) gain=$(cat $P/in_voltage0_hardwaregain) up=$(cut -d. -f1 /proc/uptime)s"
 i=1
 while [ $i -le $N ]; do
-  cat /dev/iio:device4 > /dev/null &      # drain, so the core is RUNNING
+  cat $IIO_RX_DEV > /dev/null &      # drain, so the core is RUNNING
   CP=$!
   sleep 1
   devmem $((D+0x20)) 32 1                 # reset is seen only because it runs
   L=$(devmem $((D+0x18)) 32)              # must read 0x00000000
   devmem $((D+0x20)) 32 0
   kill $CP 2>/dev/null
-  dd if=/dev/iio:device4 of=/tmp/a$i.bin bs=1024 count=8 2>/dev/null
+  dd if=$IIO_RX_DEV of=/tmp/a$i.bin bs=1024 count=8 2>/dev/null
   echo "# trial $i reset_ok=$L bytes=$(wc -c < /tmp/a$i.bin) locks=$(devmem $((D+0x18)) 32)"
   i=$((i+1))
 done

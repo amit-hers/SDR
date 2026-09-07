@@ -5,7 +5,8 @@
 # a fresh differential-phase reference at every restart, and the driver
 # re-selects the internal DDS each time the buffer is re-opened.
 F=${1:-/tmp/tx3.iq}; NB=${2:-811776}; FS=${3:-7680000}
-DB=0x79024000; P=/sys/bus/iio/devices/iio:device0; D=/sys/bus/iio/devices/iio:device3
+. "$(dirname "$0")/iio_lookup.sh"
+DB=0x79024000; P=$IIO_PHY; D=$IIO_TX
 for p in $(ps | grep '[i]io_writedev' | awk '{print $1}'); do kill -9 $p 2>/dev/null; done
 sleep 2
 echo "$FS" > $P/out_voltage_sampling_frequency

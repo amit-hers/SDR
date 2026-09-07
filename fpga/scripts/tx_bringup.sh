@@ -18,6 +18,7 @@
 #  * The modem cores must run before ADC channels are enabled, or the sticky
 #    overflow latch fires on the first sample and never clears.
 set -e
+. "$(dirname "$0")/iio_lookup.sh"
 # Load the PL first: this board's rootfs is a ramdisk, so a power cycle loses
 # both the bitstream and /lib/firmware. Re-upload libre_dma.bin before running.
 if [ -f /lib/firmware/libre_dma.bin ]; then
@@ -28,8 +29,8 @@ FS=${1:-7680000}
 LO=${2:-2400000000}
 GAIN=${3:-0}
 AB=0x79020000; DB=0x79024000; T=0x7C420000
-PHY=/sys/bus/iio/devices/iio:device0
-DDS=/sys/bus/iio/devices/iio:device3
+PHY=$IIO_PHY
+DDS=$IIO_TX
 
 echo "$FS" > $PHY/in_voltage_sampling_frequency
 echo "$FS" > $PHY/out_voltage_sampling_frequency
@@ -61,7 +62,7 @@ done
 LC=$(devmem $((AB+0x54)) 32)
 echo "  fs=$FS lo=$LO gain=${GAIN}dB"
 echo "  l_clk_mon=$LC  datarate=$(devmem $((DB+0x4C)) 32)  src=$(devmem $((DB+0x418)) 32)  irqmask=$(devmem $((T+0x80)) 32)"
-echo "  mod AP=$(devmem 0x43C10000 32)  ready for a byte stream on /dev/iio:device3"
+echo "  mod AP=$(devmem 0x43C10000 32)  ready for a byte stream on $IIO_TX_DEV"
 
 # ---- RX side: ADC channel control MUST include the data-format bits --------
 # bit0 enable, bit4 dfmt_enable, bit5 dfmt_type, bit6 dfmt_se  =>  0x51
