@@ -105,6 +105,33 @@ Flags are `ENCRYPT=0x01`, `FEC=0x02`, `ACK=0x04`, `CTRL=0x08`, and
 `AGGR=0x10`. Acquisition (preamble through header) is always BPSK. Payload and
 CRC use the modulation declared in the header.
 
+### Payload scrambling
+
+The payload is **always** scrambled, between the optional AES step and the CRC:
+
+```text
+payload -> [Reed-Solomon] -> [AES-256-CTR] -> scramble -> CRC over sync..payload
+```
+
+`Scrambler` (`include/sdr/framing/Scrambler.hpp`) is an additive 15-bit LFSR,
+x^15 + x^14 + 1, seeded from the frame's sequence number. It is involutive, so
+the same call undoes it, and the receiver derives the seed from the sequence
+number in the unscrambled header.
+
+It is unconditional rather than a negotiable flag because the fabric modem
+requires it of anything it carries: differential QPSK maps a byte to a phase
+*increment*, so a run of identical bytes is a run of identical symbols, the
+constellation stops moving, and the timing detector has nothing to measure.
+Measured over the air, 200 bytes of `0x00` lost 25.87% of frames against 0.11%
+for pseudorandom content of the same length. Reed-Solomon reaches the same
+failure by zero-padding short payloads, which is why scrambling runs after it.
+
+It sits **before** the CRC so the CRC covers exactly the bytes that go on the
+wire, and it is **additive** rather than self-synchronising so that a wire error
+stays one error instead of being fed back through the register and tripled —
+which matters because Reed-Solomon has to correct what is left. See
+[Fabric modem](fabric-modem.md#scrambling-is-mandatory).
+
 ## Concurrency and shutdown
 
 Bridge mode uses TX, capture, DSP, and statistics threads. Mesh uses TX/RX

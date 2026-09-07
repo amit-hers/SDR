@@ -190,3 +190,91 @@ endpoints; do not bind it to an untrusted network.
 | frames sent, none received | peer's `freq_rx_mhz` must equal this node's `freq_tx_mhz` |
 | `dropped` climbing | DSP not keeping up — lower `bw_mhz` |
 | high `bursts_detected`, low `frames_rx_good` | channel saturated; lower `tx_duty_max` or offered load |
+
+## Fabric modem (Pluto+ PL)
+
+Separate path from the host daemon: the modem runs in the programmable logic and
+the host sees bytes, not IQ. Full detail in [docs/fabric-modem.md](docs/fabric-modem.md).
+
+Bring-up — order matters:
+
+```bash
+# on the board
+sh watchdog_relax.sh 120          # stock is a 10 s timeout; a big scp outruns it
+sh fpga_abi_check.sh 3 3          # refuses if the bitstream is incompatible
+sh rx_framed.sh 17280000          # receive
+sh tx_fabric.sh 17280000 434000000 1   # transmit from a byte stream
+sh tx_feed.sh /tmp/stream.bytes
+```
+
+Registers:
+
+```bash
+devmem 0x43C00028 32 1     # demod diff_mode -- must match the modulator
+devmem 0x43C10020 32 1     # mod   diff_mode
+devmem 0x43C00018 32       # lock_count (bytes emitted)
+devmem 0x43C00030 32       # mu_clamped -- ~1.5% is healthy, near 100% is pinned
+devmem 0x43C50000 32       # identity MAGIC, expect 0x5344524C
+```
+
+Measure a link:
+
+```bash
+g++ -O2 -std=c++17 -I include -o framed_link_test \
+    fpga/tools/framed_link_test.cpp build/src/core/libsdr_core.a -lliquid -lcrypto
+
+./framed_link_test gen 64 tx.iq tx.bytes
+./framed_link_test per cap.bin tx.bytes 81280 32768    # per-frame loss
+./framed_link_test ser cap.bin tx.bytes 81280 32768    # byte/symbol error rate
+```
+
+**Pass the right packet size.** The byte grid is continuous only within one DMA
+transfer; analysing a 1024-byte capture as 8192 reports 22% loss against a true
+0.19%.
+
+Recover a wedged capture device:
+
+```bash
+sh free_capture_dev.sh     # /dev/iio:device4 is single-open
+```
+
+## Release and deployment
+
+Full detail in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+```bash
+./release/build-release.sh v1.3.0-dev1 dev      # no tag needed
+git tag -a v1.3.0 -m "Validated release v1.3.0"
+./release/build-release.sh v1.3.0 release       # refuses on a dirty tree
+./release/mark-validated.sh v1.3.0 "PER 0.00% over 12709 frames"
+./release/promote-golden.sh v1.3.0
+./release/retention.sh --dry-run
+```
+
+Deploy:
+
+```bash
+./scripts/flash.sh UNIT-A .              # runtime; does NOT reboot
+./scripts/flash.sh UNIT-A . --persist    # writes flash, survives power-off
+./scripts/verify.sh UNIT-A .
+./scripts/rollback.sh UNIT-A             # back to the golden release
+```
+
+`--persist` replaces the rootfs, so the board returns with **stock hostname,
+USB serial, MAC, password (`analog`) and IP (`192.168.2.1`)** — which collides
+with a second attached board.
+
+## Board gotchas
+
+| symptom | cause |
+|---|---|
+| every `0x43Cxxxxx` read bus-errors | stock PL loaded; the rootfs is a ramdisk and a reboot loses the bitstream |
+| demod input railed at full scale regardless of RF | ADC channel format `0x71`; must be `0x51` on core 10.03 |
+| TX plays at double rate, sps 4→2 | DAC datarate (`0x7902404C`) left at 0; must be 1 |
+| DAC emits nothing, every register reads healthy | DMA source selected before the buffer was opened |
+| DMA transfers complete but userspace times out | DMA IRQ re-masked by the PL reload |
+| board resets mid-test, `/tmp` and `/lib/firmware` empty | watchdog; stock `-T 10` |
+| one board unreachable, the other fine | both host NICs in `192.168.2.0/24` — add a `/32` route |
+| `stat: not found`, `strtonum` unknown | busybox: use `wc -c <`, and no `strtonum` in awk |
+| capture returns 0 bytes | `/dev/iio:device4` held by a stale drain — `free_capture_dev.sh` |
+| probe reads all zeros | `iq_probe_read.sh` re-arms first; the feed must still be running |

@@ -49,28 +49,44 @@ changes work for one or two nodes without filename overrides.
 Done when every configuration error produces a precise message before the
 radio or network interface is opened.
 
-### 4. Add continuous integration
+### 4. Add continuous integration — PARTLY DONE
 
-- Build Debug and Release configurations on supported Linux versions.
-- Run all eight unit suites with assertions enabled.
-- Add AddressSanitizer and UndefinedBehaviorSanitizer jobs.
-- Add formatting/static-analysis checks and Markdown link validation.
-- Keep hardware tests separate and explicitly opt-in.
+`.github/workflows/ci.yml` builds, runs all nine unit suites with assertions
+enabled, parses every shell script, builds a `dev` release bundle and asserts
+that tampering with a bundled file is detected. `.github/workflows/release.yml`
+rebuilds a bundle from a `v*` tag and attaches it to a GitHub Release.
+
+Still outstanding:
+
+- Debug as well as Release configurations, on more than one Linux version.
+- AddressSanitizer and UndefinedBehaviorSanitizer jobs.
+- Formatting and static-analysis checks.
+- Hardware tests remain out of CI by necessity, not only by choice: Vivado
+  cannot run on a GitHub runner and the licence is node-locked to a USB NIC,
+  so the bitstream is an input to a release rather than a product of it.
 
 Done when every change receives a reproducible software-only quality signal.
 
 ## Phase 2: validate and measure the radio link
 
-### 5. Build a repeatable hardware test harness
+### 5. Build a repeatable hardware test harness — DONE for the fabric modem
 
-- Define a safe cabled RF setup, attenuation budget, radio firmware version,
-  oscillator/reference arrangement, and test configuration.
-- Automate ping, UDP loss, TCP throughput, latency, jitter, and bidirectional
-  load tests.
-- Capture configuration, daemon version, radio serial, temperature, and link
-  statistics with every result.
-- Establish pass/fail thresholds for BPSK and QPSK at 1 MHz before testing
-  higher rates.
+`fpga/tools/framed_link_test.cpp` plus the board scripts in `fpga/scripts/`
+form a reproducible harness for the PL modem: numbered frames, per-frame loss,
+byte/symbol error rate, cold-start acquisition and post-boundary re-acquisition.
+The procedure, the measured results and the traps that invalidate a naive
+measurement are written up in [Fabric modem](fabric-modem.md).
+
+Established results: 7.85 Mbit/s of framed goodput at 0.00% PER, 17.28 MS/s,
+1200-byte payloads, verified over a 16 s continuous run and a 121 s soak.
+
+Still outstanding:
+
+- The equivalent harness for the **host-side daemon** path, which is what the
+  original item was about: ping, UDP loss, TCP throughput, latency, jitter and
+  bidirectional load, with pass/fail thresholds for BPSK and QPSK at 1 MHz.
+- Recording radio serial and temperature alongside each result.
+- A written cabled-RF setup and attenuation budget.
 
 Done when another operator can reproduce the reported link performance from a
 written procedure and obtain comparable results.

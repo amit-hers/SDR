@@ -5,11 +5,17 @@ radios. Its primary mode carries Ethernet frames between Linux TAP interfaces;
 the repository also contains routed TUN, UDP tunnel, channel-scan, monitoring,
 FPGA, and device-recovery components.
 
-> Project status: experimental hardware software. The checked-in two-radio
-> configuration has been validated at a 1 MHz symbol rate with QPSK, but this
-> is not a plug-and-play production bridge. Start at low TX power (high
-> attenuation), use suitable RF isolation or attenuators for cabled tests, and
-> comply with local spectrum regulations.
+> Project status: experimental hardware software. Not a plug-and-play
+> production bridge. Start at low TX power (high attenuation), use suitable RF
+> isolation or attenuators for cabled tests, and comply with local spectrum
+> regulations.
+>
+> Two paths exist and are validated separately. The **host-side daemon** (the
+> bulk of this README) modulates in software over libiio; its checked-in
+> two-radio configuration was validated at a 1 MHz symbol rate with QPSK. The
+> **fabric modem** runs the modulator and demodulator in the Pluto+
+> programmable logic and has been measured at **7.85 Mbit/s of framed goodput
+> at 0.00% frame loss** over the air — see [Fabric modem](docs/fabric-modem.md).
 
 ## What is implemented
 
@@ -22,8 +28,16 @@ FPGA, and device-recovery components.
 - `scan`: measures a configured series of receive frequencies and writes
   `/tmp/sdr_scan.json`.
 - Optional AES-256-CTR encryption, Reed-Solomon FEC, and bridge-mode ARQ.
+- Unconditional payload scrambling (additive 15-bit LFSR), required by the
+  fabric modem's differential QPSK — see
+  [Architecture](docs/architecture.md#payload-scrambling).
 - JSON statistics plus a Flask/WebSocket monitoring dashboard.
-- Experimental Vivado HLS blocks and Pluto+ recovery utilities.
+- A QPSK modem in the Pluto+ programmable logic, with an on-chip identity block
+  so software refuses to run against an incompatible bitstream.
+- A versioned release and deployment system: one bundle carries FPGA, boot,
+  kernel, rootfs, software, config and scripts, and one command restores it to a
+  board — including power-on persistence.
+- Vivado HLS blocks and Pluto+ recovery utilities.
 
 ## Requirements
 
@@ -156,8 +170,13 @@ its default stats filenames differ from the checked-in configs; align the
 - [Architecture](docs/architecture.md) — components, data flow, and frame format
 - [Configuration](docs/configuration.md) — complete configuration reference
 - [Operations](docs/operations.md) — setup, monitoring, diagnostics, and troubleshooting
+- [Fabric modem](docs/fabric-modem.md) — the PL QPSK modem: measured throughput,
+  register map, bring-up order, measurement tools, and the traps that produced
+  more than one false conclusion
+- [Deployment](docs/DEPLOYMENT.md) — building, tagging, flashing, verifying,
+  rolling back, and what the ABI fields mean
 - [Roadmap](docs/roadmap.md) — recommended next steps and future features
-- [FPGA and recovery](docs/fpga-and-recovery.md) — experimental programmable-logic and recovery assets
+- [FPGA and recovery](docs/fpga-and-recovery.md) — HLS build and board-recovery assets
 - [Cheatsheet](CHEATSHEET.md) — compact commands for established developers
 
 ## Important repository caveats

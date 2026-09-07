@@ -4,6 +4,39 @@ These directories are development and board-recovery material, not part of the
 normal host build. Use them only if you understand the target Pluto+ hardware,
 Vivado toolchain, boot chain, and risk of rendering a device unbootable.
 
+> For the modem that is actually built and measured from these sources — its
+> throughput, register map, bring-up order and measurement tools — see
+> [Fabric modem](fabric-modem.md). For putting a build on a board, see
+> [Deployment](DEPLOYMENT.md); the normal deployment workflow needs no Vivado
+> knowledge at all.
+
+## Which toolchain
+
+**Vivado/Vitis 2025.1 builds the integrated design.** The ADI HDL tree expects
+it, and it passes the version check unaided; 2026.1 needs
+`ADI_IGNORE_VERSION_CHECK=1` and is not what the hardware-validated bitstreams
+were built with. 2026.1 is still used for `bootgen`, which the release builder
+calls to assemble `BOOT.BIN`.
+
+The licence is **node-locked to a USB NIC** (`enx00e0226dc9b7`). `set_part`
+fails when that adapter is absent, which reads as an unsupported part rather
+than a licence problem. This is also why the bitstream cannot be built in CI and
+is committed to `fpga/prebuilt/` as an input to a release — see
+[Deployment](DEPLOYMENT.md#ci).
+
+The full-design build is driven from the ADI project, not from this repository:
+
+```bash
+export PATH=/path/to/Vivado/2025.1/Vivado/bin:$PATH
+cd adi-hdl/projects/libre && make clean && make
+```
+
+`fpga/libre/` holds a snapshot of the four files that turn a stock ADI `libre`
+checkout into this build; `fpga/bd/sdr_insert.tcl` is what splices the modem in.
+**The Makefile does not track any file in this repository**, so `make` alone can
+return 0 having rebuilt nothing — clean first, and check the `.bit` mtime rather
+than the exit status.
+
 ## FPGA sources
 
 `fpga/` contains:
@@ -73,7 +106,19 @@ contains a prebuilt `qspi_flasher.elf`; treat prebuilt binaries as
 hardware/version-specific and rebuild or verify provenance where possible.
 
 The `tezuka-plutoplus-v0.3.5-7cf6171/` directory contains board firmware and
-boot artifacts. Do not flash them merely to run the host daemon.
+boot artifacts: `BOOT.bin`, `uImage`, `devicetree.dtb`, `uramdisk.image.gz` and
+the packaged `pluto.frm`/`.dfu`. Do not flash them merely to run the host daemon.
+
+`release/build-release.sh` consumes them as release inputs, and
+`release/make-frm.sh` rebuilds `pluto.frm` with the project's own bitstream so
+the modem PL loads at power-on — u-boot loads the PL from that image's `fpga`
+sub-image before the kernel. The kernel, device tree and ramdisk are carried
+across unchanged.
+
+Note that flashing the firmware **replaces the rootfs, and the rootfs carries
+the board's identity**: hostname, USB serial, MAC, root password and IP all
+return to stock defaults, and the stock IP collides with a second attached
+board. [Deployment](DEPLOYMENT.md) documents the recovery routes.
 
 Before any recovery operation:
 
