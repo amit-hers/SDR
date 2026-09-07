@@ -146,6 +146,22 @@ be 1|2|5|10|20, frequencies 325-3800 MHz, atten 0-89 dB).
 
 Telemetry binds to loopback by default; `telemetry_port: 0` disables it.
 
+## Sanitizers and fuzzing
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+cmake --build build-asan -j$(nproc)
+UBSAN_OPTIONS=print_stacktrace=1 ctest --test-dir build-asan
+./build-asan/tests/sdr-fuzz 50000
+```
+
+`sdr-fuzz` asserts two things about the decoders that take outside input: no
+crafted or corrupted input is ever accepted, and pure noise never yields a
+frame. Frames recovered from *corrupted real frames* are counted separately --
+that is Reed-Solomon working, not a failure.
+
 ## Stats without root
 
 `sdr-live-stats` reads IQ straight from the radio and writes the stats JSON with

@@ -68,10 +68,16 @@ enabled, parses every shell script, builds a `dev` release bundle and asserts
 that tampering with a bundled file is detected. `.github/workflows/release.yml`
 rebuilds a bundle from a `v*` tag and attaches it to a GitHub Release.
 
+Since added: AddressSanitizer and UndefinedBehaviorSanitizer jobs, a Debug
+build, and `sdr-fuzz`, which feeds hostile input to the two decoders that take
+data from outside -- the state protocol from the network and the deframer from
+the air. It asserts that nothing unverifiable is ever accepted and that pure
+noise never yields a frame. Mutation-tested: disabling the CRC check makes it
+accept 2386 crafted packets and fail, so the gate can actually fire.
+
 Still outstanding:
 
-- Debug as well as Release configurations, on more than one Linux version.
-- AddressSanitizer and UndefinedBehaviorSanitizer jobs.
+- More than one Linux version.
 - Formatting and static-analysis checks.
 - Hardware tests remain out of CI by necessity, not only by choice: Vivado
   cannot run on a GitHub runner and the licence is node-locked to a USB NIC,
