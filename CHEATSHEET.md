@@ -276,5 +276,7 @@ with a second attached board.
 | board resets mid-test, `/tmp` and `/lib/firmware` empty | watchdog; stock `-T 10` |
 | one board unreachable, the other fine | both host NICs in `192.168.2.0/24` — add a `/32` route |
 | `stat: not found`, `strtonum` unknown | busybox: use `wc -c <`, and no `strtonum` in awk |
-| capture returns 0 bytes | `/dev/iio:device4` held by a stale drain — `free_capture_dev.sh` |
+| capture returns 0 bytes | buffer device held by a stale drain — `free_capture_dev.sh` |
+| `write error: Operation not permitted` on a feed | writing into the RX device — indices shifted; resolve by name via `iio_lookup.sh` |
+| feed runs but nothing is transmitted | stale feeder holds the TX device; it survives SIGKILL — `free_capture_dev.sh`, else reboot |
 | probe reads all zeros | `iq_probe_read.sh` re-arms first; the feed must still be running |

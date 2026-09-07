@@ -177,6 +177,41 @@ transfer, so every alignment and every "was this frame wholly captured" decision
 is scoped to it. Analysing a 1024-byte capture as if it were 8192 reports 22.37%
 loss against a true 0.19% — a fabricated regression.
 
+## IIO device indices are not stable
+
+**Resolve devices by name, never by index.** The index depends on which drivers
+probed, and that changes with the rootfs: flashing the stock firmware removed
+the `pga102` device and shifted everything down by one.
+
+| device | typical | after a stock-rootfs flash |
+|---|---|---|
+| `ad9361-phy` | `iio:device0` | `iio:device0` |
+| `cf-ad9361-dds-core-lpc` (TX) | `iio:device3` | **`iio:device2`** |
+| `cf-ad9361-lpc` (RX) | `iio:device4` | **`iio:device3`** |
+
+The two boards in this lab currently disagree with each other. A script holding
+the old numbers writes its transmit stream into the **receive** device, which
+fails with `Operation not permitted` — an error naming nothing relevant — and
+the visible symptom is a receiver decoding no frames, indistinguishable from a
+broken modulator.
+
+`fpga/scripts/iio_lookup.sh` resolves them by name; every board script sources
+it and exports `IIO_PHY`, `IIO_TX`, `IIO_RX` plus the matching char devices.
+
+## Both buffer devices are single-open
+
+The transmit device as well as the receive one. A process left over from an
+interrupted run holds it and **survives `SIGKILL`** inside the driver, so the
+next run silently does nothing. On the transmit side that means no carrier at
+all, and again it reads as a dead modulator.
+
+Note that a feed is `cat <file> > <chardev>`, which does **not** match
+`/dev/iio` in `ps` — `free_capture_dev.sh` matches both patterns and drops
+`buffer/enable` on both directions, which is what actually releases a process
+blocked in the driver. Once thoroughly wedged, even writing `buffer/enable`
+blocks, and only a PL reload or reboot recovers. A reboot is cheap on a board
+with persistent firmware: it returns with the modem PL already loaded.
+
 ## Traps in the measurement itself
 
 More than one conclusion in this project's history has been an artifact rather
@@ -203,12 +238,21 @@ than a fault. In rough order of how much time each cost:
 * **PSD ripple and EVM need care.** "22.5 dB in-band ripple" was estimation
   variance from averaging three segments; at 124 segments it is 5.8 dB, i.e.
   flat. EVM read 19.4% without derotation and 14.6% with it.
+* **Never conclude from a truncated correlation search.** The fabric modulator
+  was called broken on a correlation of 0.206 — measured over 200k of 1.3M
+  possible lags. Over the full period by FFT it correlates at **1.0000**, with
+  the true match at lag 944367.
 
-## Known limitation
+## Status of the fabric transmit path
 
-Streaming a real file through the **fabric modulator** does not yet decode: a
-byte stream that gives PER 0.00% when modulated on the host produces no frames
-when modulated on-chip, on the same demodulator and the same air. The TX chain
-does carry signal — the TX IQ probe reads full-amplitude IQ when armed correctly
-— so the fault is in the waveform or the byte path, not a dead transmitter. This
-blocks live video, since host-modulated IQ cannot be streamed at 69 MB/s.
+The modulator is **correct**: its output correlates at 1.0000 with the host
+modulator's IQ for the same bytes, over the full reference period.
+
+Two environmental faults, not modulator faults, produced the long-running
+appearance that it did not work — the device-index shift and the single-open
+transmit device, both described above. Both are now handled in the scripts.
+
+An end-to-end over-the-air run of a fabric-modulated framed stream has not yet
+been completed cleanly, so live video remains unproven. Host-modulated IQ
+cannot substitute for it, since IQ at 17.28 MS/s is 69 MB/s and the
+USB-ethernet cannot carry that.
