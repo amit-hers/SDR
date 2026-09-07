@@ -164,6 +164,14 @@ void Controller::applyLive(double atten_db, double freq_tx_hz,
     if (atten_db >= 0.0)  radio_->setTxAttenuation(atten_db);
     if (freq_tx_hz > 0.0) radio_->setTxFrequency(freq_tx_hz);
     if (freq_rx_hz > 0.0) radio_->setRxFrequency(freq_rx_hz);
+
+    // Keep cfg_ in step with the hardware. Telemetry reports these fields, and
+    // reporting the STARTUP value after a live retune makes `sdrctl status`
+    // state the opposite of what the radio is doing -- which is worse than not
+    // reporting them, because it is believed.
+    if (atten_db >= 0.0)  cfg_.tx_atten_db = atten_db;
+    if (freq_tx_hz > 0.0) cfg_.freq_tx_mhz = freq_tx_hz / 1e6;
+    if (freq_rx_hz > 0.0) cfg_.freq_rx_mhz = freq_rx_hz / 1e6;
 }
 
 } // namespace sdr

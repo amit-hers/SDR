@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <dirent.h>
+#include <cerrno>
 
 #include <algorithm>
 #include <cctype>
@@ -230,7 +231,7 @@ int cmdApply(const std::string& cfg, const std::string& node) {
     if (!spit(path, j)) { std::cerr << "cannot write " << path << "\n"; return 1; }
 
     // Find the daemon(s) by walking /proc, so this works without pidof.
-    int signalled = 0;
+    int signalled = 0, denied = 0;
     if (DIR* d = opendir("/proc")) {
         while (dirent* e = readdir(d)) {
             if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
@@ -238,11 +239,21 @@ int cmdApply(const std::string& cfg, const std::string& node) {
             if (comm.rfind("sdr-datalink", 0) != 0) continue;
             pid_t pid = (pid_t)atoi(e->d_name);
             if (kill(pid, SIGUSR2) == 0) { std::cout << "  signalled pid " << pid << "\n"; ++signalled; }
+            // The daemon needs root for its TAP device, so it usually IS root.
+            // Reporting that as "no daemon found" sends you looking for a
+            // process that is plainly running; say what actually happened.
+            else if (errno == EPERM) {
+                std::cout << "  pid " << pid << " runs as another user (permission denied)\n";
+                ++denied;
+            }
         }
         closedir(d);
     }
     std::cout << "Wrote " << path << "; " << signalled << " daemon(s) signalled.\n";
-    if (!signalled)
+    if (denied)
+        std::cout << "Re-run with sudo to signal the " << denied
+                  << " daemon(s) owned by another user.\n";
+    else if (!signalled)
         std::cout << "No running daemon found. The file is in place for the next start.\n";
     return 0;
 }
