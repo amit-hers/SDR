@@ -253,6 +253,18 @@ appearance that it did not work — the device-index shift and the single-open
 transmit device, both described above. Both are now handled in the scripts.
 
 An end-to-end over-the-air run of a fabric-modulated framed stream has not yet
-been completed cleanly, so live video remains unproven. Host-modulated IQ
-cannot substitute for it, since IQ at 17.28 MS/s is 69 MB/s and the
-USB-ethernet cannot carry that.
+been completed cleanly, so live video remains unproven. Host-modulated IQ cannot
+substitute for it, since IQ at 17.28 MS/s is 69 MB/s and the USB-ethernet cannot
+carry that.
+
+Two practical obstacles, both environmental:
+
+* **Simultaneous TX and RX at 17.28 MS/s appears to destabilise a board.** A
+  single-board RF loopback — fabric modulator feeding the same board's
+  demodulator — reset the unit mid-capture. Both directions at the full rate is
+  roughly twice the DMA and interrupt load of either alone. Prefer two boards,
+  or drop the rate for loopback work.
+* **Both boards default to `192.168.2.1`** once either has been flashed with a
+  stock rootfs, so they collide. Fixing it requires the mass-storage
+  `config.txt` and an eject; see
+  [Deployment](DEPLOYMENT.md#--persist-resets-the-boards-identity).

@@ -238,7 +238,12 @@ ip addr del 192.168.2.1/24 dev usb0
 ip addr add 192.168.2.17/24 dev usb0
 ```
 
-The board's own copy lives at `/opt/config.txt`.
+**`/opt/config.txt` is in the RAMDISK.** Editing it fixes the running system and
+nothing else — the change is gone at the next boot, and the board returns to
+`192.168.2.1`. Only the mass-storage `config.txt` persists, and only when the
+volume is **ejected**; the board reads it on unmount and does nothing until then.
+Editing it while it stays mounted, or editing `/opt/config.txt` instead, both
+look like they worked and both revert.
 
 Finally, **both host NICs sit in `192.168.2.0/24`**, so the kernel sends every
 `192.168.2.x` packet out whichever route has the lower metric and one board
