@@ -17,6 +17,18 @@
 #              (bitstream_image=system.bit.bin in its environment). Reboots and
 #              verifies afterwards. Requires boot/pluto.frm in the bundle.
 #
+#              --persist REPLACES THE ROOTFS, AND THE ROOTFS CARRIES THE BOARD'S
+#              IDENTITY. After it the board comes back with stock hostname, USB
+#              serial, MAC, root password ("analog", not "root") and IP
+#              ADDRESS -- 192.168.2.1, which COLLIDES with the other board if
+#              both are attached. This is not a failure mode, it is what
+#              flashing a rootfs means, and it caught this script out once:
+#              UNIT-A deployed perfectly and was reported as dead because the
+#              script was waiting on an address the board no longer had.
+#              So the search below probes the stock address too, and config.txt
+#              is saved to /mnt/jffs2 first, which is a separate flash partition
+#              and survives.
+#
 # The distinction matters because a watchdog reset during a long test has
 # silently reverted this board to the stock PL more than once, and every
 # 0x43Cxxxxx access then bus-errors in a way that looks like dead hardware.
@@ -107,7 +119,16 @@ ssh_d "mkdir -p $BAK && cp /mnt/jffs2/sdr-release $BAK/ 2>/dev/null; \
        cp /mnt/jffs2/autorun.sh $BAK/ 2>/dev/null; \
        cp /mnt/jffs2/ad936x.conf $BAK/ 2>/dev/null; true" >/dev/null 2>&1 \
   || die "Could not write to /mnt/jffs2 (persistent config partition)."
+# The network identity is the thing most worth keeping: --persist resets it, and
+# /mnt/jffs2 is a separate mtd that survives the rootfs being replaced.
+ssh_d "for f in /opt/config.txt /mnt/msd/config.txt /params.txt; do \
+         [ -f \$f ] && cp \$f $BAK/config.txt && break; done; true" >/dev/null 2>&1
+ssh_d "echo '$DEV' > /mnt/jffs2/sdr-lastip" >/dev/null 2>&1
 echo "         saved to $BAK"
+if [[ $PERSIST -eq 1 ]]; then
+  echo "         NOTE: --persist replaces the rootfs; the board will return with"
+  echo "               STOCK identity (ip 192.168.2.1, password 'analog')."
+fi
 
 # ── Deployment ────────────────────────────────────────────────────────────
 step 40 "Uploading boot image"
@@ -201,14 +222,38 @@ if [[ $PERSIST -eq 1 ]]; then
 
   step 93 "Waiting for device"
   sleep 5
-  START=$SECONDS; DEADLINE=$((SECONDS + 180))
-  until ssh_d true >/dev/null 2>&1; do
-    (( SECONDS < DEADLINE )) || die "Device did not come back within 180 s.
-It may still be booting. Re-run ./scripts/verify.sh $DEV_ARG $BUNDLE once it responds,
-or use ./scripts/rollback.sh $DEV_ARG to restore the golden release."
+  START=$SECONDS; DEADLINE=$((SECONDS + 240))
+  ORIG="$DEV"
+  FOUND=""
+  # Probe the original address AND the stock default, with both passwords: a
+  # rootfs flash resets all of them, and a board that moved is not a board that
+  # died.
+  while (( SECONDS < DEADLINE )); do
+    for cand in "$ORIG" 192.168.2.1; do
+      for pw in "$PW" analog root; do
+        if sshpass -p "$pw" ssh "${SSHO[@]}" "root@$cand" true >/dev/null 2>&1; then
+          FOUND="$cand"; PW="$pw"; DEV="$cand"; break 3
+        fi
+      done
+    done
     sleep 3
   done
-  echo "         back after $((SECONDS - START)) s"
+  if [[ -z "$FOUND" ]]; then
+    die "Device did not come back within 240 s on $ORIG or 192.168.2.1.
+
+The firmware write completed, so the board is most likely up but on an address
+this script cannot guess. Check its USB serial console (/dev/ttyACM*) or mount
+its mass-storage volume and read config.txt.
+
+Recover its address by editing 'ipaddr' in config.txt on that volume and
+ejecting it, which the board applies on unmount."
+  fi
+  echo "         back after $((SECONDS - START)) s at $DEV"
+  if [[ "$DEV" != "$ORIG" ]]; then
+    echo "         WARNING: the board returned on $DEV, not $ORIG."
+    echo "         --persist reset its identity. Restore the address by editing"
+    echo "         'ipaddr' in config.txt on its mass-storage volume and ejecting it."
+  fi
   sleep 3
 else
   step 90 "Reboot"

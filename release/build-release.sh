@@ -130,6 +130,24 @@ cp "$FW/sdimg/uEnv.txt"        "$BUNDLE/boot/uEnv.txt" 2>/dev/null || true
 [[ -f "$FW/boot.frm" ]] && cp "$FW/boot.frm" "$BUNDLE/boot/boot.frm" && say "boot/boot.frm" "ok"
 cp "$FW/sdimg/uramdisk.image.gz" "$BUNDLE/rootfs/rootfs.image.gz"; say "rootfs/rootfs.image.gz" "$(stat -c%s "$FW/sdimg/uramdisk.image.gz") B"
 
+# The firmware image is what gives POWER-ON persistence: u-boot loads the PL
+# from its `fpga` sub-image before the kernel. Without this the bundle can only
+# be deployed at runtime, because a reboot rebuilds the ramdisk and takes the
+# bitstream with it. Kernel, device tree and ramdisk are carried across from the
+# stock image unchanged -- nothing here rebuilds them, and shipping a different
+# kernel than the one a release was validated against would make the bundle a
+# worse record than none.
+if command -v mkimage >/dev/null && command -v dumpimage >/dev/null; then
+  if "$ROOT/release/make-frm.sh" "$BUNDLE/fpga/system.bin" "$BUNDLE/boot/pluto.frm" >/dev/null 2>&1; then
+    say "boot/pluto.frm" "$(stat -c%s "$BUNDLE/boot/pluto.frm") B (power-on persistence)"
+  else
+    echo "  WARNING: make-frm.sh failed; --persist will be unavailable for this bundle." >&2
+  fi
+else
+  echo "  WARNING: mkimage/dumpimage not found; --persist will be unavailable." >&2
+  echo "           apt-get install u-boot-tools" >&2
+fi
+
 # ── Software ──────────────────────────────────────────────────────────────
 # Host-side: this daemon drives the Pluto over IIO; it is not an ARM binary.
 if [[ -x "$ROOT/build/src/daemon/sdr-datalink" ]]; then

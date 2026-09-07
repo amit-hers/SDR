@@ -199,14 +199,54 @@ route to power-on persistence on this board:
   the 3.3 MB `BOOT.BIN` in the bundle is for SD-card boot, not QSPI.
 
 So `--persist` writes a rebuilt `pluto.frm`. Building that needs `mkimage` from
-`u-boot-tools`:
+`u-boot-tools` (`sudo apt-get install u-boot-tools`); without it, bundles ship
+without `boot/pluto.frm` and `--persist` refuses cleanly.
 
-```bash
-sudo apt-get install u-boot-tools
+**Verified on hardware.** UNIT-A was flashed with `--persist`, power-cycled, and
+came up with the modem PL already loaded by u-boot — no script had run:
+
+```
+FPGA magic:          0x5344524C   PASS
+FPGA ABI:            3            PASS
+Register map:        3            PASS
+DEPLOYMENT RESULT: PASS
 ```
 
-Until then, bundles ship without `boot/pluto.frm` and `--persist` refuses
-cleanly. Runtime deployment is unaffected.
+### `--persist` resets the board's identity
+
+This is the one thing to know before using it. The rootfs carries the board's
+identity, so replacing it resets **hostname, USB serial, MAC, root password
+(`analog`, not `root`) and IP address** to stock defaults. The stock IP is
+`192.168.2.1`, which **collides with the other board** if both are attached.
+
+It is not a failure, but it caught this script out once: UNIT-A deployed
+perfectly and was reported dead because `flash.sh` was waiting on an address the
+board no longer had. The wait now probes the stock address and both passwords
+too, and says so explicitly when the board moves.
+
+To restore the address, either:
+
+* mount the board's mass-storage volume, set `ipaddr` in `config.txt`, and
+  **eject it** — the board applies the change on unmount (it does nothing until
+  then); or
+* use the USB serial console, which works regardless of networking:
+
+```bash
+stty -F /dev/ttyACM1 115200 raw -echo
+# log in as root / analog, then:
+ip addr del 192.168.2.1/24 dev usb0
+ip addr add 192.168.2.17/24 dev usb0
+```
+
+The board's own copy lives at `/opt/config.txt`.
+
+Finally, **both host NICs sit in `192.168.2.0/24`**, so the kernel sends every
+`192.168.2.x` packet out whichever route has the lower metric and one board
+looks dead. Add a `/32` route per board:
+
+```bash
+sudo ip route replace 192.168.2.17/32 dev <nic> src 192.168.2.10 metric 50
+```
 
 `flash.sh` also installs `/mnt/jffs2/autorun.sh`, sourced at boot by
 `/etc/init.d/S98autostart`. It re-raises the watchdog timeout to `-T 120` —
