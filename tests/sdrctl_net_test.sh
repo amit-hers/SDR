@@ -37,13 +37,23 @@ fresh
 grep -q '9.9.9.9' "$CFG" && fail "injected address reached the file"
 echo "  line break in a value refused, no line injected"
 
-# 3. An '=' would also make one field look like two.
+# 3. A line break with NO '=' in it. The payload in (2) contains an '=', so the
+# '=' guard alone would catch it and the line-break guard would appear tested
+# when it was not -- removing it left this suite green. A section header injects
+# just as effectively and carries no '='.
+fresh
+"$SDRCTL" net set --hostname "$(printf 'evil\r\n[SYSTEM]')" --volume "$CFG" >/dev/null 2>&1
+[ "$(grep -c '^\[SYSTEM\]' "$CFG")" = "1" ] || fail "a line break injected a section header"
+grep -q '^hostname = evil\r\?$' "$CFG" && fail "the value was truncated and written instead of refused"
+echo "  line break without '=' refused"
+
+# 4. An '=' would also make one field look like two.
 fresh
 "$SDRCTL" net set --hostname 'a = b' --volume "$CFG" >/dev/null 2>&1
 grep -q '^hostname = a = b' "$CFG" && fail "'=' in a value was written"
 echo "  '=' in a value refused"
 
-# 4. A legitimate hostname still works.
+# 5. A legitimate hostname still works.
 fresh
 "$SDRCTL" net set --hostname plutoplus-a --volume "$CFG" >/dev/null 2>&1 \
   || fail "a valid hostname was rejected"
