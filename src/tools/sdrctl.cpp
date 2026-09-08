@@ -493,5 +493,6 @@ int main(int argc, char** argv) {
     if (cmd == "net")    return cmdNet(pos.empty() ? std::vector<std::string>{"show"} : pos);
     if (cmd == "-h" || cmd == "--help" || cmd == "help") return usage();
     std::cerr << "unknown command: " << cmd << "\n";
-    return usage() ? 2 : 2;
+    usage();
+    return 2;
 }

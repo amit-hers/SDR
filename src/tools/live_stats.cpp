@@ -77,12 +77,10 @@ int main(int argc, char** argv) {
 
         // Convert int16 → complex float, feed FFT
         std::vector<std::complex<float>> iq(static_cast<size_t>(n));
-        double power_sum = 0;
         for (int i = 0; i < n; ++i) {
             float I = hw_buf[i * 2]     / 32768.f;
             float Q = hw_buf[i * 2 + 1] / 32768.f;
             iq[static_cast<size_t>(i)] = {I, Q};
-            power_sum += I*I + Q*Q;
         }
         fft.accumulate(iq.data(), n);
 

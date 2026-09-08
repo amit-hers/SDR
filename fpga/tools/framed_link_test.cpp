@@ -605,7 +605,6 @@ static int doAcq(int argc, char** argv) {
             }
         }
         if (bestpos < 0) { printf("  %5d   %11s\n", a-3, "none"); continue; }
-        if (bestpos < 0) bestpos = 0;
         acq.push_back((double)bestpos);
         printf("  %5d   seq %7u   %10ld B      %6.2f ms\n",
                a-3, bestseq, bestpos, bestpos / brate * 1000.0);

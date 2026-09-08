@@ -1,0 +1,15 @@
+// cppcheck cannot see a lambda's side effect on a captured variable, so it reads
+// `have_pending` as unchanged across sealAggregate() and calls the follow-up
+// test redundant. It is not: sealAggregate sets it.
+identicalInnerCondition:src/daemon/modes/BridgeMode.cpp
+// The queue size is changed by another thread under the same lock while this
+// waits on a condition variable; cppcheck models neither, so it reads the guard
+// as constant.
+knownConditionTrueFalse:src/core/phy/SoftwarePhy.cpp
+// stop() is called from each mode's OWN destructor, where the object is still
+// that type. Non-virtual dispatch is correct here, not a bug.
+virtualCallInConstructor
+// Tests are built with -UNDEBUG precisely so assertions stay live.
+assertWithSideEffect:tests/*
+missingIncludeSystem
+unusedFunction

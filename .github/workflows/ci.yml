@@ -39,6 +39,19 @@ jobs:
             bash -n "$f" || sh -n "$f" || { echo "SYNTAX FAIL: $f"; exit 1; }
           done
 
+      # cppcheck reasons across a whole translation unit and finds what neither
+      # the compiler nor a test does: an inner condition that is always true, a
+      # value computed and never read, a branch that cannot be reached. Scoped
+      # to `warning` -- the style categories are 100+ findings of noise and a
+      # gate nobody can keep green is a gate that gets disabled.
+      - name: Static analysis (cppcheck)
+        run: |
+          sudo apt-get install -y cppcheck
+          cppcheck --enable=warning --inline-suppr --std=c++17 \
+            -I include -I src \
+            --suppressions-list=.cppcheck-suppressions \
+            --error-exitcode=1 src/ tests/ fpga/tools/
+
       # Sanitizers find what the assertions cannot: reads past the end of a
       # buffer, signed overflow, use-after-free. The decoders take input from
       # the network and the air, so this is the half of correctness that the
