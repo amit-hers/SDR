@@ -376,6 +376,23 @@ int cmdNet(const std::vector<std::string>& args) {
     std::string txt = slurp(path);
     if (txt.empty()) { std::cerr << "cannot read " << path << "\n"; return 1; }
 
+    // No value may contain a line terminator. Without this a hostname of
+    //     "evil\r\nipaddr = 9.9.9.9"
+    // injects a whole extra line, and since the board reads the FIRST ipaddr it
+    // finds, the radio boots on an address nobody set. This file is the device's
+    // boot configuration, so a value that can add lines to it can change the
+    // board's identity.
+    auto rejectIfInjecting = [](const std::string& what, const std::string& v) {
+        if (v.find_first_of("\r\n") != std::string::npos) {
+            std::cerr << what << ": value may not contain a line break\n";
+            exit(1);
+        }
+        if (v.find('=') != std::string::npos) {
+            std::cerr << what << ": value may not contain '='\n";
+            exit(1);
+        }
+    };
+
     // The file is FAT with CRLF line endings; a stripped CR makes the board's
     // parser ignore the line, so replacements keep the terminator intact.
     auto replaceField = [&](const std::string& key, const std::string& val) -> bool {
@@ -406,10 +423,10 @@ int cmdNet(const std::vector<std::string>& args) {
     auto validIp = [](const std::string& s) {
         in_addr tmp{}; return ::inet_pton(AF_INET, s.c_str(), &tmp) == 1;
     };
-    if (!ip.empty())   { if (!validIp(ip))   { std::cerr << "--ip: not an IPv4 address\n"; return 1; }   changed += replaceField("ipaddr", ip); }
-    if (!mask.empty()) { if (!validIp(mask)) { std::cerr << "--mask: not an IPv4 netmask\n"; return 1; } changed += replaceField("netmask", mask); }
-    if (!gw.empty())   { if (!validIp(gw))   { std::cerr << "--gw: not an IPv4 address\n"; return 1; }   changed += replaceField("gateway_eth", gw); }
-    if (!host.empty()) changed += replaceField("hostname", host);
+    if (!ip.empty())   { rejectIfInjecting("--ip", ip);     if (!validIp(ip))   { std::cerr << "--ip: not an IPv4 address\n"; return 1; }   changed += replaceField("ipaddr", ip); }
+    if (!mask.empty()) { rejectIfInjecting("--mask", mask); if (!validIp(mask)) { std::cerr << "--mask: not an IPv4 netmask\n"; return 1; } changed += replaceField("netmask", mask); }
+    if (!gw.empty())   { rejectIfInjecting("--gw", gw);     if (!validIp(gw))   { std::cerr << "--gw: not an IPv4 address\n"; return 1; }   changed += replaceField("gateway_eth", gw); }
+    if (!host.empty()) { rejectIfInjecting("--hostname", host); changed += replaceField("hostname", host); }
     if (!changed) { std::cerr << "nothing changed (no matching fields, or nothing given)\n"; return 1; }
     if (!spit(path, txt)) { std::cerr << "cannot write " << path << "\n"; return 1; }
 

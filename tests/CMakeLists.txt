@@ -55,3 +55,8 @@ add_test(NAME sdrctl_config
 add_test(NAME config_strict
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/config_strict_test.sh
                  $<TARGET_FILE:sdr-datalink> ${PROJECT_SOURCE_DIR}/config.json)
+
+# `net set` writes the radio's boot configuration; a value that can inject lines
+# there can change the board's network identity.
+add_test(NAME sdrctl_net
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdrctl_net_test.sh $<TARGET_FILE:sdrctl>)
