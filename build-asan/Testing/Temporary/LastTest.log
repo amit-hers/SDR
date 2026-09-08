@@ -1,0 +1,315 @@
+Start testing: Sep 08 20:53 IDT
+----------------------------------------------------------
+1/14 Testing: framing
+1/14 Test: framing
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "framing"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"framing" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[framing tests]
+  [framing] roundtrip: PASS
+  [framing] corrupt CRC rejected: PASS
+  [framing] max payload roundtrip: PASS
+  [framing] multi-frame stream: PASS
+  [framing] Reed-Solomon rescues corrupted frames: PASS
+[framing tests] ALL PASS
+
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"framing" end time: Sep 08 20:53 IDT
+"framing" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/14 Testing: fec
+2/14 Test: fec
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "fec"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"fec" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[fec tests]
+  [fec] clean roundtrip: PASS
+  [fec] 15-error correction: PASS
+  [fec] full block (223B): PASS
+  [fec] multi-block (500B → 3 blocks): PASS
+[fec tests] ALL PASS
+
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"fec" end time: Sep 08 20:53 IDT
+"fec" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/14 Testing: modem
+3/14 Test: modem
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "modem"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"modem" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[modem tests]
+  [modem] BPSK roundtrip: PASS
+  [modem] QPSK roundtrip: PASS
+  [modem] 16QAM roundtrip: PASS
+  [modem] 64QAM roundtrip: PASS
+  [modem] adaptive SNR thresholds + hysteresis: PASS
+[modem tests] ALL PASS
+
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"modem" end time: Sep 08 20:53 IDT
+"modem" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/14 Testing: crypto
+4/14 Test: crypto
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "crypto"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"crypto" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[crypto tests]
+  [crypto] AES-256-CTR encrypt/decrypt: PASS
+  [crypto] different counters produce different ciphertext: PASS
+  [crypto] large payload (1400B): PASS
+[crypto tests] ALL PASS
+
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"crypto" end time: Sep 08 20:53 IDT
+"crypto" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/14 Testing: dsp
+5/14 Test: dsp
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "dsp"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"dsp" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[dsp tests]
+  [dsp] RRC interp/decim size OK: PASS
+  [dsp] AGC converges (mag=0.999988): PASS
+  [dsp] CoarseFreqCorrect recovers known offsets: PASS
+  [dsp] FFT spectrum length + finite values: PASS
+  [dsp] FFT DC peak at center bin 128: PASS
+[dsp tests] ALL PASS
+
+<end of output>
+Test time =   1.33 sec
+----------------------------------------------------------
+Test Passed.
+"dsp" end time: Sep 08 20:53 IDT
+"dsp" time elapsed: 00:00:01
+----------------------------------------------------------
+
+6/14 Testing: arq
+6/14 Test: arq
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "arq"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"arq" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[arq tests]
+  [arq] send/ack frees slot: PASS
+  [arq] timeout triggers retransmit: PASS
+  [arq] exceeding max_retries drops frame: PASS
+  [arq] window-full backpressure: PASS
+  [arq] invariants hold under random traffic: PASS
+[arq tests] ALL PASS
+
+<end of output>
+Test time =   0.15 sec
+----------------------------------------------------------
+Test Passed.
+"arq" end time: Sep 08 20:53 IDT
+"arq" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/14 Testing: splitmod
+7/14 Test: splitmod
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "splitmod"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"splitmod" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[splitmod] symbol-boundary arithmetic
+[splitmod] BPSK payload decodes
+[splitmod] QPSK payload on a BPSK bootstrap decodes
+[splitmod] payload section really is a different waveform
+[splitmod] receiver follows the header, not its own state
+[splitmod] 180-degree carrier error recovers for both schemes
+[splitmod] offset burst: sync found away from symbol 0
+[splitmod] sync-word search bound is measured from the burst start
+[splitmod] FEC-encoded payload sizes the payload section right
+[splitmod] truncated burst reports incomplete, not garbage
+[splitmod] AUTO is rejected at the modulator
+[splitmod] header declaring AUTO is refused on receive
+[splitmod] payload tap sees only payload symbols
+[splitmod] QPSK payload survives residual carrier drift
+[splitmod] OK
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"splitmod" end time: Sep 08 20:53 IDT
+"splitmod" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/14 Testing: aggregate
+8/14 Test: aggregate
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "aggregate"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"aggregate" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[aggregate] pack/split round-trip
+[aggregate] survives the full frame round-trip
+[aggregate] sizes near the seal threshold
+[aggregate] malformed records stop the walk, no overrun
+[aggregate] a single max-size packet still round-trips
+[aggregate] OK
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"aggregate" end time: Sep 08 20:53 IDT
+"aggregate" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/14 Testing: scramble
+9/14 Test: scramble
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "scramble"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"scramble" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[scramble]
+  [scramble] involution: PASS
+  [scramble] distinct seeds diverge: PASS
+  [scramble] 1200 zero bytes -> longest wire run 2 B
+  [scramble] constant run broken up: PASS
+  [scramble] zero payload survives the round trip: PASS
+  [scramble] RS zero padding scrambled and recovered: PASS
+  [scramble] 10 wire errors still rescued by RS: PASS
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"scramble" end time: Sep 08 20:53 IDT
+"scramble" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/14 Testing: telemetry
+10/14 Test: telemetry
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-tests" "telemetry"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"telemetry" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+[telemetry]
+  [telemetry] round trip: PASS
+  [telemetry] every single-bit flip rejected: PASS
+  [telemetry] truncation and junk rejected: PASS
+  [telemetry] newer sender with extra fields still parses: PASS
+  [telemetry] older sender's missing tail reads as defaults: PASS
+  [telemetry] JSON renders scaled units: PASS
+[sdr] telemetry on udp://127.0.0.1:55140
+  [telemetry] server answers STAT, ignores junk, stops cleanly: PASS
+<end of output>
+Test time =   0.44 sec
+----------------------------------------------------------
+Test Passed.
+"telemetry" end time: Sep 08 20:53 IDT
+"telemetry" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/14 Testing: fuzz
+11/14 Test: fuzz
+Command: "/home/amither/Documents/SDR/build-asan/tests/sdr-fuzz" "2000"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"fuzz" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+aggregate records emitted from noise:     30   (bounds asserted)
+StatePacket accepted from hostile input: 0   (must be 0)
+frames returned from PURE NOISE:          0   (must be 0)
+frames recovered from corrupted frames:   115   (of which 115 RS-rescued)
+PASS
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz" end time: Sep 08 20:53 IDT
+"fuzz" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/14 Testing: sdrctl_config
+12/14 Test: sdrctl_config
+Command: "/home/amither/Documents/SDR/tests/sdrctl_config_test.sh" "/home/amither/Documents/SDR/build-asan/src/tools/sdrctl" "/home/amither/Documents/SDR/config.json"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"sdrctl_config" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+  round-tripped 20 keys, file byte-identical, still valid JSON
+  string field stayed quoted for a numeric-looking value
+  unquoted field rejected non-JSON values, file undamaged
+  multi-key set was all-or-nothing
+PASS
+<end of output>
+Test time =   0.48 sec
+----------------------------------------------------------
+Test Passed.
+"sdrctl_config" end time: Sep 08 20:53 IDT
+"sdrctl_config" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/14 Testing: config_strict
+13/14 Test: config_strict
+Command: "/home/amither/Documents/SDR/tests/config_strict_test.sh" "/home/amither/Documents/SDR/build-asan/src/daemon/sdr-datalink" "/home/amither/Documents/SDR/config.json"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"config_strict" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+  checked-in config still parses
+  5 unparseable values each reported, none silently defaulted
+PASS
+<end of output>
+Test time =   3.27 sec
+----------------------------------------------------------
+Test Passed.
+"config_strict" end time: Sep 08 20:53 IDT
+"config_strict" time elapsed: 00:00:03
+----------------------------------------------------------
+
+14/14 Testing: sdrctl_net
+14/14 Test: sdrctl_net
+Command: "/home/amither/Documents/SDR/tests/sdrctl_net_test.sh" "/home/amither/Documents/SDR/build-asan/src/tools/sdrctl"
+Directory: /home/amither/Documents/SDR/build-asan/tests
+"sdrctl_net" start time: Sep 08 20:53 IDT
+Output:
+----------------------------------------------------------
+  edit changed one field, CRLF intact, neighbouring key untouched
+  line break in a value refused, no line injected
+  line break without '=' refused
+  '=' in a value refused
+  valid hostname accepted
+PASS
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"sdrctl_net" end time: Sep 08 20:53 IDT
+"sdrctl_net" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 08 20:53 IDT

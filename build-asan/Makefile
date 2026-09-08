@@ -236,6 +236,19 @@ sdr-tests/fast:
 	$(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-tests.dir/build.make tests/CMakeFiles/sdr-tests.dir/build
 .PHONY : sdr-tests/fast
 
+#=============================================================================
+# Target rules for targets named sdr-fuzz
+
+# Build rule for target.
+sdr-fuzz: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sdr-fuzz
+.PHONY : sdr-fuzz
+
+# fast build rule for target.
+sdr-fuzz/fast:
+	$(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-fuzz.dir/build.make tests/CMakeFiles/sdr-fuzz.dir/build
+.PHONY : sdr-fuzz/fast
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -250,6 +263,7 @@ help:
 	@echo "... rebuild_cache"
 	@echo "... test"
 	@echo "... sdr-datalink"
+	@echo "... sdr-fuzz"
 	@echo "... sdr-live-stats"
 	@echo "... sdr-tests"
 	@echo "... sdr_core"

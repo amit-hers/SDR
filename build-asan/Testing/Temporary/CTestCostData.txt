@@ -1,0 +1,15 @@
+framing 2 0.00647842
+fec 2 0.00532739
+modem 2 0.0062324
+crypto 2 0.00783336
+dsp 2 0.665057
+arq 2 0.0771928
+splitmod 2 0.00805424
+aggregate 2 0.00590668
+scramble 2 0.0056575
+telemetry 2 0.220762
+fuzz 1 0.202164
+sdrctl_config 2 0.241843
+config_strict 2 1.6365
+sdrctl_net 2 0.0283659
+---

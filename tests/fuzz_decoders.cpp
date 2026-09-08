@@ -19,6 +19,8 @@
 #include "sdr/framing/Deframer.hpp"
 #include "sdr/framing/Framer.hpp"
 #include "sdr/fec/ReedSolomon.hpp"
+#include "sdr/framing/Aggregate.hpp"
+#include <cassert>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -92,6 +94,23 @@ int main(int argc, char** argv) {
             rescued += d.fecRescued();
         }
     }
+    // 6. aggregate::split walks length-prefixed records out of a payload that
+    //    arrived over the air. A CRC-valid frame can still carry a malformed
+    //    aggregate -- from a buggy sender, or a Reed-Solomon repair that
+    //    produced a codeword the CRC happens to accept -- so it must never read
+    //    past the buffer or loop forever on a zero length.
+    size_t records = 0;
+    for (int i = 0; i < iters; ++i) {
+        size_t n = rng() % 2048;
+        std::vector<uint8_t> b(n);
+        for (auto& x : b) x = uint8_t(rng());
+        aggregate::split(b.data(), b.size(), [&](const uint8_t* p, size_t len) {
+            // Every emitted record must lie wholly inside the buffer.
+            assert(p >= b.data() && p + len <= b.data() + b.size());
+            ++records;
+        });
+    }
+    std::printf("aggregate records emitted from noise:     %zu   (bounds asserted)\n", records);
     std::printf("StatePacket accepted from hostile input: %zu   (must be 0)\n", accepted);
     std::printf("frames returned from PURE NOISE:          %zu   (must be 0)\n", frames_noise);
     std::printf("frames recovered from corrupted frames:   %zu   (of which %zu RS-rescued)\n",

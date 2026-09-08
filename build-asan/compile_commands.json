@@ -280,5 +280,11 @@
   "command": "/usr/bin/c++  -I/home/amither/Documents/SDR/include -fsanitize=address,undefined -fno-omit-frame-pointer -g -g -std=c++20 -Wall -Wextra -Wpedantic -g -O0 -UNDEBUG -o CMakeFiles/sdr-tests.dir/test_telemetry.cpp.o -c /home/amither/Documents/SDR/tests/test_telemetry.cpp",
   "file": "/home/amither/Documents/SDR/tests/test_telemetry.cpp",
   "output": "tests/CMakeFiles/sdr-tests.dir/test_telemetry.cpp.o"
+},
+{
+  "directory": "/home/amither/Documents/SDR/build-asan/tests",
+  "command": "/usr/bin/c++  -I/home/amither/Documents/SDR/include -fsanitize=address,undefined -fno-omit-frame-pointer -g -g -std=c++20 -Wall -Wextra -Wpedantic -g -O0 -UNDEBUG -o CMakeFiles/sdr-fuzz.dir/fuzz_decoders.cpp.o -c /home/amither/Documents/SDR/tests/fuzz_decoders.cpp",
+  "file": "/home/amither/Documents/SDR/tests/fuzz_decoders.cpp",
+  "output": "tests/CMakeFiles/sdr-fuzz.dir/fuzz_decoders.cpp.o"
 }
 ]

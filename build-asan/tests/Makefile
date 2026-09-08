@@ -185,6 +185,44 @@ sdr-tests/fast:
 	cd /home/amither/Documents/SDR/build-asan && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-tests.dir/build.make tests/CMakeFiles/sdr-tests.dir/build
 .PHONY : sdr-tests/fast
 
+# Convenience name for target.
+tests/CMakeFiles/sdr-fuzz.dir/rule:
+	cd /home/amither/Documents/SDR/build-asan && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 tests/CMakeFiles/sdr-fuzz.dir/rule
+.PHONY : tests/CMakeFiles/sdr-fuzz.dir/rule
+
+# Convenience name for target.
+sdr-fuzz: tests/CMakeFiles/sdr-fuzz.dir/rule
+.PHONY : sdr-fuzz
+
+# fast build rule for target.
+sdr-fuzz/fast:
+	cd /home/amither/Documents/SDR/build-asan && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-fuzz.dir/build.make tests/CMakeFiles/sdr-fuzz.dir/build
+.PHONY : sdr-fuzz/fast
+
+fuzz_decoders.o: fuzz_decoders.cpp.o
+.PHONY : fuzz_decoders.o
+
+# target to build an object file
+fuzz_decoders.cpp.o:
+	cd /home/amither/Documents/SDR/build-asan && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-fuzz.dir/build.make tests/CMakeFiles/sdr-fuzz.dir/fuzz_decoders.cpp.o
+.PHONY : fuzz_decoders.cpp.o
+
+fuzz_decoders.i: fuzz_decoders.cpp.i
+.PHONY : fuzz_decoders.i
+
+# target to preprocess a source file
+fuzz_decoders.cpp.i:
+	cd /home/amither/Documents/SDR/build-asan && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-fuzz.dir/build.make tests/CMakeFiles/sdr-fuzz.dir/fuzz_decoders.cpp.i
+.PHONY : fuzz_decoders.cpp.i
+
+fuzz_decoders.s: fuzz_decoders.cpp.s
+.PHONY : fuzz_decoders.s
+
+# target to generate assembly for a file
+fuzz_decoders.cpp.s:
+	cd /home/amither/Documents/SDR/build-asan && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/sdr-fuzz.dir/build.make tests/CMakeFiles/sdr-fuzz.dir/fuzz_decoders.cpp.s
+.PHONY : fuzz_decoders.cpp.s
+
 main.o: main.cpp.o
 .PHONY : main.o
 
@@ -462,7 +500,11 @@ help:
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... sdr-fuzz"
 	@echo "... sdr-tests"
+	@echo "... fuzz_decoders.o"
+	@echo "... fuzz_decoders.i"
+	@echo "... fuzz_decoders.s"
 	@echo "... main.o"
 	@echo "... main.i"
 	@echo "... main.s"
