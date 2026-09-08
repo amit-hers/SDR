@@ -49,3 +49,9 @@ add_test(NAME fuzz COMMAND sdr-fuzz 2000)
 add_test(NAME sdrctl_config
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdrctl_config_test.sh
                  $<TARGET_FILE:sdrctl> ${PROJECT_SOURCE_DIR}/config.json)
+
+# A present-but-unparseable config value must be reported, not silently
+# replaced by a default or by a partial parse.
+add_test(NAME config_strict
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/config_strict_test.sh
+                 $<TARGET_FILE:sdr-datalink> ${PROJECT_SOURCE_DIR}/config.json)

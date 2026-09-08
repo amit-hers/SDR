@@ -37,23 +37,55 @@ std::string jsonGet(const std::string& json, const std::string& key) {
     return trim(json.substr(pos, e - pos));
 }
 
+// A key that is ABSENT takes the default. A key that is PRESENT but
+// unparseable is an error, and a loud one.
+//
+// These used to fall back to the default on any parse failure, which is the
+// worst of both: the daemon starts, reports nothing, and runs on a setting
+// nobody chose. Worse still, std::stoi and std::stod accept a PARTIAL parse --
+// stoi("1O") is 1 and stod("10 dB") is 10 -- so a typo did not even reach the
+// fallback, it silently became a different valid value. "bw_mhz": "5x" ran at
+// 5 MHz with no complaint anywhere.
+[[noreturn]] void badValue(const std::string& key, const std::string& v,
+                           const char* want) {
+    throw std::runtime_error("config: '" + key + "' is \"" + v +
+                             "\", which is not " + want +
+                             ". Remove the key to accept the default.");
+}
+
 bool jsonBool(const std::string& json, const std::string& key, bool def = false) {
     std::string v = jsonGet(json, key);
-    if (v == "true" || v == "1") return true;
+    if (v.empty()) return def;
+    if (v == "true"  || v == "1") return true;
     if (v == "false" || v == "0") return false;
-    return def;
+    badValue(key, v, "true or false");
 }
 
 double jsonDouble(const std::string& json, const std::string& key, double def = 0.0) {
     std::string v = jsonGet(json, key);
     if (v.empty()) return def;
-    try { return std::stod(v); } catch (...) { return def; }
+    try {
+        size_t n = 0;
+        double d = std::stod(v, &n);
+        // Reject trailing text: a partial parse is how "10 dB" becomes 10.
+        while (n < v.size() && std::isspace(static_cast<unsigned char>(v[n]))) ++n;
+        if (n != v.size()) badValue(key, v, "a number");
+        return d;
+    } catch (const std::runtime_error&) { throw; }
+      catch (...) { badValue(key, v, "a number"); }
 }
 
 int jsonInt(const std::string& json, const std::string& key, int def = 0) {
     std::string v = jsonGet(json, key);
     if (v.empty()) return def;
-    try { return std::stoi(v); } catch (...) { return def; }
+    try {
+        size_t n = 0;
+        int i = std::stoi(v, &n);
+        while (n < v.size() && std::isspace(static_cast<unsigned char>(v[n]))) ++n;
+        if (n != v.size()) badValue(key, v, "a whole number");
+        return i;
+    } catch (const std::runtime_error&) { throw; }
+      catch (...) { badValue(key, v, "a whole number"); }
 }
 
 std::string jsonStr(const std::string& json, const std::string& key,
