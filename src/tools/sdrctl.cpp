@@ -119,8 +119,16 @@ std::string oneOf(const std::string& k, const std::string& v,
     throw Err{o.str()};
 }
 
-// Returns the JSON literal to write (quoted for strings, bare for numbers).
-std::string validate(const std::string& key, const std::string& val) {
+// Returns the JSON literal to write.
+//
+// `was_quoted` is the type the file ALREADY has for this key, and it decides
+// how the new value is written. Inferring the type from the value instead is
+// wrong and corrupts the file: node_id is the string "0x00000001", and
+// std::stod parses "0x00000001" quite happily as a hex float, so it was written
+// back BARE -- producing `"node_id": 0x00000001`, which no JSON parser accepts.
+// The type of a field is a property of the schema, not of the text someone
+// typed, so it is preserved rather than re-derived.
+std::string validate(const std::string& key, const std::string& val, bool was_quoted) {
     if (key == "mode")
         return "\"" + oneOf(key, val, {"bridge","mesh","p2p-tx","p2p-rx","scan"}) + "\"";
     if (key == "modulation")
@@ -168,9 +176,23 @@ std::string validate(const std::string& key, const std::string& val) {
     if (key == "encrypt" || key == "fec" || key == "arq" ||
         key == "carrier_sense" || key == "pin_cores")
         return oneOf(key, val, {"true","false"});
-    // Anything else: number stays bare, everything else is quoted.
-    try { (void)needNumber(key, val); return val; } catch (...) {}
-    return "\"" + val + "\"";
+    // Anything else: keep the type the file already uses.
+    if (was_quoted) return "\"" + val + "\"";
+    // An unquoted field must stay parseable as JSON, so reject text that is
+    // neither a number nor a boolean rather than writing something invalid.
+    if (val == "true" || val == "false") return val;
+    try {
+        size_t n = 0;
+        (void)std::stod(val, &n);
+        // stod accepts hex ("0x10") and other forms JSON does not. Require the
+        // whole string to be consumed AND to contain only JSON number
+        // characters.
+        if (n == val.size() &&
+            val.find_first_not_of("+-0123456789.eE") == std::string::npos)
+            return val;
+    } catch (...) {}
+    throw Err{key + ": '" + val + "' is not valid for an unquoted JSON field "
+                    "(expected a number or true/false)"};
 }
 
 // ── commands ──────────────────────────────────────────────────────────────
@@ -210,7 +232,8 @@ int cmdSet(const std::string& cfg, const std::vector<std::pair<std::string,std::
     for (const auto& [k, v] : kv) {
         size_t b, e;
         if (!findValue(j, k, b, e)) { std::cerr << "no such key: " << k << "\n"; return 1; }
-        try { lits.emplace_back(k, validate(k, v)); }
+        const bool was_quoted = (b < j.size() && j[b] == '"');
+        try { lits.emplace_back(k, validate(k, v, was_quoted)); }
         catch (const Err& err) { std::cerr << err.msg << "\n"; return 1; }
     }
     for (const auto& [k, lit] : lits) setKey(j, k, lit);

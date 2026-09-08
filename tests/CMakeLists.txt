@@ -43,3 +43,9 @@ target_link_libraries(sdr-fuzz PRIVATE sdr_core)
 
 # A short run in the normal cycle; CI runs it longer under sanitizers.
 add_test(NAME fuzz COMMAND sdr-fuzz 2000)
+
+# sdrctl writes the operator's config file, so its edits are tested against the
+# real one: a defect here corrupts data rather than misreporting it.
+add_test(NAME sdrctl_config
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdrctl_config_test.sh
+                 $<TARGET_FILE:sdrctl> ${PROJECT_SOURCE_DIR}/config.json)
