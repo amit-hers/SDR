@@ -2,6 +2,11 @@
 #include "sdr/framing/Frame.hpp"
 #include <vector>
 #include <complex>
+#include <iostream>
+#include <thread>
+#include <chrono>
+#include <cstdlib>
+#include <stdexcept>
 
 namespace sdr {
 
@@ -9,7 +14,61 @@ MeshMode::MeshMode(const Config& cfg, PlutoSDR& radio)
     : cfg_(cfg), radio_(radio)
 {
     tun_  = TUNTAPDevice::create(cfg_.tap_iface, /*tap=*/false);
-    tun_->setMTU(cfg_.tap_mtu);
+
+    // A TUN carries IP packets, not Ethernet frames, so the 14 bytes reserved
+    // for an Ethernet header in tap_mtu are not spent here. Using the TAP value
+    // would waste them on every packet.
+    const int mtu = (cfg_.tap_mtu == 1386) ? static_cast<int>(MAX_PAYLOAD) : cfg_.tap_mtu;
+    tun_->setMTU(mtu);
+
+    if (!cfg_.ip_local.empty()) {
+        // Refuse a link subnet that overlaps a route this machine already has.
+        // The failure is otherwise silent: the address is accepted, and traffic
+        // for the peer leaves by the pre-existing route instead of the radio.
+        const std::string cidr = cfg_.ip_local + "/" + std::to_string(cfg_.ip_prefix);
+        if (TUNTAPDevice::conflictsWithExistingRoute(cidr, cfg_.tap_iface)) {
+            throw std::runtime_error(
+                "mesh: link subnet " + cidr + " overlaps a route this host already has.\n"
+                "       Traffic for the peer would leave by that route instead of the radio,\n"
+                "       with nothing reported. Choose a subnet that does not overlap\n"
+                "       (172.31.x is usually free where 10.x and 192.168.x are not).");
+        }
+        // Ask NetworkManager to leave this interface alone BEFORE addressing
+        // it. It manages new interfaces by default and will flush an address it
+        // did not assign, usually within a second or two of the link appearing.
+        // Runtime-only and harmless where NetworkManager is absent.
+        if (std::system("command -v nmcli >/dev/null 2>&1") == 0) {
+            const std::string cmd = "nmcli device set " + cfg_.tap_iface +
+                                    " managed no >/dev/null 2>&1";
+            (void)std::system(cmd.c_str());
+        }
+
+        tun_->setIPv4(cfg_.ip_local, cfg_.ip_prefix, cfg_.ip_peer);
+
+        // Confirm it stuck. An address that is silently removed leaves the
+        // radio looking dead while the real fault is on this host.
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        const std::string got = tun_->currentIPv4();
+        if (got != cfg_.ip_local) {
+            throw std::runtime_error(
+                "mesh: " + cfg_.tap_iface + " lost its address immediately after it was set"
+                " (now '" + (got.empty() ? std::string("none") : got) + "').\n"
+                "       Something on this host is managing the interface -- normally\n"
+                "       NetworkManager. Mark it unmanaged and retry:\n"
+                "         nmcli device set " + cfg_.tap_iface + " managed no");
+        }
+
+        std::cout << "[sdr] " << cfg_.tap_iface << ": " << cfg_.ip_local
+                  << "/" << cfg_.ip_prefix;
+        if (!cfg_.ip_peer.empty()) std::cout << " peer " << cfg_.ip_peer;
+        std::cout << " mtu " << mtu << "\n";
+
+        if (!cfg_.route_via_peer.empty()) {
+            const bool ok = tun_->addRoute(cfg_.route_via_peer, cfg_.ip_peer);
+            std::cout << "[sdr] route " << cfg_.route_via_peer << " via radio: "
+                      << (ok ? "up" : "not added (already present?)") << "\n";
+        }
+    }
     tx_mod_ = cfg_.txModCode();
     if (cfg_.fec)     fec_ = std::make_unique<ReedSolomon>();
     if (cfg_.encrypt) aes_ = std::make_unique<AESCipher>(cfg_.aes_key_bytes.data());

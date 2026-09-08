@@ -116,6 +116,10 @@ Config Config::fromFile(const std::string& path) {
     c.monitor_port     = jsonInt   (json, "monitor_port",      c.monitor_port);
     c.telemetry_port   = jsonInt   (json, "telemetry_port",    c.telemetry_port);
     c.telemetry_bind   = jsonStr   (json, "telemetry_bind",    c.telemetry_bind);
+    c.ip_local         = jsonStr   (json, "ip_local",          c.ip_local);
+    c.ip_peer          = jsonStr   (json, "ip_peer",           c.ip_peer);
+    c.ip_prefix        = jsonInt   (json, "ip_prefix",         c.ip_prefix);
+    c.route_via_peer   = jsonStr   (json, "route_via_peer",    c.route_via_peer);
     c.node_id          = jsonStr   (json, "node_id",           c.node_id);
     c.scan_start_mhz   = jsonDouble(json, "scan_start_mhz",    c.scan_start_mhz);
     c.scan_step_mhz    = jsonDouble(json, "scan_step_mhz",     c.scan_step_mhz);

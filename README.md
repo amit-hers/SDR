@@ -20,9 +20,10 @@ FPGA, and device-recovery components.
 ## What is implemented
 
 - `bridge`: bidirectional Layer-2 transport through a Linux TAP device.
-- `mesh`: bidirectional Layer-3 transport through a Linux TUN device. Despite
-  its name, the current implementation is a packet tunnel, not a routed mesh
-  protocol.
+- `mesh`: bidirectional Layer-3 (IP) transport through a Linux TUN device. The
+  daemon assigns the addresses, MTU and routes itself, so there is no interface
+  to set up by hand — see [Layer 3](docs/layer3.md). Despite its name, the
+  current implementation is a packet tunnel, not a routed mesh protocol.
 - `p2p-tx` / `p2p-rx`: one-way UDP-to-RF and RF-to-UDP transport on UDP port
   5005.
 - `scan`: measures a configured series of receive frequencies and writes
@@ -184,6 +185,8 @@ build/src/tools/sdr-live-stats
 - [Architecture](docs/architecture.md) — components, data flow, and frame format
 - [Configuration](docs/configuration.md) — complete configuration reference
 - [Operations](docs/operations.md) — setup, monitoring, diagnostics, and troubleshooting
+- [Layer 3](docs/layer3.md) — IP over the radio: addressing, routing a LAN
+  across the link, and the two silent failures the daemon now refuses to start on
 - [State protocol](docs/state-protocol.md) — the state report format, and
   `sdrctl` for configuration and live status
 - [Fabric modem](docs/fabric-modem.md) — the PL QPSK modem: measured throughput,

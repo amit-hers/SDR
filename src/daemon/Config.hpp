@@ -117,6 +117,24 @@ struct Config {
     std::string lan_iface    {"eth0"};
     int         tap_mtu      {1386};      // MAX_PAYLOAD(1400) - Ethernet header(14)
 
+    // ── Layer 3 (mesh mode) ───────────────────────────────────────────────
+    // Addresses for the radio hop itself. Leave ip_local empty to keep the old
+    // behaviour, where the interface is created but left unconfigured and the
+    // operator runs `ip` by hand.
+    //
+    // Configuring it here rather than in a setup script is not a convenience.
+    // An address applied from outside can be flushed moments later by
+    // NetworkManager; packets for the peer then match no specific route and
+    // leave by the DEFAULT route, silently, looking exactly like a dead radio.
+    // The daemon owns the interface, so it is the only thing that can set this
+    // up and then confirm it actually stuck.
+    std::string ip_local     {""};        // e.g. "172.31.99.1"
+    std::string ip_peer      {""};        // e.g. "172.31.99.2" -- point-to-point
+    int         ip_prefix    {30};        // /30 is two usable hosts: one hop
+    // Network behind the far node, routed over the radio. Empty = host-to-host
+    // only.
+    std::string route_via_peer {""};      // e.g. "192.168.50.0/24"
+
     // ── Security ─────────────────────────────────────────────────────────────
     bool        encrypt       {false};
     bool        fec           {false};
