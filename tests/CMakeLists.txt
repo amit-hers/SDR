@@ -60,3 +60,9 @@ add_test(NAME config_strict
 # there can change the board's network identity.
 add_test(NAME sdrctl_net
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdrctl_net_test.sh $<TARGET_FILE:sdrctl>)
+
+# The wire format must not depend on the machine that encoded it: golden vectors
+# catch accidental changes, and a cross-build to ARMv7 catches assumptions about
+# type widths or char signedness. Skips the ARM half where the toolchain is absent.
+add_test(NAME wire_conformance
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/arm/wire_conformance_test.sh ${PROJECT_SOURCE_DIR})
