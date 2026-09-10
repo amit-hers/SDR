@@ -113,8 +113,9 @@ jobs:
         run: |
           # A dev build needs no tag and no hardware, so the bundler itself is
           # exercised on every push rather than only at release time.
-          ./release/build-release.sh v0.0.0-ci dev || true
+          ./release/build-release.sh v0.0.0-ci dev
           test -f out/pluto-datalink-v0.0.0-ci/manifest.json
+          python3 -c 'import json; assert json.load(open("out/pluto-datalink-v0.0.0-ci/manifest.json"))["fpga_included"] is False'
           ( cd out/pluto-datalink-v0.0.0-ci && sha256sum -c --quiet checksums.sha256 )
           # build-release.sh only WARNS when the cross toolchain is absent, so a
           # bundle can be assembled, checksummed and published while carrying no

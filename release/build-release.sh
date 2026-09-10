@@ -80,18 +80,25 @@ echo "  software commit $SW_COMMIT$DIRTY   fpga commit $FPGA_COMMIT"
 # ── FPGA ──────────────────────────────────────────────────────────────────
 HDL="${SDR_HDL_DIR:-$HOME/Documents/adi-hdl/projects/libre}"
 BIT="$HDL/libre.runs/impl_1/system_top.bit"
-need "$BIT"
-cp "$BIT" "$BUNDLE/fpga/system.bit";                 say "fpga/system.bit" "$(stat -c%s "$BIT") B"
-python3 "$ROOT/fpga/probe/bit2bin.py" "$BIT" "$BUNDLE/fpga/system.bin" >/dev/null
-say "fpga/system.bin" "$(stat -c%s "$BUNDLE/fpga/system.bin") B (fpga_manager format)"
-XSA="$HDL/libre.sdk/system_top.xsa"
-[[ -f "$XSA" ]] && cp "$XSA" "$BUNDLE/fpga/system.xsa" && say "fpga/system.xsa" "present"
+HAVE_FPGA=false
+if [[ -f "$BIT" ]]; then
+  HAVE_FPGA=true
+  cp "$BIT" "$BUNDLE/fpga/system.bit";                 say "fpga/system.bit" "$(stat -c%s "$BIT") B"
+  python3 "$ROOT/fpga/probe/bit2bin.py" "$BIT" "$BUNDLE/fpga/system.bin" >/dev/null
+  say "fpga/system.bin" "$(stat -c%s "$BUNDLE/fpga/system.bin") B (fpga_manager format)"
+  XSA="$HDL/libre.sdk/system_top.xsa"
+  [[ -f "$XSA" ]] && cp "$XSA" "$BUNDLE/fpga/system.xsa" && say "fpga/system.xsa" "present"
+elif [[ "$BUILD_TYPE" == "dev" ]]; then
+  echo "  NOTE: FPGA output not present; creating a software-only dev bundle." >&2
+else
+  need "$BIT"
+fi
 
 # BOOT.BIN carries the bitstream that the FSBL loads at POWER-ON. Without it the
 # board comes up on the stock PL and every 0x43Cxxxxx access bus-errors, which
 # is exactly the state a recovery image has to be able to fix.
 FW="$ROOT/tezuka-plutoplus-v0.3.5-7cf6171"
-if [[ -x "${BOOTGEN:-}" || -x "$(command -v bootgen 2>/dev/null || echo /nonexistent)" ]]; then
+if [[ "$HAVE_FPGA" == true && ( -x "${BOOTGEN:-}" || -x "$(command -v bootgen 2>/dev/null || echo /nonexistent)" ) ]]; then
   BG="${BOOTGEN:-$(command -v bootgen)}"
   WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
   # FSBL and u-boot are lifted out of the stock boot image rather than rebuilt:
@@ -116,7 +123,7 @@ BIF
     cp "$FW/sdimg/BOOT.bin" "$BUNDLE/fpga/BOOT.BIN"
     say "fpga/BOOT.BIN" "STOCK -- modem PL will NOT load at power-on"
   fi
-else
+elif [[ "$HAVE_FPGA" == true ]]; then
   echo "  WARNING: no bootgen on PATH; bundle will carry the STOCK BOOT.bin." >&2
   cp "$FW/sdimg/BOOT.bin" "$BUNDLE/fpga/BOOT.BIN"
   say "fpga/BOOT.BIN" "STOCK -- modem PL will NOT load at power-on"
@@ -137,13 +144,13 @@ cp "$FW/sdimg/uramdisk.image.gz" "$BUNDLE/rootfs/rootfs.image.gz"; say "rootfs/r
 # stock image unchanged -- nothing here rebuilds them, and shipping a different
 # kernel than the one a release was validated against would make the bundle a
 # worse record than none.
-if command -v mkimage >/dev/null && command -v dumpimage >/dev/null; then
+if [[ "$HAVE_FPGA" == true ]] && command -v mkimage >/dev/null && command -v dumpimage >/dev/null; then
   if "$ROOT/release/make-frm.sh" "$BUNDLE/fpga/system.bin" "$BUNDLE/boot/pluto.frm" >/dev/null 2>&1; then
     say "boot/pluto.frm" "$(stat -c%s "$BUNDLE/boot/pluto.frm") B (power-on persistence)"
   else
     echo "  WARNING: make-frm.sh failed; --persist will be unavailable for this bundle." >&2
   fi
-else
+elif [[ "$HAVE_FPGA" == true ]]; then
   echo "  WARNING: mkimage/dumpimage not found; --persist will be unavailable." >&2
   echo "           apt-get install u-boot-tools" >&2
 fi
@@ -226,6 +233,7 @@ m = {
   "software_commit": "${SW_COMMIT}",
   "software_commit_full": "${SW_COMMIT_FULL}",
   "fpga_commit": "${FPGA_COMMIT}",
+  "fpga_included": "${HAVE_FPGA}" == "true",
   "git_tag": "${GIT_TAG}",
   "tree_dirty": bool("${DIRTY}"),
   "build_date_utc": "${BUILD_DATE}",
