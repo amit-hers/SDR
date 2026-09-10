@@ -32,7 +32,12 @@ done
 # transmitter that emits nothing: zero IQ at the probe, zero symbols at the far
 # end, every register still reading healthy. Check BEFORE feeding and name the
 # cause, rather than leaving it to be inferred from a silent radio.
-holder=$(ps w 2>/dev/null | grep '[i]io:device' | grep -v "$$" | head -1)
+# Match THIS device only. A concurrent capture on the RX char device is
+# legitimate and must not be read as a holder -- a single-board loopback runs
+# both directions at once, and a broader match refuses the very test it is
+# meant to protect. busybox ps may render the argument without its '=', so key
+# on the device path rather than on "of=".
+holder=$(ps w 2>/dev/null | grep "[i]io:device" | grep "$IIO_TX_DEV" | grep -v "^ *$$ " | head -1)
 if [ -n "$holder" ]; then
   echo "# ERROR: $IIO_TX_DEV is already held: $holder"
   echo "#        run free_capture_dev.sh first"
