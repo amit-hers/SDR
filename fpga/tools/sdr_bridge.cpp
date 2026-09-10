@@ -110,6 +110,21 @@ std::string iioDevByName(const char* want) {
     return {};
 }
 
+// The kernel counts what the interface discarded; asking it is more truthful
+// than counting our own write() failures, which miss drops that happen after
+// the packet is accepted.
+uint64_t ifCounter(const std::string& iface, const char* what) {
+    char path[160];
+    std::snprintf(path, sizeof path,
+                  "/sys/class/net/%s/statistics/%s", iface.c_str(), what);
+    FILE* f = std::fopen(path, "r");
+    if (!f) return 0;
+    unsigned long long v = 0;
+    if (std::fscanf(f, "%llu", &v) != 1) v = 0;
+    std::fclose(f);
+    return static_cast<uint64_t>(v);
+}
+
 int runCmd(const std::string& c) {
     int rc = std::system(c.c_str());
     return (rc == -1) ? -1 : WEXITSTATUS(rc);
@@ -212,6 +227,21 @@ struct Stats {
     std::atomic<uint64_t> rx_dma{0}, rx_frames{0}, rx_bytes{0};
     std::atomic<uint64_t> rx_crcerr{0}, rx_dup{0}, rx_ctrl{0}, rx_self{0};
     std::atomic<uint64_t> off_hits[4]{};
+
+    // ── Overrun detection ────────────────────────────────────────────────
+    // Whether the far end lost packets and whether THIS BOARD could not keep
+    // up are different faults with the same symptom, and every time they have
+    // been confused here the RF path was blamed for a software limit. These
+    // separate them without needing to interpret a single dB.
+    std::atomic<uint64_t> decode_us_total{0};  // time inside the four-offset decode
+    std::atomic<uint64_t> decode_us_max{0};    // worst single packet
+    // Longest wait between reads. Meaningful only under SUSTAINED traffic: on
+    // an idle link it simply measures the keepalive cadence, and reads back as
+    // idle_ms rather than as anything wrong.
+    std::atomic<uint64_t> rx_gap_us_max{0};
+    std::atomic<uint64_t> tx_stall_us_total{0};// time blocked writing to the DAC
+    std::atomic<uint64_t> rx_short{0};         // reads not equal to a full packet
+    std::atomic<uint64_t> tun_tx_drop{0}, tun_rx_drop{0};
 };
 Stats g_stats;
 std::atomic<bool> g_run{true};
@@ -232,6 +262,7 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             framer.encode(p, n, flags, ModCode::QPSK, BwCode::BW_5,
                           o.node_id, seq++, nullptr, nullptr);
         size_t done = 0;
+        auto w0 = std::chrono::steady_clock::now();
         while (done < wire.size() && g_run.load()) {
             ssize_t w = ::write(tx_fd, wire.data() + done, wire.size() - done);
             if (w < 0) {
@@ -241,6 +272,13 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             }
             done += static_cast<size_t>(w);
         }
+        // Blocked time here is the DAC pacing us, which is normal and is the
+        // link's flow control. It is recorded so that a transmitter starved by
+        // something else -- a stalled core, a wedged device -- is visibly
+        // different from one that is simply waiting for the air.
+        g_stats.tx_stall_us_total.fetch_add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - w0).count()));
         return true;
     };
 
@@ -283,6 +321,7 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
     uint64_t crc_seen = 0, dup_seen = 0;
     bool pkt_checked = false;
 
+    auto last_read = std::chrono::steady_clock::now();
     while (g_run.load()) {
         ssize_t n = ::read(rx_fd, buf.data(), buf.size());
         if (n <= 0) {
@@ -290,7 +329,17 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
             if (n < 0) { std::perror("read rx"); break; }
             continue;
         }
+        auto now = std::chrono::steady_clock::now();
+        // The gap between reads is the packet's airtime while we are keeping
+        // up. A gap much longer than usual means a transfer went by while this
+        // thread was still busy with the previous one -- the DMA does not wait.
+        uint64_t gap = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - last_read).count());
+        last_read = now;
+        uint64_t gmax = g_stats.rx_gap_us_max.load();
+        while (gap > gmax && !g_stats.rx_gap_us_max.compare_exchange_weak(gmax, gap)) {}
         g_stats.rx_dma.fetch_add(1);
+        if (n != o.pkt) g_stats.rx_short.fetch_add(1);
 
         // The driver returns exactly one DMA packet per read, so the first read
         // reveals the real PKT_BYTES. A mismatch here is not cosmetic: decoding
@@ -308,7 +357,17 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
                     o.pkt, n, n);
         }
 
+        // Time the decode. Compared against wall clock this gives the busy
+        // fraction, which is the honest answer to "is the CPU the limit?" and
+        // needs no knowledge of the sample rate to interpret.
+        auto d0 = std::chrono::steady_clock::now();
         auto frames = deframer.pushPacket(buf.data(), static_cast<size_t>(n));
+        uint64_t dus = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - d0).count());
+        g_stats.decode_us_total.fetch_add(dus);
+        uint64_t dmax = g_stats.decode_us_max.load();
+        while (dus > dmax && !g_stats.decode_us_max.compare_exchange_weak(dmax, dus)) {}
 
         // The component keeps running totals; publish the deltas.
         uint64_t c = deframer.crcErrors(),  d = deframer.duplicates();
@@ -398,8 +457,13 @@ int main(int argc, char** argv) {
     std::thread tx(txLoop, tun_fd, tx_fd, std::cref(o));
     std::thread rx(rxLoop, tun_fd, rx_fd, std::cref(o));
 
+    auto t_start = std::chrono::steady_clock::now();
+    uint64_t last_decode = 0;
+    bool     warned_short = false;
     while (g_run.load() && o.stats_s > 0) {
         std::this_thread::sleep_for(std::chrono::seconds(o.stats_s));
+        g_stats.tun_tx_drop.store(ifCounter(o.iface, "tx_dropped"));
+        g_stats.tun_rx_drop.store(ifCounter(o.iface, "rx_dropped"));
         std::fprintf(stderr,
             "bridge: tx %llu pkts / %llu B (idle %llu, err %llu) | "
             "rx %llu dma, %llu frames, %llu B (crcerr %llu, dup %llu, ctrl %llu) | "
@@ -418,6 +482,45 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.off_hits[1].load(),
             (unsigned long long)g_stats.off_hits[2].load(),
             (unsigned long long)g_stats.off_hits[3].load());
+
+        // ── Overrun verdict ──────────────────────────────────────────────
+        // Printed as a conclusion, not as raw numbers. A reader who has to
+        // work out whether 812000 us of decode in a 5 s window is a problem
+        // will not do it at 2 a.m. while a link is down.
+        uint64_t dtot = g_stats.decode_us_total.load();
+        double   wall = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - t_start).count();
+        double   busy = wall > 0 ? (double)dtot / (wall * 1e6) * 100.0 : 0.0;
+        double   busy_win = o.stats_s > 0
+                          ? (double)(dtot - last_decode) / (o.stats_s * 1e6) * 100.0 : 0.0;
+        last_decode = dtot;
+        std::fprintf(stderr,
+            "bridge: cpu decode %.1f%% now / %.1f%% avg (max %llu us/pkt) | "
+            "rx gap max %llu us, short %llu | tx stall %llu ms | "
+            "tun drops tx %llu rx %llu\n",
+            busy_win, busy,
+            (unsigned long long)g_stats.decode_us_max.load(),
+            (unsigned long long)g_stats.rx_gap_us_max.load(),
+            (unsigned long long)g_stats.rx_short.load(),
+            (unsigned long long)(g_stats.tx_stall_us_total.load() / 1000),
+            (unsigned long long)g_stats.tun_tx_drop.load(),
+            (unsigned long long)g_stats.tun_rx_drop.load());
+        if (busy_win > 70.0)
+            std::fprintf(stderr,
+                "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"
+                "        is a CPU limit, NOT the radio -- do not chase it as RF.\n",
+                busy_win);
+        // Once, not every interval: this is a standing condition, and a
+        // warning that repeats forever is one an operator learns to scroll
+        // past.
+        if (g_stats.rx_short.load() > 0 && g_stats.rx_dma.load() > 8 && !warned_short) {
+            warned_short = true;
+            std::fprintf(stderr,
+                "bridge: WARNING %llu reads were not a full %d-byte packet; the byte\n"
+                "        grid is only continuous within a transfer, so frames are\n"
+                "        being lost at boundaries. Check --pkt against PKT_BYTES.\n",
+                (unsigned long long)g_stats.rx_short.load(), o.pkt);
+        }
     }
     if (o.stats_s <= 0) { tx.join(); rx.join(); }
     else { tx.detach(); rx.detach(); }
