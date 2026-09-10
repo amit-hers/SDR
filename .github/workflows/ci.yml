@@ -14,7 +14,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd shellcheck
+          sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd shellcheck \
+                                  g++-arm-linux-gnueabihf qemu-user-static
 
       - name: Build
         run: |
@@ -28,6 +29,33 @@ jobs:
         run: |
           g++ -O2 -std=c++17 -I include -o build/framed_link_test \
               fpga/tools/framed_link_test.cpp build/src/core/libsdr_core.a -lliquid -lcrypto
+
+      # The bridge is the binary that actually ships to the board, and until now
+      # nothing in CI built it. It is also the only ARMv7 artifact, so building
+      # it here is what catches assumptions that hold on x86 and not on the
+      # target: `long` and `size_t` are 4 bytes there and plain `char` is
+      # unsigned. Installing the cross toolchain additionally un-skips the
+      # cross-architecture half of the wire-conformance test above, which is
+      # otherwise silently skipped on every run.
+      - name: Cross-build the bridge for ARMv7
+        run: ./fpga/tools/build_bridge.sh
+
+      - name: The ARM binary runs
+        run: |
+          # A static binary that will not start on the target is a release
+          # nobody can use, and the board is not here to ask.
+          qemu-arm-static build/sdr_bridge --help > /tmp/help.txt 2>&1
+          grep -q -- '--local' /tmp/help.txt || { cat /tmp/help.txt; exit 1; }
+          qemu-arm-static build/bridge_bench 2 4096 > /tmp/bench.txt 2>&1
+          grep -q 'RX 4-offset' /tmp/bench.txt || { cat /tmp/bench.txt; exit 1; }
+          echo "OK: ARMv7 binaries execute"
+
+      # Unit tests cover the codec; they cannot say whether the process carries
+      # a packet. This runs two bridges with real TUNs in separate namespaces
+      # and pings across. It skips itself where TUN or netns are unavailable,
+      # so it gates without going red for reasons unrelated to the code.
+      - name: Bridge carries IP end to end
+        run: sudo ./tests/bridge_e2e_test.sh "$PWD"
 
       # These run on the board and cannot be exercised in CI, so at least prove
       # they parse. A syntax error in a deployment script is only ever found at
@@ -88,6 +116,19 @@ jobs:
           ./release/build-release.sh v0.0.0-ci dev || true
           test -f out/pluto-datalink-v0.0.0-ci/manifest.json
           ( cd out/pluto-datalink-v0.0.0-ci && sha256sum -c --quiet checksums.sha256 )
+          # build-release.sh only WARNS when the cross toolchain is absent, so a
+          # bundle can be assembled, checksummed and published while carrying no
+          # bridge at all -- a release that brings the radio up and cannot pass
+          # traffic. Assert the artifact is present and runnable, not merely
+          # that the bundler exited cleanly.
+          B=out/pluto-datalink-v0.0.0-ci
+          test -f "$B/software/sdr_bridge" \
+            || { echo "FAIL: bundle carries no sdr_bridge"; exit 1; }
+          qemu-arm-static "$B/software/sdr_bridge" --help >/dev/null 2>&1 \
+            || { echo "FAIL: bundled sdr_bridge does not execute"; exit 1; }
+          test -f "$B/software/supporting-tools/bridge_up.sh" \
+            || { echo "FAIL: bundle carries no bridge_up.sh"; exit 1; }
+          echo "OK: bundle carries a runnable ARMv7 bridge"
 
       - name: Checksum tamper detection must work
         run: |

@@ -24,6 +24,19 @@ if [ ! -x "$BR" ]; then
     echo "  SKIP: $BR not built -- run fpga/tools/build_bridge.sh"
     echo "PASS"; exit 0
 fi
+# Root is necessary but not sufficient: a container without /dev/net/tun, or a
+# kernel without the driver, cannot run this. Skip rather than fail, so the test
+# can be a CI gate without turning every restricted environment into a red
+# build -- a gate that fails for reasons unrelated to the code gets disabled.
+if [ ! -c /dev/net/tun ]; then
+    echo "  SKIP: no /dev/net/tun on this host"
+    echo "PASS"; exit 0
+fi
+if ! ip netns add sdr_probe_$$ 2>/dev/null; then
+    echo "  SKIP: cannot create network namespaces here"
+    echo "PASS"; exit 0
+fi
+ip netns del sdr_probe_$$ 2>/dev/null
 W=/tmp/sdr_e2e; rm -rf $W; mkdir -p $W
 AB=$W/f_ab; BA=$W/f_ba
 mkfifo $AB $BA

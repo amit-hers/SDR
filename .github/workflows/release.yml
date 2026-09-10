@@ -39,7 +39,12 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd
+          # The cross toolchain is NOT optional here. build-release.sh only
+          # warns when it is missing, so without it this workflow would publish
+          # a release containing no sdr_bridge -- a bundle that brings the radio
+          # up and cannot carry traffic, with nothing in the artifact to say so.
+          sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd \
+                                  g++-arm-linux-gnueabihf qemu-user-static
 
       - name: Build software
         run: |
@@ -71,6 +76,15 @@ jobs:
           mkdir -p fpga/prebuilt-hdl/libre.runs/impl_1
           cp fpga/prebuilt/system_top.bit fpga/prebuilt-hdl/libre.runs/impl_1/
           ./release/build-release.sh "${{ steps.v.outputs.version }}" "${{ steps.v.outputs.build_type }}"
+
+      - name: The bundle must carry a runnable bridge
+        run: |
+          B="out/pluto-datalink-${{ steps.v.outputs.version }}"
+          test -f "$B/software/sdr_bridge" \
+            || { echo "FAIL: release carries no sdr_bridge"; exit 1; }
+          qemu-arm-static "$B/software/sdr_bridge" --help >/dev/null 2>&1 \
+            || { echo "FAIL: bundled sdr_bridge does not execute"; exit 1; }
+          echo "OK: $(stat -c%s "$B/software/sdr_bridge") B ARMv7 bridge present"
 
       - name: Verify the bundle verifies itself
         run: |
