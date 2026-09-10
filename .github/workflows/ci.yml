@@ -15,7 +15,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ libssl-dev libliquid-dev zstd shellcheck \
-                                  g++-arm-linux-gnueabihf qemu-user-static
+                                  g++-arm-linux-gnueabihf qemu-user-static libiio-dev
 
       - name: Build
         run: |
