@@ -221,9 +221,18 @@ ssh_d "cat > /mnt/jffs2/autorun.sh" <<AUTORUN || die "Could not install autorun.
 }
 # The stock watchdog is -T 10, and a multi-megabyte transfer or a devmem burst
 # outruns it; that has reset this board mid-test and wiped the ramdisk.
-[ -x /usr/sbin/watchdog ] && {
-  kill \$(pidof watchdog) 2>/dev/null
-  /usr/sbin/watchdog -t 5 -T 120 /dev/watchdog
+# Resolve the binary rather than assuming a path. It is /sbin/watchdog on this
+# image, not /usr/sbin/watchdog, so the old `[ -x /usr/sbin/watchdog ]` test
+# failed and this whole block was SKIPPED -- leaving the stock 10 s timeout in
+# place. That is what reset both radios repeatedly during testing: any devmem
+# burst or multi-megabyte transfer outruns 10 s, and because the rootfs is a
+# ramdisk the board came back with /tmp and the staged tools gone, which then
+# presented as a dead receiver.
+WD=\$(command -v watchdog 2>/dev/null)
+[ -n "\$WD" ] && {
+  for p in \$(pidof watchdog); do kill -TERM \$p 2>/dev/null; done
+  sleep 2
+  "\$WD" -t 5 -T 120 /dev/watchdog
 }
 # The rootfs ships /etc/fw_env.config pointing at /boot/uboot.env, which does
 # not exist on this board -- the environment is in mtd1 (qspi-uboot-env). So
