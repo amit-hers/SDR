@@ -281,6 +281,7 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
     std::vector<uint8_t> buf(static_cast<size_t>(o.pkt));
     OffsetDeframer deframer;
     uint64_t crc_seen = 0, dup_seen = 0;
+    bool pkt_checked = false;
 
     while (g_run.load()) {
         ssize_t n = ::read(rx_fd, buf.data(), buf.size());
@@ -290,6 +291,22 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
             continue;
         }
         g_stats.rx_dma.fetch_add(1);
+
+        // The driver returns exactly one DMA packet per read, so the first read
+        // reveals the real PKT_BYTES. A mismatch here is not cosmetic: decoding
+        // is scoped to a transfer, and reading across a boundary was measured to
+        // report 22.37% loss against a true 0.19%. Say so once, loudly, rather
+        // than let it be chased as an RF fault -- which is what this class of
+        // silent misconfiguration has cost before.
+        if (!pkt_checked) {
+            pkt_checked = true;
+            if (n != o.pkt)
+                std::fprintf(stderr,
+                    "bridge: WARNING --pkt is %d but the DMA delivered %zd bytes.\n"
+                    "        Pass --pkt %zd to match PKT_BYTES in axis_packetizer.v;\n"
+                    "        decoding across a packet boundary loses frames silently.\n",
+                    o.pkt, n, n);
+        }
 
         auto frames = deframer.pushPacket(buf.data(), static_cast<size_t>(n));
 

@@ -124,6 +124,82 @@ void test_realign_is_inverse_of_delay() {
     std::cout << "    realign() inverts the symbol-phase delay exactly\n";
 }
 
+// The symbol phase CHANGES BETWEEN DMA PACKETS, and that is the entire reason
+// decoding is scoped to one transfer. The demodulator keeps emitting through
+// the gap between packets and the number of bytes lost there is arbitrary, so
+// the phase of one packet says nothing about the next. Nothing above exercised
+// that: every case so far used a single packet at a single fixed phase.
+void test_phase_changes_between_packets() {
+    const int NPKT = 4, PER_PKT = 5;
+    Framer framer;
+    OffsetDeframer d;
+
+    int recovered = 0;
+    uint32_t seq = 0;
+    for (int p = 0; p < NPKT; ++p) {
+        // Whole frames per packet, so nothing straddles a boundary: every
+        // frame must come back.
+        std::vector<uint8_t> packet;
+        std::vector<std::vector<uint8_t>> sent;
+        for (int i = 0; i < PER_PKT; ++i) {
+            auto pay = makePayload(150 + i, seq);
+            auto w = framer.encode(pay, 0, ModCode::QPSK, BwCode::BW_5,
+                                   7, seq, nullptr, nullptr);
+            packet.insert(packet.end(), w.begin(), w.end());
+            sent.push_back(std::move(pay));
+            ++seq;
+        }
+        // A different phase for each packet, which is what the hardware does.
+        auto wire = delayBits(packet, ((p * 2) % 4) * 2);
+        auto got  = d.pushPacket(wire.data(), wire.size());
+
+        assert(got.size() == static_cast<size_t>(PER_PKT));
+        for (int i = 0; i < PER_PKT; ++i)
+            assert(got[static_cast<size_t>(i)].payload == sent[static_cast<size_t>(i)]);
+        recovered += static_cast<int>(got.size());
+    }
+    assert(recovered == NPKT * PER_PKT);
+    std::cout << "    " << recovered << "/" << NPKT * PER_PKT
+              << " frames across " << NPKT << " packets, phase differing per packet\n";
+}
+
+// A frame cut by a packet boundary is LOST, not delivered corrupt. Losing it is
+// the accepted cost of per-packet scoping (~4% at 25 frames per 32768-byte
+// packet); delivering a half-frame would put malformed IP in the kernel.
+void test_straddling_frame_is_lost_not_corrupted() {
+    Framer framer;
+    std::vector<uint8_t> stream;
+    std::vector<std::vector<uint8_t>> sent;
+    for (int i = 0; i < 6; ++i) {
+        auto pay = makePayload(200, static_cast<uint32_t>(i));
+        auto w = framer.encode(pay, 0, ModCode::QPSK, BwCode::BW_5,
+                               7, static_cast<uint32_t>(i), nullptr, nullptr);
+        stream.insert(stream.end(), w.begin(), w.end());
+        sent.push_back(std::move(pay));
+    }
+    // Cut deliberately mid-frame.
+    size_t cut = stream.size() / 2 + 37;
+    std::vector<uint8_t> a(stream.begin(), stream.begin() + static_cast<long>(cut));
+    std::vector<uint8_t> b(stream.begin() + static_cast<long>(cut), stream.end());
+
+    OffsetDeframer d;
+    auto ga = d.pushPacket(a.data(), a.size());
+    auto gb = d.pushPacket(b.data(), b.size());
+
+    size_t total = ga.size() + gb.size();
+    assert(total >= 4 && total <= 6);        // the straddling frame may be lost
+    // Whatever came back must be EXACTLY a payload that was sent -- never a
+    // partial or spliced one.
+    for (auto* v : { &ga, &gb })
+        for (auto& f : *v) {
+            bool matches = false;
+            for (auto& s : sent) if (f.payload == s) { matches = true; break; }
+            assert(matches);
+        }
+    std::cout << "    " << total << "/6 frames across a mid-frame cut; "
+                 "none delivered corrupt\n";
+}
+
 } // namespace
 
 void run_offsets() {
@@ -133,4 +209,6 @@ void run_offsets() {
     test_duplicates_are_dropped();
     test_flags_survive();
     test_corruption_rejected();
+    test_phase_changes_between_packets();
+    test_straddling_frame_is_lost_not_corrupted();
 }
