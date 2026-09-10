@@ -54,10 +54,35 @@ for mac in "${!HOST[@]}"; do
            "$con" "$mac" "${HOST[$mac]}/32" "${BOARD[$mac]}/32" "${nic:-absent}"
 done
 
+# Reachability, checked HONESTLY. A bare ping is not evidence: with no /32
+# route the packet leaves by the DEFAULT route and something else on the LAN
+# answers, so a board that is not even plugged in reports "up". Observed
+# exactly that here -- 192.168.2.1 answering at 3.6 ms over wifi while the
+# board was off the USB bus entirely. Confirm the route resolves to the
+# expected interface FIRST, then ping pinned to it.
 echo "--- reachability ---"
-for ip in 192.168.2.1 192.168.2.17; do
-    printf '  %-14s ' "$ip"
-    ping -c1 -W3 "$ip" >/dev/null 2>&1 && echo up || echo down
+for mac in "${!HOST[@]}"; do
+    ip_b="${BOARD[$mac]}"
+    nic=""
+    for n in /sys/class/net/*; do
+        [[ -f "$n/address" ]] || continue
+        [[ "$(cat "$n/address")" == "$mac" ]] && nic=$(basename "$n")
+    done
+    printf '  %-14s ' "$ip_b"
+    if [[ -z "$nic" ]]; then
+        echo "NOT ATTACHED (no NIC with MAC $mac)"
+        continue
+    fi
+    via=$(ip route get "$ip_b" 2>/dev/null | head -1 | grep -o 'dev [^ ]*' | awk '{print $2}')
+    if [[ "$via" != "$nic" ]]; then
+        echo "MISROUTED (goes via ${via:-none}, not $nic)"
+        continue
+    fi
+    if ping -c1 -W3 -I "$nic" "$ip_b" >/dev/null 2>&1; then
+        echo "up (via $nic)"
+    else
+        echo "down (attached on $nic, no reply)"
+    fi
 done
 echo "--- routes ---"
 ip route | grep -E "192\.168\.2\." | sed 's/^/  /'
