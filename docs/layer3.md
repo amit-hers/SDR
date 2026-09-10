@@ -106,3 +106,88 @@ needs to be their default gateway.
 The radio is the constraint, not the interface. See
 [Fabric modem](fabric-modem.md) and `scripts/video_link.sh budget`: the
 host-daemon path yields ~1.23 Mbit/s at 1 MHz QPSK. Size what you send to it.
+
+---
+
+# The Pluto-side bridge (`sdr_bridge`)
+
+Everything above runs on the **host**, against libiio and the software PHY.
+`sdr_bridge` is the other half: it runs **on the Pluto** and carries IP over the
+**fabric** QPSK modem in the PL. Use it when the host reaches the radio over the
+Pluto's RJ45 and simply wants traffic to go somewhere — there is no tap device
+to create on the host, and no libiio in the path.
+
+```
+ host ──eth0/RJ45──▶ Pluto ──sdr0 (TUN)──▶ fabric modem ──RF──▶ … ──▶ peer Pluto
+```
+
+## Running it
+
+```sh
+# on the board, after the modem PL is loaded
+BRIDGE=/tmp/sdr_bridge \
+  fpga/scripts/bridge_up.sh 172.30.99.1 172.30.99.2 3840000 434000000 --forward
+```
+
+`bridge_up.sh` performs the radio bring-up and then execs the bridge. It does
+that rather than letting the bridge do it because the ordering is load-bearing
+and getting it wrong yields a radio that reads healthy in every register and
+carries nothing — modem cores before ADC channels, DMA source after the buffer
+is opened, DAC datarate not left at its default of 0.
+
+| option | meaning |
+|---|---|
+| `--local` / `--peer` | the two ends of the radio hop (required) |
+| `--iface` | TUN name, default `sdr0` |
+| `--route CIDR` | a network behind the peer, routed over the radio |
+| `--forward` | enable IPv4 forwarding, so eth0 ↔ radio actually routes |
+| `--idle-ms` | keepalive cadence, default 200; `0` disables |
+| `--pkt` | DMA packet size; **must** equal `PKT_BYTES` in `axis_packetizer.v` |
+| `--node-id` | this node's id |
+| `--stats N` | statistics every N seconds |
+
+## Build
+
+```sh
+fpga/tools/build_bridge.sh          # → build/sdr_bridge (static ARMv7)
+```
+
+Static, and with neither liquid-dsp nor OpenSSL: the framing path passes
+`nullptr` for both FEC and cipher, so `tests/arm/nodep_stubs.cpp` satisfies the
+remaining references and aborts loudly if anything ever reaches them. Static
+because the rootfs is a ramdisk with its own libstdc++, and a dynamically linked
+binary is one firmware image away from not starting — on the board, at run time.
+
+## Requires the Pluto+ firmware, not the ADI 5.10 rootfs
+
+**The ADI 5.10 rootfs is built without `CONFIG_TUN`.** There is no TUN driver
+and no `/dev/net/tun`, so the bridge cannot run there at all:
+
+```
+bridge: open /dev/net/tun: No such device
+```
+
+The Pluto+ **6.12.77** image that `release/make-frm.sh` builds on does have it
+(`Universal TUN/TAP device driver` is present in that kernel). Flash the release
+firmware. The bridge creates the device node itself — the ramdisk omits it even
+where the driver is built in — so only the driver matters.
+
+## What the statistics mean
+
+```
+bridge: tx 1240 pkts / 1638400 B (idle 33, err 0) | rx 48 dma, 1201 frames,
+        1586000 B (crcerr 12, dup 380, ctrl 33) | offsets 402/399/391/389
+```
+
+* **idle** — keepalives sent because the TUN had nothing. An idle carrier gives
+  the demodulator's timing loop nothing to track, so silence is paid for as a
+  full re-acquisition on the next real packet.
+* **dup** — the same frame recovered by more than one symbol phase. Expected and
+  healthy; these are suppressed rather than injected into the kernel twice.
+* **offsets** — hits per symbol phase. Roughly equal counts are normal and are
+  the reason all four are decoded and merged: keeping only the best-scoring
+  offset was measured to discard 70% of recovered frames.
+* **crcerr** — frames whose sync word was found but whose payload did not
+  verify. A large number with few good frames means signal is arriving but too
+  weak; measure the level with the RX IQ probe rather than with RSSI, which is
+  too noisy to read a few dB from.

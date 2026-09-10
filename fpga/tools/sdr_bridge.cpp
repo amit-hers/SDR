@@ -41,6 +41,9 @@
 #include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
@@ -117,7 +120,23 @@ int runCmd(const std::string& c) {
 // ── TUN ───────────────────────────────────────────────────────────────────
 static int tunOpen(const std::string& name, int mtu) {
     int fd = ::open("/dev/net/tun", O_RDWR);
-    if (fd < 0) { std::perror("open /dev/net/tun"); return -1; }
+    if (fd < 0 && errno == ENOENT) {
+        // The Pluto's rootfs is a minimal ramdisk and does not ship the node
+        // even where the driver is built in, so create it rather than fail.
+        // 10:200 is the fixed misc-device number for TUN.
+        ::mkdir("/dev/net", 0755);
+        if (::mknod("/dev/net/tun", S_IFCHR | 0600, makedev(10, 200)) == 0)
+            fd = ::open("/dev/net/tun", O_RDWR);
+    }
+    if (fd < 0) {
+        std::fprintf(stderr, "bridge: open /dev/net/tun: %s\n", std::strerror(errno));
+        if (errno == ENOENT || errno == ENODEV)
+            std::fprintf(stderr,
+                "        This kernel has no TUN driver. The ADI 5.10 rootfs is\n"
+                "        built without CONFIG_TUN; the Pluto+ 6.12.77 firmware\n"
+                "        that the release flashes does have it. Flash that image.\n");
+        return -1;
+    }
 
     struct ifreq ifr;
     std::memset(&ifr, 0, sizeof ifr);
