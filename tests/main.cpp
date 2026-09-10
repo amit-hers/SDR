@@ -15,6 +15,7 @@ void run_splitmod();
 void run_aggregate();
 void run_scramble();
 void run_telemetry();
+void run_offsets();
 
 int main(int argc, char* argv[]) {
     const char* filter = (argc > 1) ? argv[1] : nullptr;
@@ -34,6 +35,7 @@ int main(int argc, char* argv[]) {
         run("aggregate", run_aggregate);
         run("scramble", run_scramble);
         run("telemetry", run_telemetry);
+        run("offsets", run_offsets);
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << "\n";
         return 1;

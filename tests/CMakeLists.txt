@@ -10,6 +10,7 @@ add_executable(sdr-tests
     test_aggregate.cpp
     test_scramble.cpp
     test_telemetry.cpp
+    test_offsets.cpp
 )
 
 target_include_directories(sdr-tests PRIVATE
@@ -32,6 +33,7 @@ add_test(NAME splitmod COMMAND sdr-tests splitmod)
 add_test(NAME aggregate COMMAND sdr-tests aggregate)
 add_test(NAME scramble COMMAND sdr-tests scramble)
 add_test(NAME telemetry COMMAND sdr-tests telemetry)
+add_test(NAME offsets COMMAND sdr-tests offsets)
 
 # Hostile-input harness for the decoders that take data from outside. Separate
 # executable, not a suite in sdr-tests, so it can be run for a long time under
