@@ -5,7 +5,16 @@
 #     0x43C30000  RX IQ probe      (the demodulator's input)
 #     0x43C40000  DAC pin probe    (after axis_to_adi_iq)
 #
-# Emits one 0x%08x word per line: {Q[15:0], I[15:0]}.
+# Emits one 0x%08x word per line: {Q[15:0], I[15:0]}, each signed 16-bit.
+#
+# THE STREAM MUST BE MOVING WHILE THIS RUNS. The probe records only on
+# `tvalid & tready`, so an idle stream captures nothing. For the RX probe that
+# means the receive chain must be DRAINED: with buffer/enable set but no
+# reader, the DMA backpressures the packetizer, the demodulator input stalls,
+# and every word reads zero -- indistinguishable from "no signal", and it is
+# not. Run a drain alongside:
+#     dd if=$IIO_RX_DEV of=/dev/null bs=65536 count=200 &
+# For the TX probes, a feed must be in flight for the same reason.
 #
 # THE YIELD MATTERS. Each sample costs two `devmem` forks, so 2048 samples is
 # ~4096 processes and about 19 s of solid forking. That starves the watchdog
@@ -22,7 +31,11 @@ devmem $G 32 0                     # disarm: clears done, re-arms the one-shot
 devmem $G 32 0x80000000            # arm
 sleep 1
 devmem $G 32 0xC0000000            # sel=1: status
-echo "# status=$(devmem $S 32)  (bit12=done bit11=running bits[10:0]=waddr)"
+# DEPTH_LOG2 is 14 (iq_probe.v), and no instantiation overrides it, so the
+# status word is {done, running, waddr[13:0]}: bit15 and bit14. The bit12/bit11
+# spelling here was left over from the DEPTH_LOG2=11 build and decodes a full
+# capture (0x8000) as if nothing had happened.
+echo "# status=$(devmem $S 32)  (bit15=done bit14=running bits[13:0]=waddr)"
 i=0
 while [ $i -lt $N ]; do
   devmem $G 32 $((0x80000000 + i))
