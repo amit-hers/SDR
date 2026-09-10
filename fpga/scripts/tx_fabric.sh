@@ -26,7 +26,15 @@ set -e
 FS=${1:-17280000}
 LO=${2:-434000000}
 DIFF=${3:-1}
-. "$(dirname "$0")/iio_lookup.sh"
+# A MISSING iio_lookup.sh is not a loud failure on busybox: `.` prints "can't
+# open" and CARRIES ON, leaving the device paths empty. `dd if= of=cap.bin`
+# then reads STDIN and blocks forever, which reads as a dead receiver -- it
+# cost a 200 s silent hang. /root is on the ramdisk, so the file really can be
+# absent after a reboot. Check before sourcing, and check what it produced.
+_D="$(dirname "$0")"
+[ -f "$_D/iio_lookup.sh" ] || { echo "ERROR: $_D/iio_lookup.sh not found; restore from /mnt/jffs2/tools" >&2; exit 1; }
+. "$_D/iio_lookup.sh"
+[ -n "${IIO_TX_DEV:-}" ] && [ -n "${IIO_RX_DEV:-}" ] || { echo "ERROR: IIO devices unresolved" >&2; exit 1; }
 AB=0x79020000; DB=0x79024000; T=0x7C420000; MOD=0x43C10000
 PHY=$IIO_PHY
 DDS=$IIO_TX

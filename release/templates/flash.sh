@@ -177,6 +177,18 @@ for f in "$BUNDLE"/software/supporting-tools/*.sh; do
   put "$f" "/root/sdr-tools/$(basename "$f")" || die "Upload of $(basename "$f") failed."
 done
 ssh_d 'chmod +x /root/sdr-tools/*.sh' >/dev/null 2>&1
+# /root is on the RAMDISK and is rebuilt on every boot, so tools installed
+# there vanish at the first reboot -- including the reboot --persist performs
+# moments later. A technician then finds an empty /root/sdr-tools on a freshly
+# flashed radio, and a script that sources iio_lookup.sh silently gets an empty
+# device path: `dd if= of=cap.bin` then reads STDIN and blocks forever, which
+# reads as a dead receiver. Keep the authoritative copy in jffs2.
+ssh_d 'mkdir -p /mnt/jffs2/tools' >/dev/null 2>&1
+for f in "$BUNDLE"/software/supporting-tools/*.sh; do
+  put "$f" "/mnt/jffs2/tools/$(basename "$f")" >/dev/null 2>&1
+done
+ssh_d 'chmod +x /mnt/jffs2/tools/*.sh 2>/dev/null; \
+       echo "         tools in jffs2: $(ls /mnt/jffs2/tools/*.sh 2>/dev/null | wc -l)"' 2>/dev/null
 
 step 81 "Installing the IP bridge"
 # Into jffs2, not the ramdisk: the ramdisk is rebuilt on every boot, so a binary
@@ -232,6 +244,14 @@ case "\$WANT_IP" in
       echo "autorun: usb0 corrected \$HAVE_IP -> \$WANT_IP (from u-boot env)"
     fi ;;
 esac
+
+# Restore the supporting tools from jffs2. /root is rebuilt from the ramdisk
+# every boot, so without this a rebooted radio has none of them.
+[ -d /mnt/jffs2/tools ] && {
+  mkdir -p /root/sdr-tools
+  cp /mnt/jffs2/tools/*.sh /root/sdr-tools/ 2>/dev/null
+  chmod +x /root/sdr-tools/*.sh 2>/dev/null
+}
 
 # The IP bridge starts at boot ONLY if an operator has written bridge.conf.
 # Deliberately opt-in: the bridge configures an interface and can enable
