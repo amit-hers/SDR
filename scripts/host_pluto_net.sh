@@ -1,88 +1,84 @@
 #!/usr/bin/env bash
-# Give each attached Pluto a PERSISTENT, unambiguous host route. Run once, on
-# the HOST. Replaces re-running pluto_routes.sh after every re-enumeration.
+# Give each attached Pluto a stable, unambiguous host route. Run on the HOST,
+# and re-run after a re-plug or a --persist flash.
 #
 # THE PROBLEM, precisely: every Pluto runs its own DHCP server and hands out
 # 192.168.2.10. NetworkManager DHCPs on both USB NICs and is given the SAME
 # address on both, so the host holds 192.168.2.10 twice and the 192.168.2.0/24
 # route is ambiguous -- whichever NIC was configured last wins and the other
-# board silently goes unreachable. NM re-runs DHCP on every re-plug, reboot and
-# lease renewal, so any static fix applied by hand is undone minutes later. That
-# is why the boards appear to "flip-flop" and why a board can look like it
-# dropped off the bus when it is merely unrouted.
+# board goes silently unreachable. NM re-runs DHCP on every re-plug and lease
+# renewal, so a static address applied by hand is undone minutes later. This is
+# why boards appear to "flip-flop" and why one can look like it dropped off the
+# bus while it is enumerated and merely unrouted.
 #
-# THE FIX: bind a static profile to each NIC's MAC, and give the host a **/32**
-# address. A /32 creates no subnet route, so the ambiguous /24 never exists;
-# reachability comes from an explicit per-board /32 route on the right device.
-# Profiles are keyed to the MAC, so they survive re-enumeration and host
-# reboots without anything being re-run.
+# WHY THIS PROBES RATHER THAN MATCHING AN IDENTIFIER: a --persist flash
+# regenerates the USB gadget's MAC *and* its serial. UNIT-B went from
+# 00:e0:22:6d:c9:b7 / PLUTOPLUS-UNIT-B-1786295009 to 00:e0:22:3e:18:23 /
+# 3SXRLJMXS7EL5IBJ across one flash, which silently broke a MAC-bound profile.
+# The only durable facts are the Analog Devices OUI (00:e0:22) and the address
+# the board answers on, so this finds NICs by OUI and asks each link who is
+# there.
 #
-# Undo with:  nmcli con delete pluto-unit-a pluto-unit-b
+# THE FIX: a /32 host address per NIC creates no subnet route, so the ambiguous
+# /24 never exists; reachability comes from an explicit per-board /32 route on
+# the correct device.
 set -uo pipefail
 
-# NIC MAC -> (host address, board address, profile name)
-declare -A HOST=( [00:e0:22:3d:32:ae]=192.168.2.11 [00:e0:22:6d:c9:b7]=192.168.2.10 )
-declare -A BOARD=([00:e0:22:3d:32:ae]=192.168.2.17 [00:e0:22:6d:c9:b7]=192.168.2.1  )
-declare -A NAME=( [00:e0:22:3d:32:ae]=pluto-unit-a [00:e0:22:6d:c9:b7]=pluto-unit-b )
+OUI="00:e0:22"                       # Analog Devices; survives firmware changes
+CANDIDATES=(192.168.2.1 192.168.2.17)
+SRC_BASE=10                          # host takes .10, .11, ...
 
-command -v nmcli >/dev/null || { echo "nmcli not found"; exit 1; }
+# Stop NetworkManager from DHCPing these links out from under us. Without this
+# the addresses set below are flushed at the next lease renewal.
+NMCONF=/etc/NetworkManager/conf.d/90-pluto-unmanaged.conf
+if [[ "${1:-}" == "--install" ]]; then
+    printf '[keyfile]\nunmanaged-devices=mac:%s*\n' "$OUI" | sudo tee "$NMCONF" >/dev/null
+    sudo systemctl reload NetworkManager 2>/dev/null || sudo systemctl restart NetworkManager
+    echo "  installed $NMCONF (NetworkManager will not manage $OUI:* links)"
+    sleep 3
+fi
 
-for mac in "${!HOST[@]}"; do
-    nic=""
-    for n in /sys/class/net/*; do
-        [[ -f "$n/address" ]] || continue
-        [[ "$(cat "$n/address")" == "$mac" ]] && nic=$(basename "$n")
+i=0; found=0
+for n in /sys/class/net/*; do
+    [[ -f "$n/address" ]] || continue
+    mac=$(cat "$n/address")
+    [[ "$mac" == "$OUI:"* ]] || continue
+    nic=$(basename "$n")
+
+    src="192.168.2.$((SRC_BASE + i))"
+    sudo ip addr flush dev "$nic" 2>/dev/null
+    sudo ip addr add "$src/32" dev "$nic" 2>/dev/null
+    sudo ip link set "$nic" up
+
+    # Ask the link who is there. The labels on these units do not match their
+    # addresses, and a flash can reset one to the stock address, so identity
+    # must be discovered rather than assumed.
+    board=""
+    for cand in "${CANDIDATES[@]}"; do
+        sudo ip route replace "$cand/32" dev "$nic" src "$src" 2>/dev/null
+        if ping -c1 -W1 -I "$nic" "$cand" >/dev/null 2>&1; then board="$cand"; break; fi
+        sudo ip route del "$cand/32" dev "$nic" 2>/dev/null
     done
-    if [[ -z "$nic" ]]; then
-        echo "  ${NAME[$mac]}: no NIC with MAC $mac attached; profile still (re)created"
+    if [[ -z "$board" ]]; then
+        printf '  %-18s mac=%s  no board answered on this link\n' "$nic" "$mac"
+        continue
     fi
-    con="${NAME[$mac]}"
-    sudo nmcli con delete "$con" >/dev/null 2>&1 || true
-    # mac-based binding, not ifname: the interface name is derived from the MAC
-    # here, but binding to the MAC is what makes this correct if that changes.
-    sudo nmcli con add type ethernet con-name "$con" \
-        802-3-ethernet.mac-address "$mac" \
-        ipv4.method manual \
-        ipv4.addresses "${HOST[$mac]}/32" \
-        ipv4.routes "${BOARD[$mac]}/32" \
-        ipv4.never-default yes \
-        ipv6.method disabled \
-        connection.autoconnect yes \
-        connection.autoconnect-priority 10 >/dev/null || { echo "  FAILED: $con"; continue; }
-    [[ -n "$nic" ]] && sudo nmcli con up "$con" >/dev/null 2>&1
-    printf '  %-14s mac=%s host=%-13s board=%-13s nic=%s\n' \
-           "$con" "$mac" "${HOST[$mac]}/32" "${BOARD[$mac]}/32" "${nic:-absent}"
+    printf '  %-18s mac=%s  host=%-13s board=%s\n' "$nic" "$mac" "$src/32" "$board"
+    i=$((i+1)); found=1
 done
+[[ $found -ge 1 ]] || { echo "  no Pluto NIC found (looked for OUI $OUI)"; exit 1; }
 
-# Reachability, checked HONESTLY. A bare ping is not evidence: with no /32
-# route the packet leaves by the DEFAULT route and something else on the LAN
-# answers, so a board that is not even plugged in reports "up". Observed
-# exactly that here -- 192.168.2.1 answering at 3.6 ms over wifi while the
-# board was off the USB bus entirely. Confirm the route resolves to the
-# expected interface FIRST, then ping pinned to it.
+# Reachability, checked HONESTLY. A bare ping is not evidence: with no /32 route
+# the packet leaves by the DEFAULT route and something else on the LAN answers,
+# so a board that is not plugged in reports "up". Observed exactly that --
+# 192.168.2.1 answering at 3.6 ms over wifi while the board was off the USB bus.
 echo "--- reachability ---"
-for mac in "${!HOST[@]}"; do
-    ip_b="${BOARD[$mac]}"
-    nic=""
-    for n in /sys/class/net/*; do
-        [[ -f "$n/address" ]] || continue
-        [[ "$(cat "$n/address")" == "$mac" ]] && nic=$(basename "$n")
-    done
+for ip_b in "${CANDIDATES[@]}"; do
     printf '  %-14s ' "$ip_b"
-    if [[ -z "$nic" ]]; then
-        echo "NOT ATTACHED (no NIC with MAC $mac)"
-        continue
-    fi
     via=$(ip route get "$ip_b" 2>/dev/null | head -1 | grep -o 'dev [^ ]*' | awk '{print $2}')
-    if [[ "$via" != "$nic" ]]; then
-        echo "MISROUTED (goes via ${via:-none}, not $nic)"
+    if [[ -z "$via" ]] || [[ "$(cat /sys/class/net/$via/address 2>/dev/null)" != "$OUI:"* ]]; then
+        echo "NOT ATTACHED (no Pluto link routes to it; would exit via ${via:-none})"
         continue
     fi
-    if ping -c1 -W3 -I "$nic" "$ip_b" >/dev/null 2>&1; then
-        echo "up (via $nic)"
-    else
-        echo "down (attached on $nic, no reply)"
-    fi
+    ping -c1 -W3 -I "$via" "$ip_b" >/dev/null 2>&1 && echo "up (via $via)" || echo "down (on $via, no reply)"
 done
-echo "--- routes ---"
-ip route | grep -E "192\.168\.2\." | sed 's/^/  /'
