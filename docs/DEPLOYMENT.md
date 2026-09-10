@@ -272,3 +272,49 @@ release, not a product of it: build it on the licensed machine and commit it to
 `fpga/prebuilt/system_top.bit` as part of preparing the tag. The manifest still
 records `fpga_commit`, so the bitstream remains tied to a reviewable revision,
 and `release.yml` fails with an explicit message if it is missing.
+
+## The IP bridge on power-on
+
+`flash.sh` installs `software/sdr_bridge` to **`/mnt/jffs2/sdr_bridge`**, not to
+the ramdisk. The ramdisk is rebuilt on every boot, so a binary in `/tmp` does not
+survive a power cycle — which is the whole point of the persistent install.
+
+Measured cost is **296 KB of the 896 KB partition**: jffs2 compresses on write,
+so the 456 KB binary charges about 1.5× less than its size. Verified to survive
+a real reboot.
+
+### It does not start unless you ask it to
+
+`autorun.sh` starts the bridge only when **`/mnt/jffs2/bridge.conf`** exists.
+This is deliberately opt-in: the bridge configures an interface and can enable
+forwarding, and a misconfiguration running before anyone can log in would leave
+the board unreachable with no way back except a serial cable. Without that file
+a flashed board behaves exactly as it did before.
+
+```sh
+cat > /mnt/jffs2/bridge.conf <<EOF
+BRIDGE_LOCAL=172.30.99.1
+BRIDGE_PEER=172.30.99.2
+BRIDGE_RATE=3840000
+BRIDGE_LO=434000000
+BRIDGE_ARGS="--forward --route 192.168.50.0/24"
+EOF
+reboot
+```
+
+Output goes to `/tmp/bridge.log`. Expect first output about 8 s in — the radio
+bring-up runs first and `free_capture_dev.sh` reports only once its bounded
+buffer-disable calls return.
+
+### Requires the Pluto+ firmware
+
+The bridge needs `CONFIG_TUN`, which the **ADI 5.10 rootfs does not have**. On
+such a board it stops with:
+
+```
+bridge: open /dev/net/tun: No such device
+```
+
+The Pluto+ **6.12.77** image this release builds on does have it. Everything
+ahead of that point — bring-up, device resolution, the jffs2 binary — works on
+either board; only the final step needs the right kernel.

@@ -158,6 +158,32 @@ fi
 if [[ -x "$ROOT/build/tests/sdr-tests" ]]; then
   cp "$ROOT/build/tests/sdr-tests" "$BUNDLE/software/modem_test"; say "software/modem_test" "host x86-64"
 fi
+# Device-side: the IP bridge is an ARMv7 binary and must be cross-built. Without
+# it a release can bring the radio up but cannot carry traffic, so its absence
+# is a warning rather than a silent omission.
+#
+# -O2, not -Os: the four-offset decode has only 1.9x CPU margin at 17.28 MS/s
+# (measured, fpga/tools/bridge_bench.cpp), and -Os saved nothing here anyway.
+# --gc-sections is free and buys 41 KB, which matters because this is destined
+# for a 896 KB jffs2 partition.
+if command -v arm-linux-gnueabihf-g++ >/dev/null; then
+  if arm-linux-gnueabihf-g++ -O2 -std=c++17 -static -pthread \
+       -ffunction-sections -fdata-sections -Wl,--gc-sections \
+       -I "$ROOT/include" -o "$BUNDLE/software/sdr_bridge" \
+       "$ROOT/fpga/tools/sdr_bridge.cpp" \
+       "$ROOT/src/core/framing/Framer.cpp" \
+       "$ROOT/src/core/framing/Deframer.cpp" \
+       "$ROOT/tests/arm/nodep_stubs.cpp" 2>/dev/null; then
+    arm-linux-gnueabihf-strip "$BUNDLE/software/sdr_bridge" 2>/dev/null || true
+    say "software/sdr_bridge" "$(stat -c%s "$BUNDLE/software/sdr_bridge") B (ARMv7 static)"
+  else
+    echo "  WARNING: sdr_bridge failed to cross-compile; the release cannot carry IP." >&2
+  fi
+else
+  echo "  WARNING: arm-linux-gnueabihf-g++ absent; software/sdr_bridge omitted." >&2
+  echo "           apt-get install g++-arm-linux-gnueabihf" >&2
+fi
+
 # Device-side: the bring-up and measurement scripts ARE the on-board software.
 cp "$ROOT"/fpga/scripts/*.sh "$BUNDLE/software/supporting-tools/"
 cp "$ROOT/fpga/tools/framed_link_test.cpp" "$BUNDLE/software/supporting-tools/"

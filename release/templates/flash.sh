@@ -178,6 +178,23 @@ for f in "$BUNDLE"/software/supporting-tools/*.sh; do
 done
 ssh_d 'chmod +x /root/sdr-tools/*.sh' >/dev/null 2>&1
 
+step 81 "Installing the IP bridge"
+# Into jffs2, not the ramdisk: the ramdisk is rebuilt on every boot, so a binary
+# left in /tmp does not survive a power cycle and the "functionality on power"
+# this release exists to provide would be gone. Measured cost is 296 KB of the
+# 896 KB partition -- jffs2 compresses on write, so the 456 KB file charges
+# about 1.5x less than its size.
+if [[ -f "$BUNDLE/software/sdr_bridge" ]]; then
+  put "$BUNDLE/software/sdr_bridge" /mnt/jffs2/sdr_bridge \
+    || die "Could not install sdr_bridge."
+  ssh_d 'chmod +x /mnt/jffs2/sdr_bridge' >/dev/null 2>&1
+  FREE=$(ssh_d 'df -k /mnt/jffs2 | tail -1' 2>/dev/null | awk '{print $4}')
+  echo "         jffs2 free after install: ${FREE:-?} KB"
+else
+  echo "         WARNING: this bundle has no sdr_bridge; the radio will come up"
+  echo "                  but will not carry IP."
+fi
+
 step 82 "Installing configuration"
 put "$BUNDLE/config/ad936x.conf" /mnt/jffs2/ad936x.conf || die "Could not install ad936x.conf."
 echo "$REL" | ssh_d 'cat > /mnt/jffs2/sdr-release' || die "Could not record the release version."
@@ -195,6 +212,20 @@ ssh_d "cat > /mnt/jffs2/autorun.sh" <<AUTORUN || die "Could not install autorun.
 [ -x /usr/sbin/watchdog ] && {
   kill \$(pidof watchdog) 2>/dev/null
   /usr/sbin/watchdog -t 5 -T 120 /dev/watchdog
+}
+# The IP bridge starts at boot ONLY if an operator has written bridge.conf.
+# Deliberately opt-in: the bridge configures an interface and can enable
+# forwarding, and a misconfiguration that runs before anyone can log in would
+# leave the board unreachable with no way back except a serial cable. Absent
+# the file, a flashed board behaves exactly as it did before.
+[ -f /mnt/jffs2/bridge.conf ] && [ -x /mnt/jffs2/sdr_bridge ] && {
+  . /mnt/jffs2/bridge.conf
+  [ -n "\$BRIDGE_LOCAL" ] && [ -n "\$BRIDGE_PEER" ] && {
+    BRIDGE=/mnt/jffs2/sdr_bridge \
+    /root/sdr-tools/bridge_up.sh "\$BRIDGE_LOCAL" "\$BRIDGE_PEER" \
+        "\${BRIDGE_RATE:-3840000}" "\${BRIDGE_LO:-434000000}" \
+        \$BRIDGE_ARGS > /tmp/bridge.log 2>&1 &
+  }
 }
 AUTORUN
 
