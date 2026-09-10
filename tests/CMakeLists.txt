@@ -68,3 +68,10 @@ add_test(NAME sdrctl_net
 # type widths or char signedness. Skips the ARM half where the toolchain is absent.
 add_test(NAME wire_conformance
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/arm/wire_conformance_test.sh ${PROJECT_SOURCE_DIR})
+
+# The bridge carries IP or it does not; unit tests exercise the codec, not the
+# process. Two instances with real TUNs in separate namespaces, transmit FIFO of
+# one wired to the receive FIFO of the other. Needs root for TUNSETIFF and skips
+# cleanly without it, so an ordinary ctest run is unaffected.
+add_test(NAME bridge_e2e
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/bridge_e2e_test.sh ${PROJECT_SOURCE_DIR})
