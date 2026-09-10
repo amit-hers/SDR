@@ -213,6 +213,26 @@ ssh_d "cat > /mnt/jffs2/autorun.sh" <<AUTORUN || die "Could not install autorun.
   kill \$(pidof watchdog) 2>/dev/null
   /usr/sbin/watchdog -t 5 -T 120 /dev/watchdog
 }
+# The rootfs ships /etc/fw_env.config pointing at /boot/uboot.env, which does
+# not exist on this board -- the environment is in mtd1 (qspi-uboot-env). So
+# fw_printenv fails, and /etc/init.d/S40network silently falls back to
+# 192.168.2.1: the radio cannot read its own persistent address. With two
+# radios on one host that is an address COLLISION, and it presents as one board
+# "disappearing". Repair the config and re-apply the configured address. /etc is
+# on the ramdisk, so this must run every boot; autorun.sh is in jffs2 and does.
+echo "/dev/mtd1 0x0000 0x20000 0x10000" > /etc/fw_env.config
+WANT_IP=\$(fw_printenv -n ipaddr 2>/dev/null)
+case "\$WANT_IP" in
+  *.*.*.*)
+    HAVE_IP=\$(ip -4 addr show usb0 2>/dev/null | grep -o 'inet [0-9.]*' | awk '{print \$2}')
+    if [ "\$HAVE_IP" != "\$WANT_IP" ]; then
+      ip addr flush dev usb0
+      ip addr add "\$WANT_IP/24" dev usb0
+      ip link set usb0 up
+      echo "autorun: usb0 corrected \$HAVE_IP -> \$WANT_IP (from u-boot env)"
+    fi ;;
+esac
+
 # The IP bridge starts at boot ONLY if an operator has written bridge.conf.
 # Deliberately opt-in: the bridge configures an interface and can enable
 # forwarding, and a misconfiguration that runs before anyone can log in would

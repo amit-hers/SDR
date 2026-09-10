@@ -38,6 +38,7 @@ if [[ "${1:-}" == "--install" ]]; then
     sleep 3
 fi
 
+declare -A CLAIMED=()
 i=0; found=0
 for n in /sys/class/net/*; do
     [[ -f "$n/address" ]] || continue
@@ -55,8 +56,15 @@ for n in /sys/class/net/*; do
     # must be discovered rather than assumed.
     board=""
     for cand in "${CANDIDATES[@]}"; do
+        # Skip an address another link already claimed. Without this the second
+        # NIC "discovers" a board that is really answering through the FIRST --
+        # both links then hold a route to the same address, the kernel picks
+        # one, and the other radio is reported present while being unreachable.
+        [[ -n "${CLAIMED[$cand]:-}" ]] && continue
         sudo ip route replace "$cand/32" dev "$nic" src "$src" 2>/dev/null
-        if ping -c1 -W1 -I "$nic" "$cand" >/dev/null 2>&1; then board="$cand"; break; fi
+        if ping -c1 -W1 -I "$nic" "$cand" >/dev/null 2>&1; then
+            board="$cand"; CLAIMED[$cand]="$nic"; break
+        fi
         sudo ip route del "$cand/32" dev "$nic" 2>/dev/null
     done
     if [[ -z "$board" ]]; then
