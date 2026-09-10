@@ -14,6 +14,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${1:-$ROOT/build/sdr_bridge}"
+OUT_BENCH="$(dirname "$OUT")/bridge_bench"
 
 SOURCES=(
   "$ROOT/fpga/tools/sdr_bridge.cpp"
@@ -41,3 +42,15 @@ echo "== ARMv7 build (the one that ships) =="
     -o "$OUT" "${SOURCES[@]}"
 file "$OUT" 2>/dev/null || true
 echo "   ok: $OUT"
+
+# The benchmark ships alongside it: whether the target CPU can sustain the
+# four-offset decode is a property of the target, not of the developer's
+# workstation, so it has to be measurable on the board.
+BENCH_SOURCES=(
+  "$ROOT/fpga/tools/bridge_bench.cpp"
+  "$ROOT/src/core/framing/Framer.cpp"
+  "$ROOT/src/core/framing/Deframer.cpp"
+  "$ROOT/tests/arm/nodep_stubs.cpp"
+)
+"$XC" -O2 -std=c++17 -static -I "$ROOT/include" -o "$OUT_BENCH" "${BENCH_SOURCES[@]}"
+echo "   ok: $OUT_BENCH"
