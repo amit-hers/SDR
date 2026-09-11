@@ -33,6 +33,14 @@ echo 1 > $R/scan_elements/in_voltage1_en 2>/dev/null
 # packetizer's TLAST arrives. Scan size is 4 bytes, so 16384 here is 65536 bytes
 # -- one packet of headroom.
 echo 16384 > $R/buffer/length
-echo 1 > $R/buffer/enable 2>/dev/null
+# Do NOT enable the buffer here. The reader must be iio_readdev, which
+# allocates and opens the buffer itself and fails with
+#   Unable to allocate buffer: Device or resource busy (16)
+# if it is already enabled. A raw read from /dev/iio:deviceN does not work on
+# this kernel at all -- it never programs the DMA and blocks forever -- so
+# there is no remaining caller that needs the buffer pre-enabled. Measured from
+# a clean boot: iio_readdev returned 524288 B in 4 s with 17 DMA interrupts,
+# against a raw read that never returned.
+echo 0 > $R/buffer/enable 2>/dev/null || true
 sleep 1
 echo "# fs=$(cat $P/in_voltage_sampling_frequency) l_clk=$(devmem 0x79020054 32) rssi=$(cat $P/in_voltage0_rssi) gain=$(cat $P/in_voltage0_hardwaregain) diff=$(devmem $((D+0x28)) 32) ap=$(devmem $((D+0x00)) 32) up=$(cut -d. -f1 /proc/uptime)s"
