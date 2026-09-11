@@ -562,6 +562,7 @@ int main(int argc, char** argv) {
     auto t_start = std::chrono::steady_clock::now();
     uint64_t last_decode = 0;
     bool     warned_short = false;
+    uint64_t last_short   = 0;
     while (g_run.load() && o.stats_s > 0) {
         std::this_thread::sleep_for(std::chrono::seconds(o.stats_s));
         g_stats.tun_tx_drop.store(ifCounter(o.iface, "tx_dropped"));
@@ -612,13 +613,20 @@ int main(int argc, char** argv) {
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"
                 "        is a CPU limit, NOT the radio -- do not chase it as RF.\n",
                 busy_win);
-        // Once, not every interval: this is a standing condition, and a
-        // warning that repeats forever is one an operator learns to scroll
-        // past.
-        if (g_stats.rx_short.load() > 0 && g_stats.rx_dma.load() > 8 && !warned_short) {
+        // Warn only if short reads are STILL ACCUMULATING. A burst of them at
+        // startup is normal and harmless: the helper's pipe carries partial
+        // data while the stream establishes, and the count then stops dead --
+        // measured frozen at 60 while rx_dma climbed from 546 to 598. Warning
+        // on that would send an operator after a fault that had already
+        // stopped, which is the opposite of what these counters are for.
+        uint64_t short_now = g_stats.rx_short.load();
+        bool still_growing = short_now > last_short;
+        last_short = short_now;
+        if (still_growing && g_stats.rx_dma.load() > 32 && !warned_short) {
             warned_short = true;
             std::fprintf(stderr,
-                "bridge: WARNING %llu reads were not a full %d-byte packet; the byte\n"
+                "bridge: WARNING short reads are ONGOING (%llu so far, not a full\n"
+                "        %d-byte packet); the byte\n"
                 "        grid is only continuous within a transfer, so frames are\n"
                 "        being lost at boundaries. Check --pkt against PKT_BYTES.\n",
                 (unsigned long long)g_stats.rx_short.load(), o.pkt);
