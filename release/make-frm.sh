@@ -36,6 +36,70 @@ for f in fdt.dtb kernel.img ramdisk.gz; do
 done
 cp "$BIN" "$W/fpga.bin"
 
+# ── Remove maia-sdr from the ramdisk ──────────────────────────────────────
+# NOT cosmetic, and not optional for a modem release. maia-sdr's kernel module
+# claims the IIO buffers, so on a stock-firmware board the fabric modem's char
+# devices are EBUSY *from boot*:
+#
+#     dd: can't open '/dev/iio:device2': Device or resource busy
+#
+# with no userspace process holding any /dev/iio fd -- the claim is in-kernel.
+# It also reserves 128 MB as maia_sdr_recording. A radio flashed with maia
+# present cannot transmit or receive through the fabric at all, which is the
+# whole point of this image. `rmmod maia_sdr` is NOT a workaround: it hangs and
+# wedges the board, observed on both units.
+#
+# /etc, /lib/modules and /root are all on the ramdisk, rebuilt from this image
+# on every boot, so this is the only durable place to remove it -- autorun.sh
+# runs at S98, long after S50 has loaded the module.
+#
+# Editing the ramdisk needs ownership and device nodes preserved, hence
+# fakeroot. If the tooling is absent this FAILS rather than quietly shipping an
+# image whose radio cannot work.
+if [[ "${KEEP_MAIA:-0}" == "1" ]]; then
+  echo "  ramdisk: maia-sdr KEPT (KEEP_MAIA=1) -- the fabric modem will not work" >&2
+else
+  command -v cpio     >/dev/null || { echo "ERROR: cpio not found; cannot strip maia-sdr" >&2; exit 1; }
+  command -v fakeroot >/dev/null || { echo "ERROR: fakeroot not found (apt install fakeroot)" >&2; exit 1; }
+  mkdir -p "$W/rd"
+  gzip -dc "$W/ramdisk.gz" > "$W/ramdisk.cpio"
+  ( cd "$W/rd" && fakeroot cpio -idm --quiet < "$W/ramdisk.cpio" ) \
+    || { echo "ERROR: could not unpack the ramdisk" >&2; exit 1; }
+
+  # The init script is what loads it; the .ko is belt and braces; the httpd
+  # depends on the module and would only fail noisily at boot.
+  MAIA_REMOVE=(
+    etc/init.d/S50maia-kmod
+    etc/init.d/S50maia-sdr-certificates
+    etc/init.d/S60maia-httpd
+    "lib/modules/$(ls "$W/rd/lib/modules" 2>/dev/null | head -1)/updates/maia-sdr.ko"
+  )
+  REMOVED=0
+  for f in "${MAIA_REMOVE[@]}"; do
+    if [[ -e "$W/rd/$f" ]]; then rm -f "$W/rd/$f"; REMOVED=$((REMOVED+1)); fi
+  done
+  (( REMOVED > 0 )) || { echo "ERROR: found no maia-sdr files to remove; has the stock image changed?" >&2; exit 1; }
+
+  # `find` alone returns directory order, which varies between runs and makes
+  # the artifact unreproducible -- the one property a recovery image must have.
+  # Sorting fixes the member order so the same inputs give the same bytes.
+  # --reproducible zeroes the inode and device numbers, which the SVR4 format
+  # records and which differ on every extraction; sorting fixes member order.
+  # Together they make the repack byte-identical from identical input.
+  ( cd "$W/rd" && fakeroot sh -c 'find . | LC_ALL=C sort | cpio -o -H newc --reproducible --quiet' ) > "$W/ramdisk.new" \
+    || { echo "ERROR: could not repack the ramdisk" >&2; exit 1; }
+  # -n omits gzip's mtime and filename header fields, which otherwise change on
+  # every run and make the artifact unreproducible even from identical input.
+  gzip -9 -n -c "$W/ramdisk.new" > "$W/ramdisk.gz"
+  # A ramdisk that lost far more than the handful of maia files means the
+  # repack went wrong, and an unbootable rootfs is worse than maia.
+  NBEFORE=$(cpio -t < "$W/ramdisk.cpio" 2>/dev/null | wc -l)
+  NAFTER=$(cpio -t < "$W/ramdisk.new" 2>/dev/null | wc -l)
+  (( NAFTER >= NBEFORE - 8 )) || {
+    echo "ERROR: ramdisk lost $((NBEFORE-NAFTER)) entries (expected <= 8); refusing." >&2; exit 1; }
+  echo "  ramdisk: removed $REMOVED maia-sdr files, $NAFTER of $NBEFORE entries kept" >&2
+fi
+
 # The number of configurations is matched to the stock image: different units
 # select different ones via the fit_config environment variable, and a missing
 # node would leave those boards unbootable. They are aliases -- every config in
