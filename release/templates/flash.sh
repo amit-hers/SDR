@@ -298,10 +298,19 @@ ssh_d 'sync' >/dev/null 2>&1 || die "sync failed."
 
 if [[ $PERSIST -eq 1 ]]; then
   step 90 "Rebooting device"
-  ssh_d '(sleep 1; reboot) >/dev/null 2>&1 &' >/dev/null 2>&1 || true
+  # Record uptime first: the check below needs to prove the board actually
+  # restarted, and `reboot` alone does NOT restart this firmware -- it returns
+  # success while init ignores it and uptime keeps climbing. `reboot -f`
+  # bypasses init. Without both of these the flash reports "Deployment
+  # successful" over a board still running the OLD ramdisk, which is exactly
+  # what happened: uptime read 2609 s after a reported reboot, and the new
+  # image sat in flash unbooted while its changes appeared to have had no
+  # effect.
+  UP_BEFORE=$(ssh_d 'cut -d. -f1 /proc/uptime' 2>/dev/null | tr -cd '0-9')
+  ssh_d 'sync; (sleep 1; reboot -f) >/dev/null 2>&1 &' >/dev/null 2>&1 || true
 
   step 93 "Waiting for device"
-  sleep 5
+  sleep 15
   START=$SECONDS; DEADLINE=$((SECONDS + 240))
   ORIG="$DEV"
   FOUND=""
@@ -312,6 +321,14 @@ if [[ $PERSIST -eq 1 ]]; then
     for cand in "$ORIG" 192.168.2.1; do
       for pw in "$PW" analog root; do
         if sshpass -p "$pw" ssh "${SSHO[@]}" "root@$cand" true >/dev/null 2>&1; then
+          # Answering is NOT proof of a reboot. The old system answers within
+          # seconds, which is why a 4 s "back after" looked plausible for a
+          # board that takes ~30 s to boot. Require uptime to have gone
+          # BACKWARDS before accepting the device as returned.
+          UP_NOW=$(sshpass -p "$pw" ssh "${SSHO[@]}" "root@$cand" 'cut -d. -f1 /proc/uptime' 2>/dev/null | tr -cd '0-9')
+          if [[ -n "$UP_NOW" && -n "$UP_BEFORE" ]] && (( UP_NOW >= UP_BEFORE )); then
+            continue   # same boot still running; keep waiting
+          fi
           FOUND="$cand"; PW="$pw"; DEV="$cand"; break 3
         fi
       done
