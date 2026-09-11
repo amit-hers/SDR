@@ -44,12 +44,21 @@ DB=0x79024000
 echo 1 > "$IIO_TX/scan_elements/out_voltage0_en" 2>/dev/null
 echo 1 > "$IIO_TX/scan_elements/out_voltage1_en" 2>/dev/null
 echo 32768 > "$IIO_TX/buffer/length"
-echo 1 > "$IIO_TX/buffer/enable"
+# Do NOT enable the buffer. sdr_bridge transfers through iio_writedev /
+# iio_readdev -- the only path that programs the DMA on this kernel -- and
+# those allocate the buffer themselves, failing with
+#   Unable to allocate buffer: Device or resource busy (16)
+# if it is already enabled. The bridge also redoes the DMA source select after
+# its writer is running, because opening the buffer re-points the channel at
+# the internal DDS.
+echo 0 > "$IIO_TX/buffer/enable" 2>/dev/null || true
 for ch in 0 1; do
-  devmem $((DB+0x418+64*ch)) 32 2     # channel source = DMA
   devmem $((DB+0x400+64*ch)) 32 1     # channel enable
 done
 
 echo "bridge_up: fs=$FS lo=$LO tx=$IIO_TX_DEV rx=$IIO_RX_DEV"
-exec "$BRIDGE" --local "$LOCAL" --peer "$PEER" \
-     --tx "$IIO_TX_DEV" --rx "$IIO_RX_DEV" "$@"
+# Deliberately NOT passing --tx/--rx. Explicit device paths tell the bridge to
+# use them raw, which is the test harness's mode and does NOT program the DMA on
+# this kernel. Left to resolve the devices itself, the bridge transfers through
+# iio_writedev / iio_readdev, which is the only path that works on hardware.
+exec "$BRIDGE" --local "$LOCAL" --peer "$PEER" "$@"

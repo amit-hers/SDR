@@ -41,6 +41,9 @@
 #include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <csignal>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -59,6 +62,11 @@ struct Opts {
     int         prefix  = 30;          // /30 is exactly two hosts: one hop
     std::string tx_dev;                // resolved from name if empty
     std::string rx_dev;
+    // Explicit --tx/--rx means "use these paths directly", which is how the
+    // end-to-end test drives the bridge over FIFOs with no radio present.
+    // Left unset, the transfers go through libiio, which is the only path that
+    // actually programs the DMA on this kernel.
+    bool        dev_explicit = false;
     uint32_t    node_id = 1;
     int         mtu     = 1400;        // == MAX_PAYLOAD; TUN carries no L2 header
     int         pkt     = 32768;       // PKT_BYTES in axis_packetizer.v
@@ -131,6 +139,61 @@ int runCmd(const std::string& c) {
 }
 
 } // namespace
+
+
+// ── libiio, not the char device ────────────────────────────────────────────
+//
+// On the Pluto+ 6.12.77 kernel a raw write()/read() on /dev/iio:deviceN NEVER
+// programs the DMA: ctrl, flags and x_length stay at their reset values, no
+// interrupt ever fires, and the call blocks forever while every register reads
+// healthy. Measured on one board minutes apart -- raw write gave an all-zero
+// modulator output, libiio gave 64/64 non-zero with interrupts firing, and on
+// receive libiio returned 524288 B in 4 s where a raw read never returned.
+//
+// So the transfers go through iio_writedev / iio_readdev, spawned as children
+// with a pipe. That keeps this binary static and dependency-free -- linking
+// libiio would mean cross-compiling it for the target -- and uses exactly the
+// path proven to work on the hardware. At ~1 MB/s the extra copy is irrelevant.
+static pid_t g_tx_pid = -1, g_rx_pid = -1;
+
+// Spawn a child with one end of a pipe as its stdin (to_child) or stdout.
+static int spawnIio(const char* const argv[], bool to_child, pid_t* pid_out) {
+    int fds[2];
+    if (::pipe(fds) < 0) { std::perror("pipe"); return -1; }
+    pid_t pid = ::fork();
+    if (pid < 0) { std::perror("fork"); ::close(fds[0]); ::close(fds[1]); return -1; }
+    if (pid == 0) {
+        if (to_child) { ::dup2(fds[0], STDIN_FILENO);  ::close(fds[1]); }
+        else          { ::dup2(fds[1], STDOUT_FILENO); ::close(fds[0]); }
+        ::close(fds[0]); ::close(fds[1]);
+        int devnull = ::open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { ::dup2(devnull, STDERR_FILENO); ::close(devnull); }
+        ::execvp(argv[0], const_cast<char* const*>(argv));
+        ::_exit(127);
+    }
+    *pid_out = pid;
+    if (to_child) { ::close(fds[0]); return fds[1]; }
+    ::close(fds[1]); return fds[0];
+}
+
+// Opening the transmit buffer re-points the DAC channel at the internal DDS, so
+// the DMA source select must be redone AFTER the writer is running. Done here
+// through /dev/mem rather than by shelling out to devmem, so the bridge stays
+// self-contained. Silently skipped if /dev/mem is unavailable -- the caller's
+// bring-up script may already have handled it.
+static void selectDmaSource() {
+    int fd = ::open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) return;
+    const off_t base = 0x79024000;
+    const size_t len = 0x1000;
+    void* m = ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, base);
+    if (m != MAP_FAILED) {
+        volatile uint32_t* r = static_cast<volatile uint32_t*>(m);
+        for (int ch = 0; ch < 2; ++ch) r[(0x418 + 64 * ch) / 4] = 2;   // source = DMA
+        ::munmap(m, len);
+    }
+    ::close(fd);
+}
 
 // ── TUN ───────────────────────────────────────────────────────────────────
 static int tunOpen(const std::string& name, int mtu) {
@@ -323,10 +386,22 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
 
     auto last_read = std::chrono::steady_clock::now();
     while (g_run.load()) {
-        ssize_t n = ::read(rx_fd, buf.data(), buf.size());
+        // A PIPE DOES NOT PRESERVE PACKET BOUNDARIES. iio_readdev writes one DMA
+        // buffer at a time, but the pipe delivers whatever happens to be
+        // available, so a single read returns a fragment. Decoding is scoped to
+        // one transfer -- the byte grid is continuous only within it -- so a
+        // fragment decoded as if it were a packet loses frames at both ends and
+        // reports them as loss. Reassemble a full packet before decoding.
+        ssize_t n = 0;
+        while (n < static_cast<ssize_t>(buf.size())) {
+            ssize_t k = ::read(rx_fd, buf.data() + n, buf.size() - static_cast<size_t>(n));
+            if (k == 0) break;                       // helper exited
+            if (k < 0) { if (errno == EINTR) continue; break; }
+            n += k;
+        }
         if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            if (n < 0) { std::perror("read rx"); break; }
+            if (n < 0) std::perror("read rx");
+            if (!g_run.load()) break;
             continue;
         }
         auto now = std::chrono::steady_clock::now();
@@ -401,8 +476,8 @@ int main(int argc, char** argv) {
         else if (a == "--local")   o.local   = next("--local");
         else if (a == "--peer")    o.peer    = next("--peer");
         else if (a == "--prefix")  o.prefix  = std::atoi(next("--prefix").c_str());
-        else if (a == "--tx")      o.tx_dev  = next("--tx");
-        else if (a == "--rx")      o.rx_dev  = next("--rx");
+        else if (a == "--tx")    { o.tx_dev = next("--tx"); o.dev_explicit = true; }
+        else if (a == "--rx")    { o.rx_dev = next("--rx"); o.dev_explicit = true; }
         else if (a == "--node-id") o.node_id = static_cast<uint32_t>(std::strtoul(next("--node-id").c_str(), nullptr, 0));
         else if (a == "--mtu")     o.mtu     = std::atoi(next("--mtu").c_str());
         else if (a == "--pkt")     o.pkt     = std::atoi(next("--pkt").c_str());
@@ -432,22 +507,49 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "bridge: tx=%s rx=%s node=%u\n",
                  o.tx_dev.c_str(), o.rx_dev.c_str(), o.node_id);
 
-    // The char devices are SINGLE-OPEN. Opening them before the interface is
-    // configured means a stale holder is reported as itself rather than as a
-    // confusing interface failure two steps later.
-    int tx_fd = ::open(o.tx_dev.c_str(), O_WRONLY);
-    if (tx_fd < 0) {
-        std::fprintf(stderr, "bridge: open %s: %s\n", o.tx_dev.c_str(), std::strerror(errno));
-        if (errno == EBUSY)
-            std::fprintf(stderr, "        another process holds it; run free_capture_dev.sh\n");
-        return 1;
-    }
-    int rx_fd = ::open(o.rx_dev.c_str(), O_RDONLY);
-    if (rx_fd < 0) {
-        std::fprintf(stderr, "bridge: open %s: %s\n", o.rx_dev.c_str(), std::strerror(errno));
-        if (errno == EBUSY)
-            std::fprintf(stderr, "        another process holds it; run free_capture_dev.sh\n");
-        ::close(tx_fd); return 1;
+    // A dead child must not take the bridge down with it.
+    ::signal(SIGPIPE, SIG_IGN);
+
+    int tx_fd = -1, rx_fd = -1;
+    if (o.dev_explicit) {
+        // Raw paths: the test harness's FIFOs, or a deliberate override. This
+        // does NOT work against a real radio on 6.12 -- see spawnIio above.
+        tx_fd = ::open(o.tx_dev.c_str(), O_WRONLY);
+        if (tx_fd < 0) {
+            std::fprintf(stderr, "bridge: open %s: %s\n", o.tx_dev.c_str(), std::strerror(errno));
+            return 1;
+        }
+        rx_fd = ::open(o.rx_dev.c_str(), O_RDONLY);
+        if (rx_fd < 0) {
+            std::fprintf(stderr, "bridge: open %s: %s\n", o.rx_dev.c_str(), std::strerror(errno));
+            ::close(tx_fd); return 1;
+        }
+        std::fprintf(stderr, "bridge: raw device paths (no libiio) -- test mode\n");
+    } else {
+
+    // Buffer size in SAMPLES: 4 bytes per sample with both channels enabled, so
+    // one buffer is exactly one DMA packet. The receive path decodes per packet,
+    // and matching the two keeps that scoping meaningful across the pipe.
+    char nbuf[32];
+    std::snprintf(nbuf, sizeof nbuf, "%d", o.pkt / 4);
+
+    const char* tx_argv[] = { "iio_writedev", "-b", nbuf,
+                              "cf-ad9361-dds-core-lpc", "voltage0", "voltage1", nullptr };
+    tx_fd = spawnIio(tx_argv, true, &g_tx_pid);
+    if (tx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_writedev\n"); return 1; }
+
+    const char* rx_argv[] = { "iio_readdev", "-b", nbuf,
+                              "cf-ad9361-lpc", "voltage0", "voltage1", nullptr };
+    rx_fd = spawnIio(rx_argv, false, &g_rx_pid);
+    if (rx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_readdev\n"); ::close(tx_fd); return 1; }
+
+    // Give the writer time to open the buffer, then redo the source select it
+    // just undid. Order matters and is not recoverable afterwards: get it wrong
+    // and the DAC emits nothing while every register still reads healthy.
+    ::usleep(3000 * 1000);
+    selectDmaSource();
+    std::fprintf(stderr, "bridge: iio_writedev pid=%d iio_readdev pid=%d buffer=%s samples\n",
+                 (int)g_tx_pid, (int)g_rx_pid, nbuf);
     }
 
     int tun_fd = tunOpen(o.iface, o.mtu);
