@@ -24,6 +24,7 @@
 #include "sdr/framing/Framer.hpp"
 #include "sdr/framing/Deframer.hpp"
 #include "sdr/framing/OffsetDeframer.hpp"
+#include "sdr/framing/PacketReader.hpp"
 #include "sdr/framing/Frame.hpp"
 
 #include <atomic>
@@ -392,13 +393,7 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
         // one transfer -- the byte grid is continuous only within it -- so a
         // fragment decoded as if it were a packet loses frames at both ends and
         // reports them as loss. Reassemble a full packet before decoding.
-        ssize_t n = 0;
-        while (n < static_cast<ssize_t>(buf.size())) {
-            ssize_t k = ::read(rx_fd, buf.data() + n, buf.size() - static_cast<size_t>(n));
-            if (k == 0) break;                       // helper exited
-            if (k < 0) { if (errno == EINTR) continue; break; }
-            n += k;
-        }
+        ssize_t n = readExact(rx_fd, buf.data(), buf.size());
         if (n <= 0) {
             if (n < 0) std::perror("read rx");
             if (!g_run.load()) break;
