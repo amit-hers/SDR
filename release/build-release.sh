@@ -94,10 +94,32 @@ else
   need "$BIT"
 fi
 
+FW="$ROOT/tezuka-plutoplus-v0.3.5-7cf6171"
+
 # BOOT.BIN carries the bitstream that the FSBL loads at POWER-ON. Without it the
 # board comes up on the stock PL and every 0x43Cxxxxx access bus-errors, which
 # is exactly the state a recovery image has to be able to fix.
-FW="$ROOT/tezuka-plutoplus-v0.3.5-7cf6171"
+#
+# For a `release` or `golden` artifact that is not a warning, it is a defect:
+# the bundle would look complete, verify its own checksums, and produce a radio
+# whose modem is absent at power-on. Those classes therefore FAIL here rather
+# than packaging the stock image. dev and rc may still carry it, because they
+# are built constantly on machines without Vitis, but they say so loudly.
+stock_bootbin() {
+  local why="$1"
+  if [[ "$BUILD_TYPE" == "release" || "$BUILD_TYPE" == "golden" ]]; then
+    echo "ERROR: $why" >&2
+    echo "       A $BUILD_TYPE build must carry a BOOT.BIN built from THIS bitstream." >&2
+    echo "       Without it the radio boots the stock PL and the modem is absent at" >&2
+    echo "       power-on, while every other check in the bundle still passes." >&2
+    echo "       Source the Vitis environment so bootgen is on PATH, or set BOOTGEN=<path>:" >&2
+    echo "         source /opt/Xilinx/Vitis/<version>/settings64.sh" >&2
+    exit 1
+  fi
+  echo "  WARNING: $why; bundle will carry the STOCK BOOT.bin." >&2
+  cp "$FW/sdimg/BOOT.bin" "$BUNDLE/fpga/BOOT.BIN"
+  say "fpga/BOOT.BIN" "STOCK -- modem PL will NOT load at power-on ($BUILD_TYPE only)"
+}
 if [[ "$HAVE_FPGA" == true && ( -x "${BOOTGEN:-}" || -x "$(command -v bootgen 2>/dev/null || echo /nonexistent)" ) ]]; then
   BG="${BOOTGEN:-$(command -v bootgen)}"
   WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -119,14 +141,10 @@ BIF
     cp "$WORK/BOOT.BIN" "$BUNDLE/fpga/BOOT.BIN"
     say "fpga/BOOT.BIN" "$(stat -c%s "$BUNDLE/fpga/BOOT.BIN") B (loads the PL at power-on)"
   else
-    echo "  WARNING: bootgen failed; bundle will carry the STOCK BOOT.bin." >&2
-    cp "$FW/sdimg/BOOT.bin" "$BUNDLE/fpga/BOOT.BIN"
-    say "fpga/BOOT.BIN" "STOCK -- modem PL will NOT load at power-on"
+    stock_bootbin "bootgen ran but failed to produce BOOT.BIN"
   fi
 elif [[ "$HAVE_FPGA" == true ]]; then
-  echo "  WARNING: no bootgen on PATH; bundle will carry the STOCK BOOT.bin." >&2
-  cp "$FW/sdimg/BOOT.bin" "$BUNDLE/fpga/BOOT.BIN"
-  say "fpga/BOOT.BIN" "STOCK -- modem PL will NOT load at power-on"
+  stock_bootbin "no bootgen on PATH"
 fi
 
 # ── Boot / kernel / rootfs ────────────────────────────────────────────────
