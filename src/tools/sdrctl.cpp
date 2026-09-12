@@ -32,6 +32,10 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
+#include <climits>
+#include <cerrno>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -52,9 +56,43 @@ std::string slurp(const std::string& p) {
 bool spit(const std::string& p, const std::string& s) {
     // Write to a temporary and rename: a config truncated by a crash or a full
     // disk is worse than an unchanged one, and this file is read at startup.
-    const std::string tmp = p + ".tmp";
-    { std::ofstream f(tmp); if (!f) return false; f << s; if (!f) return false; }
-    return std::rename(tmp.c_str(), p.c_str()) == 0;
+    //
+    // The rename alone is NOT enough. rename(2) is atomic with respect to the
+    // directory entry, but it says nothing about whether the FILE's data has
+    // reached the disk. Without fsync, a power loss moments later can leave a
+    // correctly named, correctly sized, ZERO-FILLED config -- the radio then
+    // boots with a file that parses as garbage rather than with its previous
+    // settings, which is worse than either outcome the temp file was meant to
+    // prevent. On the board this matters: /mnt/jffs2 is flash, and power is
+    // pulled without warning.
+    //
+    // So: write, fsync the file, rename, then fsync the DIRECTORY so the
+    // rename itself is durable. And unlink the temporary on any failure, or a
+    // full partition accumulates .tmp files that the next write then cannot
+    // create.
+    char tmp[PATH_MAX];
+    std::snprintf(tmp, sizeof tmp, "%s.tmp.%d", p.c_str(), (int)::getpid());
+
+    int fd = ::open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < s.size()) {
+        ssize_t w = ::write(fd, s.data() + off, s.size() - off);
+        if (w < 0) { if (errno == EINTR) continue; ::close(fd); ::unlink(tmp); return false; }
+        off += static_cast<size_t>(w);
+    }
+    if (::fsync(fd) != 0) { ::close(fd); ::unlink(tmp); return false; }
+    if (::close(fd) != 0) { ::unlink(tmp); return false; }
+
+    if (std::rename(tmp, p.c_str()) != 0) { ::unlink(tmp); return false; }
+
+    // Make the rename itself durable.
+    std::string dir = p;
+    auto slash = dir.find_last_of('/');
+    dir = (slash == std::string::npos) ? std::string(".") : dir.substr(0, slash);
+    int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) { ::fsync(dfd); ::close(dfd); }
+    return true;
 }
 
 std::string trimq(std::string s) {

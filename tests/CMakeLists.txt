@@ -77,3 +77,9 @@ add_test(NAME wire_conformance
 # cleanly without it, so an ordinary ctest run is unaffected.
 add_test(NAME bridge_e2e
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/bridge_e2e_test.sh ${PROJECT_SOURCE_DIR})
+
+# A config write must be durable, not merely atomic in the directory entry:
+# without fsync a power cut can commit a correctly named but zero-filled file.
+add_test(NAME sdrctl_atomic
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdrctl_atomic_test.sh
+                 $<TARGET_FILE:sdrctl> ${PROJECT_SOURCE_DIR}/config.json)
