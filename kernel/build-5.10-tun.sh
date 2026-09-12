@@ -18,14 +18,37 @@ COMMIT=9dfba10b795d0004ae90f2ab29dac0197c8a3b3e   # plutosdr-fw v0.35's linux su
 SRC="${1:-$PWD/linux-adi}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Toolchain: the SOFT-FLOAT gnueabi one. Ubuntu's gnueabihf gcc is hard-float
-# and cannot accept the plain -march=armv7-a the kernel passes ("selected
+# TOOLCHAIN -- both halves of this matter, and each was learned by breaking it.
+#
+# SOFT-FLOAT gnueabi, not gnueabihf. Ubuntu's gnueabihf gcc is hard-float and
+# cannot accept the plain -march=armv7-a the kernel passes ("selected
 # architecture lacks an FPU"), which surfaces as a wall of assembler errors --
 # "selected processor does not support `isb' in ARM mode" -- that look like a
 # kernel problem and are not.
+#
+# GCC 10, not 13. A GCC 13 build of this tree COMPILES CLEANLY AND DOES NOT
+# BOOT: flashed to both radios, neither came back, neither even presented
+# u-boot's DFU gadget. 5.10 predates GCC 13 and the original was built with
+# GCC 8.2.0. GCC 10 is contemporaneous with 5.10 and produces a kernel within
+# 1 KB of the original (4211816 B against 4212824 B), where the GCC 13 build
+# was 23 KB smaller -- a useful smoke test before flashing anything.
+#
+# BUILD SIZE IS NOT PROOF OF BOOT. Verify on ONE radio and keep the other on a
+# known-good image until the new one is confirmed; do not flash both.
+GCCVER="${GCCVER:-10}"
 export ARCH=arm CROSS_COMPILE=arm-linux-gnueabi-
-command -v arm-linux-gnueabi-gcc >/dev/null || {
-  echo "need: sudo apt install gcc-arm-linux-gnueabi flex bison bc libssl-dev libelf-dev" >&2; exit 1; }
+if command -v "arm-linux-gnueabi-gcc-$GCCVER" >/dev/null; then
+  TC=$(mktemp -d); ln -sf "/usr/bin/arm-linux-gnueabi-gcc-$GCCVER" "$TC/arm-linux-gnueabi-gcc"
+  for t in ld as objcopy objdump ar nm strip ranlib; do
+    ln -sf "/usr/bin/arm-linux-gnueabi-$t" "$TC/arm-linux-gnueabi-$t" 2>/dev/null || true
+  done
+  export PATH="$TC:$PATH"
+else
+  echo "need: sudo apt install gcc-$GCCVER-arm-linux-gnueabi flex bison bc libssl-dev libelf-dev" >&2
+  echo "      (a GCC 13 build of this tree compiles but does NOT boot)" >&2
+  exit 1
+fi
+echo "toolchain: $(arm-linux-gnueabi-gcc --version | head -1)"
 
 if [[ ! -d "$SRC/.git" ]]; then
   mkdir -p "$SRC"; ( cd "$SRC" && git init -q && git remote add origin https://github.com/analogdevicesinc/linux.git )
@@ -37,6 +60,8 @@ fi
 cp "$HERE/pluto-5.10-tun.config" "$SRC/.config"
 ( cd "$SRC" && make olddefconfig >/dev/null && grep -q '^CONFIG_TUN=y' .config )
 ( cd "$SRC" && make -j"$(nproc)" zImage )
+SZ=$(stat -c%s "$SRC/arch/arm/boot/zImage")
+echo "zImage $SZ B (original ADI GCC 8.2 build is 4212824 B; a wildly different size is a warning sign)"
 
 # The FIT kernel entry takes the RAW zImage. uImage is the same image plus a
 # 64-byte u-boot header; putting that in a FIT gives the kernel two headers and
