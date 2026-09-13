@@ -58,7 +58,18 @@ fi
 ( cd "$SRC" && git fetch --depth 1 origin "$COMMIT" && git checkout -q FETCH_HEAD )
 
 cp "$HERE/pluto-5.10-tun.config" "$SRC/.config"
-( cd "$SRC" && make olddefconfig >/dev/null && grep -q '^CONFIG_TUN=y' .config )
+( cd "$SRC" && make olddefconfig >/dev/null )
+# BOTH symbols matter and BOTH are absent from the stock ADI config:
+#   CONFIG_TUN  -- sdr_bridge's tun backend
+#   CONFIG_MACB -- the Cadence GEM driver for the Pluto+'s RJ45. The standard
+#                  Pluto has no Ethernet port so ADI does not build it, which
+#                  is why a stock 5.10 board has only lo and usb0. Without it
+#                  there is no eth0 and the AF_PACKET backend has nothing to
+#                  bind to, so switching backends does NOT avoid a kernel
+#                  rebuild -- it only changes which symbol is needed.
+for sym in CONFIG_TUN CONFIG_MACB; do
+  grep -q "^$sym=y" "$SRC/.config" || { echo "ERROR: $sym did not survive olddefconfig" >&2; exit 1; }
+done
 ( cd "$SRC" && make -j"$(nproc)" zImage )
 SZ=$(stat -c%s "$SRC/arch/arm/boot/zImage")
 echo "zImage $SZ B (original ADI GCC 8.2 build is 4212824 B; a wildly different size is a warning sign)"

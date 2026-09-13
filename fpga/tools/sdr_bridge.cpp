@@ -50,6 +50,10 @@
 #include <sys/types.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 using namespace sdr;
 
@@ -68,6 +72,11 @@ struct Opts {
     // Left unset, the transfers go through libiio, which is the only path that
     // actually programs the DMA on this kernel.
     bool        dev_explicit = false;
+    // AF_PACKET carries whole Ethernet frames off a real NIC; TUN carries IP
+    // packets on a virtual one. The product wants the former (RJ45 to RJ45 with
+    // nothing configured on either PC), and the 5.10 kernel that actually
+    // transmits has no CONFIG_TUN, so this is the default path on hardware.
+    bool        raw_eth = false;
     uint32_t    node_id = 1;
     int         mtu     = 1400;        // == MAX_PAYLOAD; TUN carries no L2 header
     int         pkt     = 32768;       // PKT_BYTES in axis_packetizer.v
@@ -81,6 +90,10 @@ void usage() {
     std::fprintf(stderr,
       "usage: sdr_bridge --local <ip> --peer <ip> [options]\n"
       "  --iface NAME     tun interface name (default sdr0)\n"
+      "  --raw-eth IFACE  carry Ethernet frames off IFACE via AF_PACKET instead\n"
+      "                   of creating a TUN. No IP is configured on the radio;\n"
+      "                   the two RJ45 ports behave as one cable. Needs no\n"
+      "                   CONFIG_TUN, which the working 5.10 kernel lacks.\n"
       "  --prefix N       prefix length (default 30)\n"
       "  --tx DEV         transmit char device (default: resolved by name)\n"
       "  --rx DEV         receive char device\n"
@@ -196,6 +209,68 @@ static void selectDmaSource() {
     ::close(fd);
 }
 
+
+// ── AF_PACKET: carry Ethernet frames straight off the RJ45 ────────────────
+//
+// The alternative to a TUN device, and the better fit for the product: a PC
+// plugs into each radio's Ethernet port and the two behave like one cable. No
+// IP is configured on the radios, nothing on the PCs needs to know an SDR is
+// involved, and ARP, DHCP and IPv6 all cross unmodified because whole L2
+// frames are carried rather than IP packets.
+//
+// It also needs no kernel change. The Pluto's 5.10 kernel -- the only one whose
+// AD9363 transmitter actually works -- is built without CONFIG_TUN, and getting
+// a rebuilt kernel to boot was not achievable without UART access to u-boot.
+// AF_PACKET is in every kernel.
+//
+// ETH_P_ALL in the protocol field captures every frame the interface sees,
+// including ones the host stack will also process. That is deliberate: the
+// radio is a wire, not an endpoint, and filtering here would silently drop
+// protocols someone later depends on.
+static int packetOpen(const std::string& iface, int mtu) {
+    int fd = ::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (fd < 0) { std::fprintf(stderr, "bridge: socket(AF_PACKET): %s\n", std::strerror(errno)); return -1; }
+
+    struct ifreq ifr;
+    std::memset(&ifr, 0, sizeof ifr);
+    std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+    if (::ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
+        std::fprintf(stderr, "bridge: no such interface '%s': %s\n", iface.c_str(), std::strerror(errno));
+        ::close(fd); return -1;
+    }
+    const int ifindex = ifr.ifr_ifindex;
+
+    struct sockaddr_ll sll;
+    std::memset(&sll, 0, sizeof sll);
+    sll.sll_family   = AF_PACKET;
+    sll.sll_protocol = htons(ETH_P_ALL);
+    sll.sll_ifindex  = ifindex;
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&sll), sizeof sll) < 0) {
+        std::fprintf(stderr, "bridge: bind %s: %s\n", iface.c_str(), std::strerror(errno));
+        ::close(fd); return -1;
+    }
+
+    // Promiscuous: without it the NIC drops frames not addressed to it, so
+    // traffic between the two PCs would never be seen -- the radio would carry
+    // only what was addressed to the radio itself, which is nothing useful.
+    struct packet_mreq mr;
+    std::memset(&mr, 0, sizeof mr);
+    mr.mr_ifindex = ifindex;
+    mr.mr_type    = PACKET_MR_PROMISC;
+    if (::setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof mr) < 0)
+        std::fprintf(stderr, "bridge: WARNING could not set promiscuous mode on %s: %s\n",
+                     iface.c_str(), std::strerror(errno));
+
+    // Bring the link up. No address: this is a wire, not a host.
+    char cmd[256];
+    std::snprintf(cmd, sizeof cmd, "ip link set %s up mtu %d 2>/dev/null", iface.c_str(), mtu);
+    runCmd(cmd);
+
+    std::fprintf(stderr, "bridge: AF_PACKET on %s (ifindex %d, promiscuous, mtu %d)\n",
+                 iface.c_str(), ifindex, mtu);
+    return fd;
+}
+
 // ── TUN ───────────────────────────────────────────────────────────────────
 static int tunOpen(const std::string& name, int mtu) {
     int fd = ::open("/dev/net/tun", O_RDWR);
@@ -306,6 +381,8 @@ struct Stats {
     std::atomic<uint64_t> tx_stall_us_total{0};// time blocked writing to the DAC
     std::atomic<uint64_t> rx_short{0};         // reads not equal to a full packet
     std::atomic<uint64_t> tun_tx_drop{0}, tun_rx_drop{0};
+    // Frames too large for the framing layer, dropped rather than truncated.
+    std::atomic<uint64_t> tx_oversize{0};
 };
 Stats g_stats;
 std::atomic<bool> g_run{true};
@@ -315,7 +392,9 @@ std::atomic<bool> g_run{true};
 static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
     Framer framer;
     uint32_t seq = 0;
-    std::vector<uint8_t> pkt(static_cast<size_t>(o.mtu));
+    // Room for a whole Ethernet frame in raw mode, so an oversize frame is seen
+    // and counted rather than silently arriving pre-truncated by the read.
+    std::vector<uint8_t> pkt(o.raw_eth ? 2048u : static_cast<size_t>(o.mtu));
 
     auto send = [&](const uint8_t* p, size_t n, uint8_t flags) {
         std::vector<uint8_t> wire =
@@ -368,6 +447,15 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
 
         ssize_t n = ::read(tun_fd, pkt.data(), pkt.size());
         if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
+        // A frame larger than the framing layer can carry must be DROPPED, not
+        // truncated. An Ethernet frame is up to 1514 bytes and MAX_PAYLOAD is
+        // 1400, so with --raw-eth this is reachable with ordinary traffic; a
+        // truncated frame would arrive corrupt and be blamed on the radio.
+        // Counted so the cause is visible rather than inferred from loss.
+        if (static_cast<size_t>(n) > MAX_PAYLOAD) {
+            g_stats.tx_oversize.fetch_add(1);
+            continue;
+        }
         if (send(pkt.data(), static_cast<size_t>(n), 0)) {
             g_stats.tx_pkts.fetch_add(1);
             g_stats.tx_bytes.fetch_add(static_cast<uint64_t>(n));
@@ -483,7 +571,7 @@ int main(int argc, char** argv) {
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); usage(); return 2; }
     }
-    if (o.local.empty() || o.peer.empty()) { usage(); return 2; }
+    if (!o.raw_eth && (o.local.empty() || o.peer.empty())) { usage(); return 2; }
     if (o.mtu > static_cast<int>(MAX_PAYLOAD)) {
         std::fprintf(stderr, "bridge: mtu %d exceeds MAX_PAYLOAD %zu; a packet that "
                              "large cannot be framed and would be dropped silently\n",
@@ -547,9 +635,11 @@ int main(int argc, char** argv) {
                  (int)g_tx_pid, (int)g_rx_pid, nbuf);
     }
 
-    int tun_fd = tunOpen(o.iface, o.mtu);
+    int tun_fd = o.raw_eth ? packetOpen(o.iface, o.mtu) : tunOpen(o.iface, o.mtu);
     if (tun_fd < 0) { ::close(tx_fd); ::close(rx_fd); return 1; }
-    if (!tunConfigure(o)) { ::close(tun_fd); ::close(tx_fd); ::close(rx_fd); return 1; }
+    // Only the TUN path needs addressing; an AF_PACKET bridge deliberately has
+    // no IP of its own.
+    if (!o.raw_eth && !tunConfigure(o)) { ::close(tun_fd); ::close(tx_fd); ::close(rx_fd); return 1; }
 
     std::thread tx(txLoop, tun_fd, tx_fd, std::cref(o));
     std::thread rx(rxLoop, tun_fd, rx_fd, std::cref(o));
@@ -595,14 +685,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "bridge: cpu decode %.1f%% now / %.1f%% avg (max %llu us/pkt) | "
             "rx gap max %llu us, short %llu | tx stall %llu ms | "
-            "tun drops tx %llu rx %llu\n",
+            "tun drops tx %llu rx %llu | oversize %llu\n",
             busy_win, busy,
             (unsigned long long)g_stats.decode_us_max.load(),
             (unsigned long long)g_stats.rx_gap_us_max.load(),
             (unsigned long long)g_stats.rx_short.load(),
             (unsigned long long)(g_stats.tx_stall_us_total.load() / 1000),
             (unsigned long long)g_stats.tun_tx_drop.load(),
-            (unsigned long long)g_stats.tun_rx_drop.load());
+            (unsigned long long)g_stats.tun_rx_drop.load(),
+            (unsigned long long)g_stats.tx_oversize.load());
         if (busy_win > 70.0)
             std::fprintf(stderr,
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"
