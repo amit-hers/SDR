@@ -184,3 +184,23 @@ if (( SZ > LIMIT )); then
   rm -f "$OUT"; exit 1
 fi
 echo "wrote $OUT: $SZ B ($((100*SZ/LIMIT))% of the qspi-linux partition), $NCFG configurations"
+
+# HARD LIMIT: writes past the 16 MB flash boundary CORRUPT THE START OF mtd3.
+# The QSPI part is a w25q256 (32 MB) and addressing above 16 MB needs the
+# Extended Address Register, which the driver cannot read ("spi-nor spi1.0:
+# failed to read ear reg"). mtd3 spans 0x200000..0x2000000, so it straddles the
+# boundary: an image large enough to cross it has its high writes aliased back
+# over the low addresses, and flashcp then reports
+#     File does not seem to match flash data. First mismatch at 0x00000000
+# while still exiting 0. The board is left unbootable and it looks like a bad
+# kernel. Measured: a 12.4 MB image verifies; a 29.6 MB one does not.
+SZ=$(stat -c%s "$OUT")
+LIMIT=$((14 * 1024 * 1024))
+if (( SZ > LIMIT )); then
+  echo "ERROR: $OUT is $SZ B, over the $((LIMIT/1024/1024)) MB limit for mtd3." >&2
+  echo "       Writes past the 16 MB flash boundary corrupt the start of the" >&2
+  echo "       partition and flashcp will report success anyway. Shrink the" >&2
+  echo "       ramdisk (the ADI one is 5.6 MB against tezuka's 21 MB), or flash" >&2
+  echo "       over DFU from u-boot, which does not use this driver path." >&2
+  exit 1
+fi
