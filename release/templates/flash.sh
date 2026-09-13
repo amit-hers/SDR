@@ -288,9 +288,50 @@ if [[ $PERSIST -eq 0 ]]; then
   [[ "$ST" == "operating" ]] || die "fpga_manager reports state '$ST' after load."
 else
   step 86 "Writing firmware to qspi-linux"
-  ssh_d 'flashcp -v /tmp/pluto.frm /dev/mtd3' >/dev/null 2>&1 \
+  # flashcp exits 0 even when its OWN verification reports a mismatch, so the
+  # output has to be read, not just the status. Discarding it hid a corrupted
+  # write once already: the first sign was the board refusing to boot.
+  FLASH_OUT=$(ssh_d 'flashcp -v /tmp/pluto.frm /dev/mtd3' 2>&1) \
     || die "flashcp to /dev/mtd3 failed. The device may be mid-write; do NOT power it off.
-Re-run this command before rebooting."
+Re-run this command before rebooting.
+$FLASH_OUT"
+  case "$FLASH_OUT" in
+    *"does not seem to match"*|*[Mm]ismatch*|*"erification failed"*)
+      die "flashcp reported a VERIFICATION FAILURE (it still exited 0):
+$FLASH_OUT
+Do NOT power the device off; re-run this command." ;;
+  esac
+
+  step 87 "Verifying flash by independent readback"
+  # Independent of flashcp: hash what is actually in the flash.
+  WANT=$(md5sum "$BUNDLE/boot/pluto.frm" | cut -d' ' -f1)
+  GOT=$(ssh_d "dd if=/dev/mtd3 bs=4096 count=\$(( ($FRM_SZ + 4095) / 4096 )) 2>/dev/null \
+               | head -c $FRM_SZ | md5sum" 2>/dev/null | cut -d' ' -f1 | tr -d '\r')
+  [[ "$GOT" == "$WANT" ]] || die "Flash readback does not match the image.
+  expected $WANT
+  read     $GOT
+Do NOT power the device off; re-run this command."
+
+  step 88 "Updating u-boot fit_size"
+  # u-boot reads exactly ${fit_size} bytes of the FIT out of QSPI -- the vendor
+  # updater (/sbin/update.sh) sets it on every firmware write. Left stale, a
+  # release LARGER than its predecessor is read truncated and the board boots
+  # the old kernel or nothing, with the flash itself verifying perfectly.
+  printf '/dev/mtd1 0x0000 0x20000 0x10000\n' | ssh_d 'cat > /etc/fw_env.config' 2>/dev/null
+  CUR_BOOTCMD=$(ssh_d 'fw_printenv -n bootcmd 2>/dev/null' 2>/dev/null | tr -d '\r')
+  case "$CUR_BOOTCMD" in
+    ""|*bootp*nfsroot*)
+      # Blank, or the generic netboot stub, means the environment in mtd1 failed
+      # its CRC and these tools are reporting their OWN defaults. Writing that
+      # back would replace u-boot's built-in environment with the stub and leave
+      # the board unbootable, so refuse and say so loudly.
+      printf '       WARNING: u-boot environment in mtd1 is unreadable (bad CRC).\n'
+      printf '                fit_size was NOT updated. If this image is larger\n'
+      printf '                than the one it replaces, the board may not boot it.\n' ;;
+    *)
+      ssh_d "fw_setenv fit_size $(printf '%X' "$FRM_SZ")" >/dev/null 2>&1 \
+        || die "fw_setenv fit_size failed." ;;
+  esac
 fi
 
 step 87 "Syncing filesystem"
