@@ -566,6 +566,11 @@ int main(int argc, char** argv) {
         else if (a == "--pkt")     o.pkt     = std::atoi(next("--pkt").c_str());
         else if (a == "--idle-ms") o.idle_ms = std::atoi(next("--idle-ms").c_str());
         else if (a == "--route")   o.route   = next("--route");
+        // --raw-eth names the NIC and selects the AF_PACKET backend. The option
+        // was documented in usage() and honoured everywhere below, but never
+        // parsed, so it was rejected as unknown and the backend was
+        // unreachable from the command line.
+        else if (a == "--raw-eth") { o.iface = next("--raw-eth"); o.raw_eth = true; }
         else if (a == "--forward") o.forward = true;
         else if (a == "--stats")   o.stats_s = std::atoi(next("--stats").c_str());
         else if (a == "-h" || a == "--help") { usage(); return 0; }
