@@ -1,12 +1,14 @@
 # Boot 6.12 over JTAG when a Pluto is plugged in.
 #
-# The guard that stops this looping: a board running 6.12 derives a unique USB
-# serial from the SPI-NOR UniqueID, so it reports one; on 5.10 the attribute is
-# ABSENT entirely (not empty -- it does not exist in sysfs). So match "serial is
-# absent or empty" with != "?*"; ATTR{serial}=="" does NOT work, because udev
-# cannot match an attribute it cannot read.
+# NO serial condition here, deliberately. udev fails ANY ATTR test -- == or !=
+# -- when the attribute does not exist, and on 5.10 the USB serial attribute is
+# absent from sysfs entirely. So "ATTR{serial}!=\"?*\"" never matches either, and
+# there is no udev-level way to say "serial is absent".
+#
+# The loop guard therefore lives in the script: a board already running 6.12
+# DOES report a serial (derived from the SPI-NOR UniqueID), so it skips. Without
+# that check a successful boot re-enumerates and retriggers this forever.
 #
 # RUN+= must return promptly -- udev kills the process group when the handler
-# returns -- so the real work is handed to a systemd unit.
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0456", ATTR{idProduct}=="b673", ATTR{serial}!="?*", \
-  TAG+="systemd", ENV{SYSTEMD_WANTS}+="pluto-autoboot612.service"
+# returns -- so the work is handed to a systemd unit.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0456", ATTR{idProduct}=="b673", TAG+="systemd", ENV{SYSTEMD_WANTS}+="pluto-autoboot612.service"
