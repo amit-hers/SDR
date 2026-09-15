@@ -287,6 +287,31 @@ if [[ $PERSIST -eq 0 ]]; then
   ST=$(ssh_d 'cat /sys/class/fpga_manager/fpga0/state' 2>/dev/null)
   [[ "$ST" == "operating" ]] || die "fpga_manager reports state '$ST' after load."
 else
+  step 84 "Checking that Linux can actually address the flash"
+  # Linux's view of this QSPI chip cannot be taken on trust. On at least one
+  # firmware combination (ADI 5.10 kernel + Pluto+ DTB) mtd3 read back EXACTLY
+  # what was written, byte for byte, while the board went on booting the OLD
+  # image -- because the mapping Linux writes through is not the one u-boot
+  # boots from. A readback hash cannot detect that: it compares the broken path
+  # against itself and always agrees.
+  #
+  # mtd0 holds the FSBL+u-boot the board demonstrably boots, so it MUST start
+  # with the Zynq boot header: 0xEAFFFFFE fill, then AA995566 (width detection)
+  # and "XNLX" at 0x20. If that is not there, Linux is not reading where it
+  # thinks it is, and nothing written through mtd is trustworthy.
+  BOOTHDR=$(ssh_d 'dd if=/dev/mtd0 bs=1 count=40 2>/dev/null | hexdump -v -e "1/1 \"%02x\""' 2>/dev/null | tr -d '\r\n ')
+  if [[ "$BOOTHDR" != *"665599aa"* ]]; then
+    die "Linux cannot address this flash correctly -- refusing to write.
+
+/dev/mtd0 must begin with the Zynq boot header (AA995566 'XNLX' at 0x20); it reads:
+  ${BOOTHDR:0:80}
+
+Writing would appear to succeed and verify perfectly while changing nothing the
+board actually boots. Use DFU, or a kernel whose spi-nor drives this chip
+correctly. See the linux-flash-access-is-broken note."
+  fi
+  echo "         mtd0 carries a valid Zynq boot header; flash addressing looks sane"
+
   step 86 "Writing firmware to qspi-linux"
   # flashcp exits 0 even when its OWN verification reports a mismatch, so the
   # output has to be read, not just the status. Discarding it hid a corrupted
