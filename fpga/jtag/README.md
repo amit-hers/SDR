@@ -69,3 +69,14 @@ A locally built 6.12 kernel DOES boot on this hardware:
 reaching L2 cache init, Zynq clocks, timers and SMP bring-up. That disproves
 the theory that our kernel builds were bad -- the fault is in the flash boot
 path, not the build.
+
+## boot612.sh
+
+`fpga/jtag/boot612.sh` wraps the whole sequence. Set `SDR_SCRATCH` to the
+directory holding `kbuild612/` and `rd612/`, power-cycle the board first, and
+run it. It is NOT persistent -- a power cycle returns the board to flash.
+
+It exists because nothing written from Linux changes what these boards boot:
+ADI's own USB-drive update path was run end to end and the board still came up
+on 5.10 after a power cycle. Until DFU or the u-boot console is available, this
+is the only way to run 6.12 on the hardware.
