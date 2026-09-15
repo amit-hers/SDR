@@ -47,9 +47,10 @@ set s [arm mrc 15 0 1 0 0]
 arm mcr 15 0 1 0 0 [expr {\$s & ~((1<<0)|(1<<2)|(1<<12))}]
 # Watchdog: 10 s, reset-on-timeout. Nothing feeds it once Linux is halted.
 mww 0xF8005000 0x00ABC000
-# L2C-310: u-boot cleans and disables it before entering Linux.
-mww 0xF8F0207C 0x0000FFFF
-mww 0xF8F02100 0x00000000
+# NOTE: no L2C-310 disable here, deliberately. Cleaning and disabling L2 looked
+# like the right thing (u-boot does it), but the ONE boot that actually
+# succeeded did not do it, and every attempt after it was added failed. Evidence
+# over theory: leave L2 alone.
 load_image $KERNEL 0x00008000 bin
 load_image $DTB    0x02000000 bin
 load_image $RD     0x02200000 bin
@@ -64,13 +65,41 @@ sleep 20000
 shutdown
 OCDEOF
 
+# Success is NOT "a Pluto is present" -- the board that triggered this is
+# already present, so that check passes even when nothing was booted. A board
+# running 6.12 reports a USB serial derived from the SPI-NOR UniqueID; 5.10
+# leaves the attribute absent entirely. That is the only reliable marker.
+running_612() {
+  local d s
+  for d in /sys/bus/usb/devices/1-*; do
+    [[ -f "$d/idVendor" ]] || continue
+    [[ "$(cat "$d/idVendor" 2>/dev/null)" == "0456" ]] || continue
+    s=$(cat "$d/serial" 2>/dev/null || true)
+    [[ -n "$s" ]] && return 0
+  done
+  return 1
+}
+
+if running_612; then
+  echo "board already reports a serial -- it is already running 6.12; nothing to do"
+  exit 0
+fi
+
 for a in $(seq 1 "$ATTEMPTS"); do
   echo "=== attempt $a/$ATTEMPTS ==="
-  sudo openocd -f "$OCD" -f "$SEQ" 2>&1 | grep -E "kernel=|Error: (data|Target)" | sed 's/^/  /'
-  for i in $(seq 1 10); do
+  OUT=$(sudo openocd -f "$OCD" -f "$SEQ" 2>&1)
+  echo "$OUT" | grep -E "kernel=|Error" | sed 's/^/  /'
+  # If openocd could not reach the cable at all, say so plainly rather than
+  # letting the loop below time out and look like a failed boot.
+  if ! grep -q "kernel=" <<<"$OUT"; then
+    echo "  openocd did not load the images -- is the JTAG cable connected?"
+    echo "  (the FT4232H must be present, and channel A released from ftdi_sio)"
+    exit 2
+  fi
+  for i in $(seq 1 12); do
     sleep 4
-    if [[ -d /sys/bus/usb/devices/1-8 || -d /sys/bus/usb/devices/1-6 ]]; then
-      echo "  BOOTED -- board enumerated"
+    if running_612; then
+      echo "  BOOTED -- board reports a serial, so 6.12 is running"
       echo "  find it with: scripts/pluto_netns.sh setup, then ssh root@192.168.2.17"
       echo "  (6.12 derives a UNIQUE MAC from the SPI-NOR serial, so the"
       echo "   duplicate-MAC namespace workaround is not needed on it)"
