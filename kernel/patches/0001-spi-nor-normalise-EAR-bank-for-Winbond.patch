@@ -1,0 +1,37 @@
+diff --git a/drivers/mtd/spi-nor/core.c b/drivers/mtd/spi-nor/core.c
+index b189543bf..2d6dc03ab 100644
+--- a/drivers/mtd/spi-nor/core.c
++++ b/drivers/mtd/spi-nor/core.c
+@@ -3173,6 +3173,32 @@ static int spi_nor_set_addr_nbytes(struct spi_nor *nor)
+ 				dev_warn(nor->dev, "failed to read ear reg\n");
+ 			else
+ 				nor->curbank = status & EAR_SEGMENT_MASK;
++
++			/*
++			 * read_ear() only knows Spansion, Micron, Macronix and
++			 * PMC, and returns -EINVAL for anything else -- Winbond
++			 * included -- without ever addressing the chip. curbank
++			 * then keeps its zero-initialised value while the
++			 * hardware EAR holds whatever the previous stage left.
++			 * spi_nor_write_ear() short-circuits on
++			 * "ear == nor->curbank", so the register is never
++			 * programmed and every 3-byte access silently lands in
++			 * the wrong 16 MiB bank.
++			 *
++			 * Measured on the W25Q256 fitted here (JEDEC EF 40 19):
++			 * EAR was 1, so mtd0 offset 0 read physical 0x01000000
++			 * and a firmware write to mtd3 landed at 0x01200000 --
++			 * verified byte-for-byte on readback, because the read
++			 * was shifted by the same amount, while u-boot went on
++			 * booting the untouched image at physical 0x00200000.
++			 *
++			 * Do not trust a read that cannot succeed: drive the
++			 * hardware to bank 0 and let the cache follow it.
++			 */
++			nor->curbank = (u16)~0;
++			if (spi_nor_write_ear(nor, 0))
++				dev_warn(nor->dev,
++					 "failed to normalise EAR to bank 0\n");
+ 		} else if (of_property_match_string(np_spi, "compatible",
+ 						    "xlnx,xps-spi-2.00.a") >= 0) {
+ 			nor->addr_nbytes = 3;
