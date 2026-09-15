@@ -80,3 +80,25 @@ It exists because nothing written from Linux changes what these boards boot:
 ADI's own USB-drive update path was run end to end and the board still came up
 on 5.10 after a power cycle. Until DFU or the u-boot console is available, this
 is the only way to run 6.12 on the hardware.
+
+## Hotplug boot (udev)
+
+`fpga/jtag/udev/` boots 6.12 automatically when a Pluto is plugged in. A replug
+is exactly the state `boot612.sh` needs -- a freshly power-cycled board running
+its flash kernel -- so hotplug is the right trigger.
+
+    sudo fpga/jtag/udev/install.sh install /path/to/scratch
+    sudo touch /etc/pluto-autoboot612.enabled      # arm
+    sudo rm    /etc/pluto-autoboot612.enabled      # disarm
+    sudo fpga/jtag/udev/install.sh remove
+
+Installing does not arm it: a rule that reprograms a radio the moment it is
+plugged in should be opt-in. Log goes to /var/log/pluto-autoboot612.log.
+
+**The loop guard.** A board running 6.12 reports a NON-EMPTY USB serial (it
+derives one from the SPI-NOR UniqueID, which 5.10 never exposes), so the rule
+matches `ATTR{serial}==""` and the script re-checks it after settling. Without
+that, a successful boot re-enumerates, retriggers the rule, and loops forever.
+
+udev kills the process group when its handler returns, so the rule only tags the
+device for a systemd unit; the actual work runs there with a 300 s timeout.

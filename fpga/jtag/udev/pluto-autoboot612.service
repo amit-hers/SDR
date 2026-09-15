@@ -1,0 +1,9 @@
+[Unit]
+Description=Boot 6.12 into a freshly plugged Pluto over JTAG
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pluto-autoboot612.sh
+# The board can take a while; do not let systemd kill it mid-flash.
+TimeoutStartSec=300
