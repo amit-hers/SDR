@@ -40,21 +40,33 @@ FIT_CRC=0
 RAW=""
 if [[ "$MODE" == program ]]; then
     [[ -s "$IMG" ]] || { echo "usage: $0 program IMAGE.frm" >&2; exit 1; }
-    # A .frm is the FIT followed by a 33-byte md5 trailer. u-boot reads exactly
-    # fit_size bytes, so the trailer is not part of what goes into flash --
-    # writing it would leave 33 bytes of non-FIT data past the image.
+    # How long is the image? Ask the FIT, do not assume.
+    #
+    # A .frm MAY be a FIT followed by a 33-byte md5 trailer, and subtracting 33
+    # unconditionally is wrong: the images built here are bare FITs whose file
+    # size already equals totalsize, so the subtraction silently chopped the
+    # last 33 bytes off the FDT. It still wrote and verified cleanly -- the
+    # programmer faithfully stores whatever it is handed -- and the lost bytes
+    # were trailing padding, so the result would probably have booted while not
+    # being a byte-for-byte clone of the reference unit.
+    #
+    # totalsize is a big-endian u32 at offset 4 of the FDT header and is the
+    # authoritative length. Anything past it is a trailer and is not written:
+    # u-boot reads exactly fit_size bytes, so a trailer in flash is dead weight
+    # past the image.
     TOTAL=$(stat -c%s "$IMG")
-    if head -c 4 "$IMG" | od -An -tx1 | tr -d ' \n' | grep -qi '^d00dfeed$'; then
-        FIT_LEN=$(( TOTAL - 33 ))
-    else
-        echo "not a FIT (no d00dfeed magic at offset 0): $IMG" >&2; exit 1
+    head -c 4 "$IMG" | od -An -tx1 | tr -d ' \n' | grep -qi '^d00dfeed$' \
+        || { echo "not a FIT (no d00dfeed magic at offset 0): $IMG" >&2; exit 1; }
+    FIT_LEN=$(( 16#$(od -An -tx1 -j4 -N4 "$IMG" | tr -d ' \n') ))
+    if (( FIT_LEN > TOTAL )); then
+        echo "FIT totalsize $FIT_LEN exceeds file size $TOTAL: $IMG" >&2; exit 1
     fi
     RAW=$(mktemp /tmp/fit.XXXXXX.bin)
     trap 'rm -f "$RAW"' EXIT
     head -c "$FIT_LEN" "$IMG" > "$RAW"
     FIT_CRC=$(python3 -c "import zlib,sys;print(zlib.crc32(open(sys.argv[1],'rb').read())&0xffffffff)" "$RAW")
     printf 'image   : %s\n' "$IMG"
-    printf 'fit_len : %d B (trailer of %d B not written)\n' "$FIT_LEN" "$(( TOTAL - FIT_LEN ))"
+    printf 'fit_len : %d B from FDT totalsize (%d trailing B not written)\n' "$FIT_LEN" "$(( TOTAL - FIT_LEN ))"
     printf 'crc32   : 0x%08X\n' "$FIT_CRC"
 fi
 
@@ -100,6 +112,14 @@ cat <<OCDEOF
 mww $(printf '0x%08X' $(( MB + 0x0C ))) $FIT_LEN
 mww $(printf '0x%08X' $(( MB + 0x10 ))) $TARGET
 mww $(printf '0x%08X' $(( MB + 0x14 ))) $FIT_CRC
+OCDEOF
+# Read the inputs BACK before resuming. A mailbox write that does not land
+# leaves whatever the previous run put there, and the programmer then runs to
+# a clean 0xD00D success against the WRONG length -- which is indistinguishable
+# from a correct run unless the inputs are echoed here, before anything is
+# erased.
+cat <<OCDEOF
+echo "  mailbox in: fit_len=[format %d [lindex [read_memory $(printf '0x%08X' $(( MB + 0x0C ))) 32 1] 0]] target=[format 0x%08X [lindex [read_memory $(printf '0x%08X' $(( MB + 0x10 ))) 32 1] 0]] expect_crc=[format 0x%08X [lindex [read_memory $(printf '0x%08X' $(( MB + 0x14 ))) 32 1] 0]]"
 reg cpsr 0x000001d3
 reg pc 0x04000000
 resume
@@ -128,4 +148,4 @@ OCDEOF
 } > "$SEQ"
 
 echo "== openocd =="
-openocd -f "$OCD" -f "$SEQ" 2>&1 | sed 's/^/  /'
+stdbuf -oL -eL openocd -f "$OCD" -f "$SEQ" 2>&1 | stdbuf -oL sed 's/^/  /'
