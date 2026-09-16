@@ -1,0 +1,13 @@
+# Appliance configuration. Copy to /mnt/jffs2/bridge.conf to enable autostart.
+# Absent, the radio boots and does nothing -- deliberately opt-in, so a
+# misconfiguration cannot leave a board unreachable with no way back.
+MODE=raw-eth          # raw-eth (transparent Ethernet) | tun (routed IP)
+IFACE=eth0
+SAMPLE_RATE=3840000
+FREQUENCY=434000000
+DIFF_MODE=1
+STATS_S=30
+# TUN mode only:
+# LOCAL_IP=10.7.0.1
+# PEER_IP=10.7.0.2
+# TUN_IFACE=sdr0
