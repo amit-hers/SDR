@@ -28,6 +28,37 @@ log() { printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)s" "$*" >> "$LOG"; }
 [ -x "$BRIDGE" ] || { log "no $BRIDGE"; exit 1; }
 [ -d "$TOOLS" ] || { log "no $TOOLS (modem bring-up scripts missing)"; exit 1; }
 
+# Wait for the IIO devices before touching anything.
+#
+# At boot this runs from autorun.sh the moment the bitstream is loaded, which
+# is earlier than the AD9361 and the fabric DMA cores finish probing. Running
+# the bring-up against devices that are not there yet fails in the silent way
+# described above -- the modem is left unconfigured and the bridge spins on a
+# dead datapath -- and by hand the race never shows, because by then probing
+# finished minutes ago.
+#
+# Wait by NAME. The index is not stable: the stock rootfs has been seen to
+# renumber these, and a script that hardcodes an index eventually addresses the
+# wrong core.
+wait_iio() {
+    _want=$1; _tries=0
+    while [ "$_tries" -lt 60 ]; do
+        for _d in /sys/bus/iio/devices/iio:device*; do
+            [ -r "$_d/name" ] || continue
+            [ "$(cat "$_d/name" 2>/dev/null)" = "$_want" ] && return 0
+        done
+        _tries=$((_tries+1)); sleep 1
+    done
+    return 1
+}
+for _dev in ad9361-phy cf-ad9361-dds-core-lpc cf-ad9361-lpc; do
+    if ! wait_iio "$_dev"; then
+        log "timed out after 60s waiting for IIO device '$_dev'; not starting"
+        exit 1
+    fi
+done
+log "IIO devices present"
+
 # Refuse to start a second instance.
 #
 # Two bridges on one interface both capture promiscuously and both transmit,
