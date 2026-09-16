@@ -51,6 +51,10 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <linux/if_packet.h>
+// Present in the kernel since 4.20; the userspace header may predate it.
+#ifndef PACKET_IGNORE_OUTGOING
+#define PACKET_IGNORE_OUTGOING 23
+#endif
 #include <linux/if_ether.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -261,13 +265,65 @@ static int packetOpen(const std::string& iface, int mtu) {
         std::fprintf(stderr, "bridge: WARNING could not set promiscuous mode on %s: %s\n",
                      iface.c_str(), std::strerror(errno));
 
+    // Do NOT capture the frames this process itself injects.
+    //
+    // An ETH_P_ALL socket is delivered outbound frames too (sll_pkttype ==
+    // PACKET_OUTGOING), so every packet decoded off the radio and written to
+    // this interface came straight back in and was transmitted again. On a
+    // two-unit link that is an unconditional loop: A sends a frame, B injects
+    // it on its own wire, B's own capture socket sees that injection and sends
+    // it back to A, forever. It is self-sustaining -- it needs no broadcast
+    // traffic to start and does not decay, because every lap is regenerated at
+    // full power by the modem.
+    //
+    // This is not the protocol filtering rejected above. Nothing addressed to
+    // anyone is dropped; only this process's own echo is, and no peer can ever
+    // legitimately need that. The direction comes from the kernel, so there is
+    // no source-MAC heuristic to get wrong and frames that genuinely repeat a
+    // MAC still cross.
+    const int ignore_outgoing = 1;
+    if (::setsockopt(fd, SOL_PACKET, PACKET_IGNORE_OUTGOING,
+                     &ignore_outgoing, sizeof ignore_outgoing) < 0)
+        std::fprintf(stderr, "bridge: WARNING could not ignore outgoing frames on %s: %s\n"
+                             "bridge:         (needs kernel 4.20+) -- injected frames will loop\n",
+                     iface.c_str(), std::strerror(errno));
+
     // Bring the link up. No address: this is a wire, not a host.
+    //
+    // The MTU has to be set with the link DOWN. macb rejects SIOCSIFMTU on a
+    // running interface with EBUSY, and combining both in one "ip link set up
+    // mtu N" leaves the MTU untouched while the command still reports success
+    // under 2>/dev/null. The interface then sits at 1500 while this code
+    // believes it is at MAX_PAYLOAD, so a full-size 1514-byte frame from an
+    // attached camera or PC arrives, exceeds the payload limit and is counted
+    // as oversize and dropped -- silently, and only for the largest frames,
+    // which is the traffic a video feed is mostly made of.
     char cmd[256];
-    std::snprintf(cmd, sizeof cmd, "ip link set %s up mtu %d 2>/dev/null", iface.c_str(), mtu);
+    std::snprintf(cmd, sizeof cmd, "ip link set %s down 2>/dev/null", iface.c_str());
+    runCmd(cmd);
+    std::snprintf(cmd, sizeof cmd, "ip link set %s mtu %d 2>/dev/null", iface.c_str(), mtu);
+    runCmd(cmd);
+    std::snprintf(cmd, sizeof cmd, "ip link set %s up 2>/dev/null", iface.c_str());
     runCmd(cmd);
 
+    // Report what the interface ACTUALLY carries, not what was asked for.
+    // Printing the requested value is how the failure above stayed invisible.
+    int actual_mtu = -1;
+    {
+        char path[128];
+        std::snprintf(path, sizeof path, "/sys/class/net/%s/mtu", iface.c_str());
+        if (FILE* f = std::fopen(path, "r")) {
+            if (std::fscanf(f, "%d", &actual_mtu) != 1) actual_mtu = -1;
+            std::fclose(f);
+        }
+    }
     std::fprintf(stderr, "bridge: AF_PACKET on %s (ifindex %d, promiscuous, mtu %d)\n",
-                 iface.c_str(), ifindex, mtu);
+                 iface.c_str(), ifindex, actual_mtu);
+    if (actual_mtu > mtu)
+        std::fprintf(stderr,
+                     "bridge: WARNING %s mtu is %d but the radio carries %d; frames larger\n"
+                     "bridge:         than that will be counted oversize and dropped\n",
+                     iface.c_str(), actual_mtu, mtu);
     return fd;
 }
 

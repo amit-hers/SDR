@@ -38,7 +38,21 @@ if ! command -v "$XC" >/dev/null; then
 fi
 
 echo "== ARMv7 build (the one that ships) =="
-"$XC" -O2 -std=c++17 -Wall -Wextra -static -I "$ROOT/include" -pthread \
+# Dynamic glibc, static libstdc++ -- NOT fully static.
+#
+# The only writable persistent storage on the board is mtd2, a 896 KB jffs2.
+# A fully static binary is 542 KB, and because jffs2 keeps obsolete nodes until
+# it can garbage-collect, rewriting one repeatedly leaves far less free space
+# than the file listing suggests -- the write then stops short and leaves a
+# TRUNCATED binary behind with no error from cat or cp. Linking glibc
+# dynamically brings this to 120 KB, which fits with room to spare.
+#
+# libstdc++ stays static because the board's rootfs does not ship it; libc.so.6
+# (Buildroot glibc 2.41) and ld-linux-armhf.so.3 are both present. Keep the
+# toolchain's glibc no newer than the board's, since the symbol versions a
+# binary records must exist at run time.
+"$XC" -O2 -std=c++17 -Wall -Wextra -static-libstdc++ -static-libgcc \
+    -I "$ROOT/include" -pthread \
     -o "$OUT" "${SOURCES[@]}"
 file "$OUT" 2>/dev/null || true
 echo "   ok: $OUT"

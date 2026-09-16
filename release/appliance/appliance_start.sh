@@ -10,7 +10,7 @@
 # modem and the AD936x BEFORE starting the bridge.
 set -u
 CONF=/mnt/jffs2/bridge.conf
-TOOLS=/root/sdr-tools
+TOOLS=/mnt/jffs2/tools
 BRIDGE=/mnt/jffs2/sdr_bridge
 LOG=/tmp/appliance.log
 
@@ -27,6 +27,24 @@ log() { printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)s" "$*" >> "$LOG"; }
 
 [ -x "$BRIDGE" ] || { log "no $BRIDGE"; exit 1; }
 [ -d "$TOOLS" ] || { log "no $TOOLS (modem bring-up scripts missing)"; exit 1; }
+
+# Refuse to start a second instance.
+#
+# Two bridges on one interface both capture promiscuously and both transmit,
+# so every frame crosses the radio twice and the receiver sees duplicates of
+# traffic that was never duplicated. Identify them by executable rather than by
+# a pattern match on the command line: a pattern searched for is also present
+# in the searcher's own argv, so pkill/grep on the name kills the shell doing
+# the killing.
+for d in /proc/[0-9]*; do
+    [ "${d#/proc/}" = "$$" ] && continue
+    exe=$(readlink "$d/exe" 2>/dev/null) || continue
+    case "$exe" in
+        */sdr_bridge*)
+            log "bridge already running (pid ${d#/proc/}); not starting another"
+            exit 0 ;;
+    esac
+done
 
 log "bring-up: fs=$SAMPLE_RATE lo=$FREQUENCY diff=$DIFF_MODE"
 sh "$TOOLS/tx_fabric.sh" "$SAMPLE_RATE" "$FREQUENCY" "$DIFF_MODE" >>"$LOG" 2>&1
