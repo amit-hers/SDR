@@ -244,7 +244,34 @@ frees space that `rm` alone does not.
 
 ---
 
-## 8. Verifying a unit
+## 8. Two-unit acceptance
+
+`tests/phase8/acceptance.py` drives the real product path -- Host-A, RJ45,
+UNIT-A, RF, UNIT-B, RJ45, Host-B -- and reports byte-exactness, a protocol
+matrix and a frame-size matrix from the bridges' own counters plus what
+actually arrives at Host-B.
+
+    sudo tests/phase8/acceptance.py --a-iface <nicA> --b-iface <nicB> \
+         --unit-a 192.168.2.17 --unit-b 192.168.2.1
+
+It refuses to run until it has proved the radio is the **only** path between
+the two ports. It does this by disabling UNIT-B's demodulator and confirming an
+injected frame then cannot arrive; if one still does, a non-RF path exists and
+every result below it would be meaningless.
+
+That check exists because it has already happened: with the two RJ45 ports
+cabled to each other, UNIT-A emitted 12 ARP broadcasts and UNIT-B received
+exactly 12 while its modem was off entirely. Such a setup also forms a loop
+once both bridges run -- A transmits over RF, B injects onto the wire, and
+copper carries it straight back to A. `PACKET_IGNORE_OUTGOING` does not prevent
+this: it suppresses a bridge's own emissions, not the peer's arriving over
+copper.
+
+Each unit needs its own host endpoint. Traffic generated **on** a board cannot
+exercise the link, because the bridge deliberately ignores frames the board
+itself emits -- 400 pings out of UNIT-A's own eth0 produce `tx 0 pkts`.
+
+## 9. Verifying a unit
 
 ```bash
 # management is on usb0; eth0 carries no IP
