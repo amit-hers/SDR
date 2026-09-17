@@ -85,3 +85,4 @@ baselines/
 # Firmware images are release assets, not repo content.
 *.frm
 !tezuka-plutoplus-*/*.frm
+!uboot/u-boot.elf

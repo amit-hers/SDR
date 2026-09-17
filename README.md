@@ -17,6 +17,29 @@ FPGA, and device-recovery components.
 > programmable logic and has been measured at **7.85 Mbit/s of framed goodput
 > at 0.00% frame loss** over the air — see [Fabric modem](docs/fabric-modem.md).
 
+## Appliance mode: two boards as a transparent cable
+
+The productised use of this repository. Two boards carry Ethernet between an
+RJ45 on each end, with no software installed on the attached computers and
+nobody logged in:
+
+```
+PC/camera --RJ45-- [UNIT-A] ~~~ 434 MHz ~~~ [UNIT-B] --RJ45-- PC/drone
+```
+
+Modulation and demodulation run in the **FPGA fabric**, not in software, so the
+ARM only frames and deframes — ~3.5 % CPU. Management stays on `usb0`; `eth0`
+carries no IP because it is a wire, not a host.
+
+Start here:
+
+- [Appliance mode](docs/appliance.md) — system design, boot sequence, installing
+  it, configuration, statistics, and the traps
+- [Flashing over JTAG](docs/flashing.md) — putting the golden image on a board
+  with OpenOCD, and why a stock board cannot flash itself
+- [Golden image](release/golden/README.md) — the released artifacts and their
+  checksums
+
 ## What is implemented
 
 - `bridge`: bidirectional Layer-2 transport through a Linux TAP device.
@@ -192,6 +215,10 @@ build/src/tools/sdr-live-stats
 - [Fabric modem](docs/fabric-modem.md) — the PL QPSK modem: measured throughput,
   register map, bring-up order, measurement tools, and the traps that produced
   more than one false conclusion
+- [Appliance mode](docs/appliance.md) — running two boards as a standalone
+  Ethernet-over-RF cable: design, boot sequence, configuration, pitfalls
+- [Flashing over JTAG](docs/flashing.md) — OpenOCD procedure, the memory and
+  flash map, the mailbox contract, and why `flashcp` lies on a stock board
 - [Deployment](docs/DEPLOYMENT.md) — building, tagging, flashing, verifying,
   rolling back, and what the ABI fields mean
 - [Roadmap](docs/roadmap.md) — recommended next steps and future features
@@ -207,10 +234,15 @@ build/src/tools/sdr-live-stats
   two hosts. Review the generated config before relying on it; it is a
   convenience wrapper, not a deployment system. For the radio firmware itself,
   see [Deployment](docs/DEPLOYMENT.md), which is versioned and verified.
-- The fabric modem's transmit path has not yet been proven end to end over the
-  air, so live video over it is unvalidated. The modulator itself is verified
-  (correlation 1.0000 against the host modulator) — see
+- The fabric modem's transmit path is proven board to board: exact payload
+  recovery over coax, 7.85 Mbit/s of framed goodput, and 0.15% frame loss over
+  the air across 5305 frames. What has **not** been run yet is the full
+  RJ45-to-RF-to-RJ45 acceptance with both units in appliance mode, and live
+  video over it remains unvalidated — see
   [Fabric modem](docs/fabric-modem.md#status-of-the-fabric-transmit-path).
+- A run of identical bytes is not a safe payload. 200 B of `0x00` measured
+  25.87% frame loss against 0.11% for random data, and there is no scrambler in
+  the fabric path — the scrambling is done in software and is not optional.
 
 ## License
 

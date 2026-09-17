@@ -9,9 +9,19 @@ sidesteps the flash entirely.
     JTAG chain: zynq_pl.bs 0x23727093 (XC7Z020, silicon rev 3.0)
                 zynq.cpu   0x4ba00477 (Cortex-A9 DAP)
 
-`ftdi_sio` claims all four FT4232H channels, so release channel A first:
+`ftdi_sio` claims all four FT4232H channels, so release channel A first.
+Resolve the port rather than hardcoding it -- the debugger and the radios have
+swapped USB ports more than once, and a stale port number unbinds nothing while
+appearing to succeed:
 
-    echo 1-7:1.0 | sudo tee /sys/bus/usb/drivers/ftdi_sio/unbind
+    PORT=$(for p in /sys/bus/usb/devices/[0-9]*-[0-9]*; do
+             grep -qi debug "$p/product" 2>/dev/null && basename "$p" && break
+           done)
+    echo "${PORT}:1.0" | sudo tee /sys/bus/usb/drivers/ftdi_sio/unbind
+
+> This file covers booting a kernel into DDR. To **write the flash**, see
+> [Flashing over JTAG](../../docs/flashing.md) and `program_fit.sh` beside this
+> file.
 
 ## Five things that each cost a boot attempt
 
