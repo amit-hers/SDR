@@ -22,7 +22,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OCD="$ROOT/fpga/jtag/zynq.cfg"
-UBOOT="$ROOT/diagnostic-u-boot-build/u-boot"
+# The built programmer ELF. The 257 MB u-boot clone it came out of is not kept
+# (see uboot/README.md for the patch and how to rebuild); this copy is.
+UBOOT="$ROOT/uboot/u-boot.elf"
+[[ -s "$UBOOT" ]] || UBOOT="$ROOT/diagnostic-u-boot-build/u-boot"
 
 MB=0x03000000          # mailbox
 FITA=0x08000000        # image staged here

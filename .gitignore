@@ -81,3 +81,7 @@ baselines/
 # Release artifacts. Bundles are large and reproducible from a tag; the golden
 # copy lives in SDR_GOLDEN_MIRROR, not in git.
 /out/
+
+# Firmware images are release assets, not repo content.
+*.frm
+!tezuka-plutoplus-*/*.frm
