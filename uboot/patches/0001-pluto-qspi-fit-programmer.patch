@@ -1,0 +1,320 @@
+diff --git a/arch/arm/Makefile b/arch/arm/Makefile
+index 6a07cd178e..1c0f5aa569 100644
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -14,10 +14,9 @@ arch-$(CONFIG_CPU_ARM926EJS)	=-march=armv5te
+ arch-$(CONFIG_CPU_ARM946ES)	=-march=armv5te
+ arch-$(CONFIG_CPU_SA1100)	=-march=armv4
+ arch-$(CONFIG_CPU_PXA)		=
+-arch-$(CONFIG_CPU_ARM1136)	=-march=armv5
++arch-$(CONFIG_CPU_ARM1136)	=-march=armv5te
+ arch-$(CONFIG_CPU_ARM1176)	=-march=armv5t
+-arch-$(CONFIG_CPU_V7)		=$(call cc-option, -march=armv7-a, \
+-				 $(call cc-option, -march=armv7, -march=armv5))
++arch-$(CONFIG_CPU_V7)		=-march=armv7-a
+ arch-$(CONFIG_ARM64)		=-march=armv8-a
+ 
+ # Evaluate arch cc-option calls now
+diff --git a/common/main.c b/common/main.c
+index 2116a9e0a2..35501ed469 100644
+--- a/common/main.c
++++ b/common/main.c
+@@ -11,10 +11,217 @@
+ #include <autoboot.h>
+ #include <cli.h>
+ #include <console.h>
++#include <spi.h>
++#include <spi_flash.h>
++#include <asm/io.h>
++#include <u-boot/sha256.h>
+ #include <version.h>
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
++int spi_flash_cmd_read(struct spi_slave *spi, const u8 *cmd,
++		       size_t cmd_len, void *data, size_t data_len);
++#ifdef CONFIG_PLUTO_QSPI_DIAGNOSTIC
++extern int pluto_qspi_allow_bank_change;
++#endif
++
++#ifdef CONFIG_PLUTO_QSPI_DIAGNOSTIC
++/*
++ * Pluto+ QSPI FIT programmer, driven over JTAG with no console. The host loads
++ * the raw FIT into DDR, fills the mailbox input fields, and resumes here.
++ *
++ * VERIFICATION USES A DIFFERENT PATH FROM THE WRITE, DELIBERATELY. u-boot is
++ * built with CONFIG_SPI_FLASH_BAR, so it drives the bank register itself. If a
++ * write landed in the wrong 16 MiB bank, reading it back through the same
++ * driver would consult the same bank and agree with itself -- which is exactly
++ * how Linux convinced us that flashcp had worked while the board kept booting
++ * the old image. The readback therefore uses the dedicated 4-byte-address Read
++ * Data command (0x13), which carries the full physical address and ignores the
++ * bank register.
++ */
++#define PLUTO_PROG_MAILBOX_ADDR	0x03000000UL
++#define PLUTO_PROG_FIT_ADDR	0x08000000UL
++#define PLUTO_PROG_RB_ADDR	0x0A000000UL
++#define PLUTO_PROG_TARGET	0x00200000UL
++#define PLUTO_PROG_MTD3_END	0x02000000UL
++
++struct pluto_prog_mailbox {
++	u32 magic0, magic1, version;
++	u32 in_fit_len, in_target;
++	u32 in_expect_crc;	/* host fills; erase is refused unless it matches */
++	u32 status;
++	s32 probe_result;
++	u32 flash_size, erase_size, sector_size;
++	u32 src_crc32, erase_len;
++	s32 erase_result, write_result, read_result;
++	u32 rb_crc32;
++	u8  jedec_id[6];
++	u8  ear_raw, pad;
++	u8  old_head[32];
++	u8  new_head[32];
++};
++
++static int pluto_prog_cmd(struct spi_flash *flash, u8 opcode,
++			  void *result, size_t result_len)
++{
++	int ret = spi_claim_bus(flash->spi);
++
++	if (!ret) {
++		ret = spi_flash_cmd_read(flash->spi, &opcode, 1,
++					 result, result_len);
++		spi_release_bus(flash->spi);
++	}
++	return ret;
++}
++
++static int pluto_prog_read4(struct spi_flash *flash, u32 offset,
++			    void *buffer, size_t len)
++{
++	u8 cmd[5] = { 0x13, offset >> 24, offset >> 16, offset >> 8, offset };
++	int ret = spi_claim_bus(flash->spi);
++
++	if (!ret) {
++		ret = spi_flash_cmd_read(flash->spi, cmd, sizeof(cmd),
++					 buffer, len);
++		spi_release_bus(flash->spi);
++	}
++	return ret;
++}
++
++static void pluto_qspi_diagnostic(void)
++{
++	volatile struct pluto_prog_mailbox *mb =
++		(void *)PLUTO_PROG_MAILBOX_ADDR;
++	struct spi_flash *flash;
++	u32 fit_len, target, erase_len;
++	int ret;
++
++	mb->magic0 = 0x47525050;
++	mb->magic1 = 0x31305744;
++	mb->version = 2;	/* 2 = programmer with CRC gate and bank opt-in */
++	mb->status = 1;
++	flush_cache(PLUTO_PROG_MAILBOX_ADDR, sizeof(*mb));
++
++	fit_len = mb->in_fit_len;
++	target  = mb->in_target;
++
++	if (target != PLUTO_PROG_TARGET ||
++	    fit_len > (PLUTO_PROG_MTD3_END - PLUTO_PROG_TARGET)) {
++		mb->status = 0xe000;
++		goto stop;
++	}
++
++	/*
++	 * Silence the Zynq watchdog HERE, not just over JTAG before resume:
++	 * u-boot re-enables it during init, and erasing this region in 4 KiB
++	 * sectors runs for minutes -- far past the 10 s timeout. A reset in the
++	 * middle of an erase is exactly what must not happen.
++	 */
++	writel(0x00ABC000, 0xF8005000);
++
++	flash = spi_flash_probe(0, 0, 50000000, 0);
++	if (!flash) {
++		mb->probe_result = -1;
++		mb->status = 0xe001;
++		goto stop;
++	}
++	mb->probe_result = 0;
++	mb->flash_size   = flash->size;
++	mb->erase_size   = flash->erase_size;
++	mb->sector_size  = flash->sector_size;
++	pluto_prog_cmd(flash, 0x9f, (void *)mb->jedec_id, sizeof(mb->jedec_id));
++	pluto_prog_cmd(flash, 0xc8, (void *)&mb->ear_raw, 1);
++	mb->status = 2;
++
++	if (flash->size != PLUTO_PROG_MTD3_END || flash->erase_size == 0) {
++		mb->status = 0xe002;
++		goto stop;
++	}
++
++	mb->src_crc32 = crc32(0, (const unsigned char *)PLUTO_PROG_FIT_ADDR,
++			      fit_len);
++
++	/*
++	 * Nothing is erased unless the image sitting in DDR is still exactly
++	 * what the host loaded. The host halts Linux to load it, but openocd
++	 * lets the target run again between invocations, so the kernel gets a
++	 * window in which it could reuse that memory. Committing a corrupted
++	 * image would verify perfectly against itself afterwards, so check it
++	 * here, before the erase, against a CRC the host computed from the file.
++	 */
++	if (mb->in_expect_crc && mb->src_crc32 != mb->in_expect_crc) {
++		mb->status = 0xe008;
++		goto stop;
++	}
++	pluto_prog_read4(flash, target, (void *)mb->old_head,
++			 sizeof(mb->old_head));
++
++	/*
++	 * fit_len == 0 is an inspection run: report geometry and what is
++	 * currently at the target, and stop well before any erase. Used to
++	 * check the flash after an interrupted program.
++	 */
++	if (fit_len == 0) {
++		mb->status = 0x0100;
++		goto stop;
++	}
++
++	erase_len = (fit_len + flash->erase_size - 1) &
++		    ~(flash->erase_size - 1);
++	mb->erase_len = erase_len;
++	if (target + erase_len > PLUTO_PROG_MTD3_END) {
++		mb->status = 0xe003;
++		goto stop;
++	}
++
++	/*
++	 * The part is sitting with EAR=1 while the FIT region lives in bank 0,
++	 * so the driver must move the bank exactly once. Open that window only
++	 * around the erase and write, and close it before the verification read
++	 * so the readback cannot silently follow a bank change of its own.
++	 */
++	mb->status = 3;
++	pluto_qspi_allow_bank_change = 1;
++	ret = spi_flash_erase(flash, target, erase_len);
++	mb->erase_result = ret;
++	if (ret) {
++		pluto_qspi_allow_bank_change = 0;
++		mb->status = 0xe004;
++		goto stop;
++	}
++
++	mb->status = 4;
++	ret = spi_flash_write(flash, target, fit_len,
++			      (const void *)PLUTO_PROG_FIT_ADDR);
++	mb->write_result = ret;
++	pluto_qspi_allow_bank_change = 0;
++	if (ret) {
++		mb->status = 0xe005;
++		goto stop;
++	}
++
++	mb->status = 5;
++	ret = pluto_prog_read4(flash, target, (void *)PLUTO_PROG_RB_ADDR,
++			       fit_len);
++	mb->read_result = ret;
++	if (ret) {
++		mb->status = 0xe006;
++		goto stop;
++	}
++	memcpy((void *)mb->new_head, (const void *)PLUTO_PROG_RB_ADDR,
++	       sizeof(mb->new_head));
++	mb->rb_crc32 = crc32(0, (const unsigned char *)PLUTO_PROG_RB_ADDR,
++			     fit_len);
++	mb->status = (mb->rb_crc32 == mb->src_crc32) ? 0xd00d : 0xe007;
++
++stop:
++	flush_cache(PLUTO_PROG_RB_ADDR, 0x01000000);
++	flush_cache(PLUTO_PROG_MAILBOX_ADDR, sizeof(*mb));
++	for (;;)
++		;
++}
++#endif
++
+ /*
+  * Board-specific Platform code can reimplement show_boot_progress () if needed
+  */
+@@ -53,6 +260,10 @@ void main_loop(void)
+ 
+ 	cli_init();
+ 
++#ifdef CONFIG_PLUTO_QSPI_DIAGNOSTIC
++	pluto_qspi_diagnostic();
++#endif
++
+ 	run_preboot_environment_command();
+ 
+ #if defined(CONFIG_UPDATE_TFTP)
+diff --git a/drivers/mtd/spi/spi_flash.c b/drivers/mtd/spi/spi_flash.c
+index f167684e22..98218fb838 100644
+--- a/drivers/mtd/spi/spi_flash.c
++++ b/drivers/mtd/spi/spi_flash.c
+@@ -162,6 +162,11 @@ static int write_cr(struct spi_flash *flash, u8 wc)
+ #endif
+ 
+ #ifdef CONFIG_SPI_FLASH_BAR
++#ifdef CONFIG_PLUTO_QSPI_DIAGNOSTIC
++/* Set only by the FIT programmer, around the erase/write it must perform. */
++int pluto_qspi_allow_bank_change;
++#endif
++
+ static int spi_flash_write_bar(struct spi_flash *flash, u32 offset)
+ {
+ 	u8 cmd, bank_sel, upage_curr;
+@@ -186,6 +191,20 @@ static int spi_flash_write_bar(struct spi_flash *flash, u32 offset)
+ 	}
+ 
+ 	cmd = flash->bank_write_cmd;
++#ifdef CONFIG_PLUTO_QSPI_DIAGNOSTIC
++	/*
++	 * A diagnostic READ must never change EAR/BAR state, so refuse by
++	 * default. The programmer has to move the bank exactly once -- the
++	 * part powers up with EAR=1 here, and the FIT region at physical
++	 * 0x00200000 lives in bank 0 -- so it opts in explicitly for the
++	 * duration of the erase/write, and clears the flag afterwards.
++	 */
++	if (!pluto_qspi_allow_bank_change) {
++		printf("SF diagnostic: refusing bank change %u -> %u\n",
++		       flash->bank_curr, bank_sel);
++		return -EPERM;
++	}
++#endif
+ 	ret = spi_flash_write_common(flash, &cmd, 1, &bank_sel, 1);
+ 	if (ret < 0) {
+ 		debug("SF: fail to write bank register\n");
+@@ -1097,9 +1116,15 @@ static int spi_flash_set_qeb_winspan(struct spi_flash *flash)
+ 	) {
+ 		debug("SF: winspan: QEB is already set\n");
+ 	} else {
++#ifdef CONFIG_PLUTO_QSPI_DIAGNOSTIC
++		/* Never write the Winbond configuration/status register. */
++		debug("SF diagnostic: leaving QEB unchanged\n");
++		return 0;
++#else
+ 		ret = write_cr(flash, STATUS_QEB_WINSPAN);
+ 		if (ret < 0)
+ 			return ret;
++#endif
+ 	}
+ 
+ 	return ret;
+diff --git a/include/configs/zynq-common.h b/include/configs/zynq-common.h
+index fd50caf450..73aa55ae7a 100644
+--- a/include/configs/zynq-common.h
++++ b/include/configs/zynq-common.h
+@@ -224,6 +224,12 @@
+ /* enable preboot to be loaded before CONFIG_BOOTDELAY */
+ #define CONFIG_PREBOOT
+ 
++/*
++ * RAM-only Pluto QSPI diagnostic.  This build is never installed in flash.
++ * It reads one MiB at QSPI offset zero and leaves the result in DDR for JTAG.
++ */
++#define CONFIG_PLUTO_QSPI_DIAGNOSTIC
++
+ 
+ /* Initial bootstrap JTAG u-boot
+ #define CONFIG_ENV_IS_NOWHERE
