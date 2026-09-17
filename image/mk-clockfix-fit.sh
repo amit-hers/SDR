@@ -4,8 +4,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE="${1:-$ROOT/pluto612c.frm}"
-OUTPUT="${2:-$ROOT/pluto612c-clockfix.frm}"
+# Both arguments are required now. The former defaults named images that lived
+# loose in the repo root; those are gone -- the released image is
+# release/golden/pluto-datalink-6.12-golden.frm, and silently defaulting to a
+# path that no longer exists produces a confusing failure well after the point
+# where the mistake was made.
+SOURCE="${1:?usage: mk-clockfix-fit.sh <source.frm> <output.frm>}"
+OUTPUT="${2:?usage: mk-clockfix-fit.sh <source.frm> <output.frm>}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
