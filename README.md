@@ -215,6 +215,8 @@ build/src/tools/sdr-live-stats
 - [Fabric modem](docs/fabric-modem.md) — the PL QPSK modem: measured throughput,
   register map, bring-up order, measurement tools, and the traps that produced
   more than one false conclusion
+- [Open issues](docs/OPEN-ISSUES.md) — what is still blocked, unexplained or
+  merely constrained, with the evidence, and the earlier conclusions now corrected
 - [Appliance mode](docs/appliance.md) — running two boards as a standalone
   Ethernet-over-RF cable: design, boot sequence, configuration, pitfalls
 - [Flashing over JTAG](docs/flashing.md) — OpenOCD procedure, the memory and
