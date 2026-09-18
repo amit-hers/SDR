@@ -85,6 +85,35 @@ Note also that A -> B is *worse* at the lower sample rate, which is the opposite
 of the usual expectation and worth explaining before any rate is chosen for the
 product.
 
+## The asymmetry measured at the demodulator input
+
+Each receiver's demodulator input was captured while the other board
+transmitted, and correlated against the host reference:
+
+| direction | rms | abs(DC) | IQ imbalance | correlation | CFO |
+|---|---|---|---|---|---|
+| A -> B | 3698 | 485 | 1.066 | **0.9714** | +1.0 kHz |
+| B -> A | 4963 | 481 | 0.940 | **0.9930** | 0.0 kHz |
+
+Two effects, both pushing the same way:
+
+- **Level.** A -> B arrives ~2.6 dB weaker (rms 3698 against 4963), consistent
+  with the RSSI readings of 84.25 vs 81.25 dB.
+- **Waveform quality.** A -> B correlates 0.9714 against the reference where
+  B -> A reaches 0.9930, so the signal reaching UNIT-B is measurably more
+  distorted, not merely smaller.
+
+Ruled out as causes: DC offset is equal on both (485 vs 481), and IQ imbalance
+is within about 7% of unity in both directions. The +1.0 kHz on A -> B is at the
+resolution of the 1 kHz search grid and should not be read as significant on its
+own.
+
+This is consistent with an antenna or placement asymmetry rather than a fault:
+nothing here identifies UNIT-A's transmitter or UNIT-B's receiver as defective.
+Before treating it as a hardware difference, swap the antennas between the two
+boards and repeat -- if the weak direction follows the antenna, it is the
+antenna.
+
 ## Consequence for Phase 9
 
 **The DMA gap is 0 B.** Median, mean and p90 are all zero; the maximum seen is
