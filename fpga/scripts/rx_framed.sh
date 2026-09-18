@@ -1,6 +1,13 @@
 #!/bin/sh
 # Continuous framed reception at 434 MHz. Run after every PL reload.
+#   usage: rx_framed.sh [sample_rate_Hz] [diff_mode]
 FS=${1:-7680000}
+# diff_mode must MATCH the transmitter. tx_fabric.sh takes it as an argument, so
+# hardcoding 1 here meant `tx_fabric.sh <fs> <lo> 0` silently produced
+# mod=0 / dem=1 -- a combination the demodulator cannot decode, while every
+# register still reads healthy and the signal level looks fine. Observed in
+# practice: strong signal, balanced symbol statistics, and not one frame.
+DIFF=${2:-1}
 # A MISSING iio_lookup.sh is not a loud failure on busybox: `.` prints "can't
 # open" and CARRIES ON, leaving the device paths empty. `dd if= of=cap.bin`
 # then reads STDIN and blocks forever, which reads as a dead receiver -- it
@@ -22,7 +29,7 @@ echo slow_attack > $P/in_voltage0_gain_control_mode
 # overflow flag on the first sample -- the adapter has a stream sink that is not
 # yet draining and an ADC that cannot be told to wait -- and it never clears.
 devmem $((D+0x10)) 32 1             # demod enable
-devmem $((D+0x28)) 32 1             # diff_mode = 1, matching the transmitter
+devmem $((D+0x28)) 32 "$DIFF"       # diff_mode -- MUST match tx_fabric.sh's 3rd argument
 devmem $((D+0x00)) 32 0x81          # ap_start + auto_restart
 # 0x51, not 0x71: dfmt_type must be 0 on ADC core 10.03 or the demodulator input
 # rails at 12-bit full scale regardless of RF.
