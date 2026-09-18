@@ -69,6 +69,42 @@ rate for this sample rate.
 - **Analysis parameters.** Sync words absent from the raw bytes at every phase,
   so this is not a scoping or `txlen` error.
 
+## Second session: instrumenting the demodulator's input
+
+The RX IQ probe (`0x43C30000`, the demodulator's own input) was used to see
+whether the modulated signal reaches the demodulator at all. Three cases, each
+with a transmit feed in flight:
+
+| case | loopback | TX atten | probe words | non-zero | RSSI |
+|---|---|---|---|---|---|
+| dig0 | 1 | 0 dB | 2048 | **0** | 113.75 dB |
+| dig89 | 1 | -89 dB | 2048 | **0** | 114.75 dB |
+| rf0 | 0 | 0 dB | 2048 | **0** | 114.25 dB |
+
+The discriminator was deliberate: a **digital** loopback sits upstream of the RF
+chain, so attenuating the transmitter by 89 dB could not change what the
+receiver sees. Nothing changed between any of the three, which is consistent
+with the attribute being inert -- but it cannot be concluded from this, because
+the probe read zero in *every* case including plain RF.
+
+Two further things were eliminated along the way:
+
+- **The `dd` drain recipe in `iq_probe_read.sh`'s header does not work on 6.12.**
+  Raw `read()`/`write()` on `/dev/iio:*` does not program the DMA on this
+  kernel; the advice predates that. An undrained chain backpressures the
+  packetizer and every probe word reads zero -- indistinguishable from "no
+  signal", which is exactly the trap the header warns about. Draining with
+  `iio_readdev` instead still produced zeros, so the stall is not the cause.
+- **The probe peripherals are present in the golden bitstream.** Writing
+  `0xA5A50000` to `0x43C20000`, `0x43C30000` and `0x43C40000` reads back
+  unchanged, so an all-zero capture is not a missing peripheral. (They were
+  cleared to 0 afterwards.)
+
+So the demodulator's IQ input shows no activity while the transmitter is
+demonstrably feeding. That narrows the fault to the receive datapath between
+the ADC interface and the demodulator input, or to the probe's arming sequence
+-- and those two must be separated before anything else is attempted.
+
 ## What is not eliminated
 
 The receive lock itself. The transmitter emits and the receiver captures, but
