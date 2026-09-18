@@ -500,6 +500,7 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
     std::vector<uint8_t> pkt(o.raw_eth ? 2048u : static_cast<size_t>(o.mtu));
     std::vector<uint8_t> dma;
     dma.reserve(static_cast<size_t>(o.pkt) + MAX_PAYLOAD + 256);
+    bool burst_idle = true;
 
     auto append = [&](const uint8_t* p, size_t n, uint8_t flags) {
         std::vector<uint8_t> wire =
@@ -574,6 +575,11 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             if (o.idle_ms > 0) {
                 if (!fillAndFlush()) break;
             }
+            else {
+                // The next packet starts a new RF burst and needs acquisition
+                // training before its data, not after it.
+                burst_idle = true;
+            }
             continue;
         }
 
@@ -587,6 +593,17 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
         if (static_cast<size_t>(n) > MAX_PAYLOAD) {
             g_stats.tx_oversize.fetch_add(1);
             continue;
+        }
+        if (o.idle_ms == 0 && burst_idle) {
+            // A cold demodulator cannot decode a data frame placed at the very
+            // start of a burst. Thirty-two control-only DMA blocks give its AGC,
+            // timing and carrier loops time to settle. The peer drops these
+            // frames, then receives the following data block. Since the local
+            // transmitter becomes quiet afterwards, the peer can answer
+            // without same-frequency self-interference.
+            for (int i = 0; i < 32; ++i)
+                if (!fillAndFlush()) return;
+            burst_idle = false;
         }
         append(pkt.data(), static_cast<size_t>(n), 0);
         if (fillAndFlush()) {
