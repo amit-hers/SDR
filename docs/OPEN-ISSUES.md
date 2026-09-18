@@ -94,10 +94,19 @@ at 7.68 MS/s, while B -> A is 0.00% at both. Degrading at the LOWER sample rate
 is the opposite of the usual expectation and is unexplained. Decide the product
 rate only after it is understood.
 
-### 3.4 `tun drops tx 4`
+### 3.4 `tun drops tx 4` -- RESOLVED, was a reporting bug
 
-The bridge reports a constant small drop count in its statistics. Not
-investigated. Appears in every run.
+Not loss. The field mirrored the kernel's own
+`/sys/class/net/<iface>/statistics/tx_dropped`, which is cumulative since boot
+and counts drops from any source, so the board's pre-bridge history was being
+attributed to the bridge. Both units show it: 4 and 3 dropped against 8 and 3
+transmitted, all of it the local stack emitting before the interface was ready,
+and static ever since.
+
+Now baselined at bridge start and reported as a delta, and labelled with the
+actual interface rather than "tun" -- which was wrong in raw-eth mode and sent
+attention to the wrong device. Verified: kernel still reads 4 and 3, the bridge
+reports `eth0 drops tx 0 rx 0 (since start)` on both.
 
 ### 3.5 UNIT-B's flash is prefix-identical, not identical
 

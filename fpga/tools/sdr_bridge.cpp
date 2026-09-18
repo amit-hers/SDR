@@ -709,10 +709,24 @@ int main(int argc, char** argv) {
     uint64_t last_decode = 0;
     bool     warned_short = false;
     uint64_t last_short   = 0;
+    // Baseline the kernel's interface drop counters.
+    //
+    // They are cumulative since boot and count drops from ANY source, so
+    // reporting them raw attributes the board's own pre-bridge history to the
+    // bridge. Both units show it: 4 and 3 dropped against 8 and 3 transmitted,
+    // all of it the local stack emitting before the interface was ready, and
+    // static ever since. As a delta that reads 0, which is the truth about what
+    // the bridge dropped.
+    const uint64_t base_tx_drop = ifCounter(o.iface, "tx_dropped");
+    const uint64_t base_rx_drop = ifCounter(o.iface, "rx_dropped");
     while (g_run.load() && o.stats_s > 0) {
         std::this_thread::sleep_for(std::chrono::seconds(o.stats_s));
-        g_stats.tun_tx_drop.store(ifCounter(o.iface, "tx_dropped"));
-        g_stats.tun_rx_drop.store(ifCounter(o.iface, "rx_dropped"));
+        {
+            uint64_t t = ifCounter(o.iface, "tx_dropped");
+            uint64_t r = ifCounter(o.iface, "rx_dropped");
+            g_stats.tun_tx_drop.store(t > base_tx_drop ? t - base_tx_drop : 0);
+            g_stats.tun_rx_drop.store(r > base_rx_drop ? r - base_rx_drop : 0);
+        }
         std::fprintf(stderr,
             "bridge: tx %llu pkts / %llu B (idle %llu, err %llu) | "
             "rx %llu dma, %llu frames, %llu B (crcerr %llu, dup %llu, ctrl %llu) | "
@@ -746,12 +760,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "bridge: cpu decode %.1f%% now / %.1f%% avg (max %llu us/pkt) | "
             "rx gap max %llu us, short %llu | tx stall %llu ms | "
-            "tun drops tx %llu rx %llu | oversize %llu\n",
+            "%s drops tx %llu rx %llu (since start) | oversize %llu\n",
             busy_win, busy,
             (unsigned long long)g_stats.decode_us_max.load(),
             (unsigned long long)g_stats.rx_gap_us_max.load(),
             (unsigned long long)g_stats.rx_short.load(),
             (unsigned long long)(g_stats.tx_stall_us_total.load() / 1000),
+            o.iface.c_str(),
             (unsigned long long)g_stats.tun_tx_drop.load(),
             (unsigned long long)g_stats.tun_rx_drop.load(),
             (unsigned long long)g_stats.tx_oversize.load());
