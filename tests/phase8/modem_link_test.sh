@@ -21,7 +21,8 @@ FS=${FS:-7680000}
 LO=${LO:-434000000}
 DIFF=${DIFF:-1}
 TXATT=${TXATT:--20}
-REF=${REF:-/tmp/tx.bytes}          # 50800 B: 40 numbered frames from framed_link_test gen
+REF=${REF:-/tmp/tx.bytes}          # on the BOARD
+REF_HOST=${REF_HOST:-/tmp/tx.bytes}  # the same file on this host, for analysis          # 50800 B: 40 numbered frames from framed_link_test gen
 
 SSH=(sshpass -p analog ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
 on() { local h=$1; shift; timeout 180 "${SSH[@]}" "root@$h" "$*" </dev/null 2>/dev/null; }
@@ -30,12 +31,19 @@ on() { local h=$1; shift; timeout 180 "${SSH[@]}" "root@$h" "$*" </dev/null 2>/d
 identify() {
     local h=$1 name=$2
     local ser kern fpga abi rmv
-    ser=$(on "$h" 'cat /sys/bus/usb/devices/*/serial 2>/dev/null | head -1')
+    # The serial must come from the HOST's USB enumeration. Asking the board
+    # reads its own (empty) USB device tree -- it is a gadget, not a host -- so
+    # that path silently identifies every board as "".
+    local dev port
+    dev=$(ip route get "$h" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+    port=$(readlink -f "/sys/class/net/$dev/device" 2>/dev/null | grep -oE '[0-9]+-[0-9]+' | head -1)
+    ser=$(cat "/sys/bus/usb/devices/$port/serial" 2>/dev/null)
     kern=$(on "$h" 'uname -r')
     fpga=$(on "$h" 'devmem 0x43C50000 32')
     abi=$(on "$h"  'devmem 0x43C50008 32')
     rmv=$(on "$h"  'devmem 0x43C5000C 32')
-    printf '  %-7s ip=%-14s kernel=%s\n' "$name" "$h" "${kern:-UNREACHABLE}"
+    printf '  %-7s ip=%-14s iface=%s port=%s serial=%s\n' "$name" "$h" "${dev:-?}" "${port:-?}" "${ser:-EMPTY}"
+    printf '          kernel=%s\n' "${kern:-UNREACHABLE}"
     printf '          fpga_magic=%s abi=%s reg_map=%s\n' "$fpga" "$abi" "$rmv"
     [[ -n "$kern" ]] || { echo "  $name is not reachable"; return 1; }
     [[ "$fpga" == "0x5344524C" ]] || { echo "  $name has the wrong bitstream ($fpga)"; return 1; }
@@ -133,7 +141,7 @@ PY
     [[ -x /tmp/flt ]] && flt=/tmp/flt
     if [[ -x "$flt" ]]; then
         echo "  --- frame recovery ---"
-        "$flt" per "/tmp/link_${txname}_to_${rxname}.bin" "$ROOT/../tx.bytes" 50800 32768 2>/dev/null \
+        "$flt" per "/tmp/link_${txname}_to_${rxname}.bin" "$REF_HOST" 50800 32768 2>/dev/null \
           | tail -6 | sed 's/^/  /' || true
     fi
 }
