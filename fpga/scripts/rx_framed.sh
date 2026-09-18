@@ -30,6 +30,35 @@ echo slow_attack > $P/in_voltage0_gain_control_mode
 # yet draining and an ADC that cannot be told to wait -- and it never clears.
 devmem $((D+0x10)) 32 1             # demod enable
 devmem $((D+0x28)) 32 "$DIFF"       # diff_mode -- MUST match tx_fabric.sh's 3rd argument
+
+# Soft-reset the demodulator, WITH ITS OUTPUT DRAINED.
+#
+# Without this the core comes up stalled and stays there: mu_clamped rails
+# (0x7C-0xD0 observed), the symbol stream looks statistically healthy -- close
+# to 25% per symbol -- and NOT ONE frame decodes. Every register reads correct
+# and the signal can be 24 dB above noise, so it presents as an RF or framing
+# problem and is neither. After the reset mu_clamped sits at 0x02-0x04,
+# lock_count restarts, and the link runs at PER 0.00%.
+#
+# The drain is not optional. A stalled core ignores soft_reset while its output
+# is backpressured, so something must be emptying the RX DMA at the moment the
+# reset is pulsed. iio_readdev is used rather than dd because a raw read() on
+# /dev/iio:* does not program the DMA on 6.12 -- it blocks forever and holds the
+# device single-open, wedging it for everything afterwards.
+# iio_readdev wants the device NAME, not the sysfs path and not "iio:deviceN".
+# Passing either yields a 0-byte capture with no error.
+_rxname=$(cat "$IIO_RX/name" 2>/dev/null)
+setsid sh -c "iio_readdev -b 32768 $_rxname voltage0 voltage1 >/dev/null 2>&1" </dev/null &
+_drain=$!
+sleep 2
+devmem $((D+0x20)) 32 1
+sleep 1
+devmem $((D+0x20)) 32 0
+sleep 1
+kill -9 "$_drain" 2>/dev/null
+for _p in $(ps | grep '[i]io_readdev' | awk '{print $1}'); do kill -9 "$_p" 2>/dev/null; done
+sleep 1
+echo "# demod reset: lock=$(devmem $((D+0x18)) 32) mu_clamped=$(devmem $((D+0x30)) 32)"
 devmem $((D+0x00)) 32 0x81          # ap_start + auto_restart
 # 0x51, not 0x71: dfmt_type must be 0 on ADC core 10.03 or the demodulator input
 # rails at 12-bit full scale regardless of RF.
