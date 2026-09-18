@@ -63,6 +63,28 @@ including the transmitter's `mod_diff` against the receiver's `dem_diff`.
 | DMA gap median / max | 0 B / 1 B | 0 B / 0 B |
 | capture duty cycle | 100.0% | 100.0% |
 
+## Both sample rates work, and the link is asymmetric
+
+The appliance runs at 3.84 MS/s, not the 7.68 MS/s the link was first proven at,
+so it was measured at both. Payload mismatches are 0 in all four runs.
+
+| rate | A -> B | B -> A |
+|---|---|---|
+| 7.68 MS/s | PER 0.67%, CRC 24 | PER **0.00%**, CRC 0 |
+| 3.84 MS/s (appliance default) | PER 4.71%, CRC 83 | PER **0.00%**, CRC 0 |
+
+**The asymmetry is consistent and is not explained by level**: RSSI is 81-85 dB
+in every direction and run. B -> A is flawless at both rates while A -> B
+degrades, and degrades further at the lower rate. So either UNIT-A's transmitter
+or UNIT-B's receiver is the weaker end. That is a characterisation question for
+Phase 11 rather than a defect to chase now, but it should not be averaged away:
+a link quoted as "PER 0.00%" would be true of one direction and wrong about the
+other.
+
+Note also that A -> B is *worse* at the lower sample rate, which is the opposite
+of the usual expectation and worth explaining before any rate is chosen for the
+product.
+
 ## Consequence for Phase 9
 
 **The DMA gap is 0 B.** Median, mean and p90 are all zero; the maximum seen is
