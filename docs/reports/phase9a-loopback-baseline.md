@@ -146,6 +146,14 @@ zero margin, 10 dB or 20 dB of transmit attenuation killing it outright is
 expected rather than surprising. The original run succeeded marginally at about
 this level; small physical variations decide it either way.
 
+Expressed as signal-to-noise, which is the number that decides whether a
+demodulator can lock, it is starker still. With no transmitter the demodulator
+input reads **rms 242** -- that is the noise floor. The loopback reads rms 395,
+so the signal alone is about 312 and the **loopback SNR is roughly 2 dB**. The
+known-good level of 4465 corresponds to about **25 dB**. No QPSK demodulator
+locks at 2 dB, so the loopback was never close, and no amount of software
+would have changed that.
+
 **This is not a software problem and no software change should be made for it.**
 Reaching a usable baseline needs ~21 dB more signal at the demodulator: two
 boards with a real coax path and controlled attenuation, which is the Phase 8
