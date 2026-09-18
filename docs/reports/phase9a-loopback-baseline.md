@@ -105,6 +105,53 @@ demonstrably feeding. That narrows the fault to the receive datapath between
 the ADC interface and the demodulator input, or to the probe's arming sequence
 -- and those two must be separated before anything else is attempted.
 
+## RESOLVED: the chain works; the loopback signal is 21 dB too weak
+
+Probing with the receive chain properly drained changes the conclusion above.
+All three probes capture real data:
+
+| probe | status | non-zero | sample |
+|---|---|---|---|
+| TX IQ `0x43C20000` | `0x8000` done | 32/32 | `0x1226FBF6` |
+| RX IQ `0x43C30000` | `0x8000` done | 32/32 | `0xFEE80120` |
+| DAC pin `0x43C40000` | `0x1000` | 32/32 | `0xED720048` |
+
+**The receive datapath is fine and the demodulator is being fed IQ.** The
+earlier all-zero readings were caused by a stale `dd` of mine (pid 3375) still
+holding `/dev/iio:device3`: raw `read()` never programs the DMA on 6.12, so it
+blocked forever AND held the device single-open, making every later
+`iio_readdev` drain fail with `EBUSY (16)`. With no drain the DMA backpressures
+the packetizer and the demodulator input stalls -- the RX probe read
+`running=1, waddr=0`, which is "armed, saw no beats", not "no signal". Kill any
+`dd` on an IIO character device before concluding anything about the receive
+path.
+
+Reading the probe's STATUS word is what separated those cases. Earlier analysis
+filtered for lines starting with `0x` and discarded the `# status=` line, which
+is the only thing that distinguishes a capture that never armed from one that
+armed and saw nothing.
+
+**Measured demodulator input level**, 512 samples, transmit feed in flight,
+RX gain 73 dB, RSSI 110.5 dB:
+
+    rms 395, peak 1200
+    known-good reference (ADC fmt 0x51): rms 4465, peak 7648
+    shortfall: 11.3x amplitude = 21.1 dB   (peak 6.4x = 16.1 dB)
+
+So the single-board loopback delivers a signal **~21 dB below** the level at
+which this demodulator is characterised to work. That is why the baseline does
+not reproduce, and it is consistent with everything in the record: RSSI
+110.5 dB sits inside the 111-117 dB the original run reported, and with roughly
+zero margin, 10 dB or 20 dB of transmit attenuation killing it outright is
+expected rather than surprising. The original run succeeded marginally at about
+this level; small physical variations decide it either way.
+
+**This is not a software problem and no software change should be made for it.**
+Reaching a usable baseline needs ~21 dB more signal at the demodulator: two
+boards with a real coax path and controlled attenuation, which is the Phase 8
+arrangement anyway. As commit 7f77e83 put it, loopback proves the path exists
+and cannot characterise it.
+
 ## What is not eliminated
 
 The receive lock itself. The transmitter emits and the receiver captures, but
