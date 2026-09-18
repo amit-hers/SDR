@@ -213,6 +213,52 @@ static void selectDmaSource() {
     ::close(fd);
 }
 
+struct DemodStatus {
+    uint32_t lock_count = 0;
+    uint32_t mu_clamped = 0;
+    bool valid = false;
+};
+
+// Read the two diagnostics used to distinguish a live-but-stalled demodulator
+// from a dead DMA path.  Keep this separate from the data-plane mapping: a
+// failure to open /dev/mem must disable recovery, never stop the bridge.
+static DemodStatus demodStatus() {
+    DemodStatus s;
+    int fd = ::open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) return s;
+    const off_t base = 0x43C00000;
+    const size_t len = 0x1000;
+    void* m = ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, base);
+    if (m != MAP_FAILED) {
+        volatile uint32_t* r = static_cast<volatile uint32_t*>(m);
+        s.lock_count = r[0x18 / 4];
+        s.mu_clamped = r[0x30 / 4];
+        s.valid = true;
+        ::munmap(m, len);
+    }
+    ::close(fd);
+    return s;
+}
+
+// The receive thread and iio_readdev remain active while this pulse is issued,
+// so the demodulator output is drained.  That is essential: a backpressured
+// HLS core cannot observe its AXI-Lite soft_reset input.
+static bool demodSoftResetDrained() {
+    int fd = ::open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) return false;
+    const off_t base = 0x43C00000;
+    const size_t len = 0x1000;
+    void* m = ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, base);
+    if (m == MAP_FAILED) { ::close(fd); return false; }
+    volatile uint32_t* r = static_cast<volatile uint32_t*>(m);
+    r[0x20 / 4] = 1;
+    ::usleep(100 * 1000);
+    r[0x20 / 4] = 0;
+    ::munmap(m, len);
+    ::close(fd);
+    return true;
+}
+
 
 // ── AF_PACKET: carry Ethernet frames straight off the RJ45 ────────────────
 //
@@ -420,6 +466,7 @@ namespace {
 struct Stats {
     std::atomic<uint64_t> tx_pkts{0}, tx_bytes{0}, tx_idle{0}, tx_err{0};
     std::atomic<uint64_t> rx_dma{0}, rx_frames{0}, rx_bytes{0};
+    std::atomic<uint64_t> recoveries{0};
     std::atomic<uint64_t> rx_crcerr{0}, rx_dup{0}, rx_ctrl{0}, rx_self{0};
     std::atomic<uint64_t> off_hits[4]{};
 
@@ -451,8 +498,10 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
     // Room for a whole Ethernet frame in raw mode, so an oversize frame is seen
     // and counted rather than silently arriving pre-truncated by the read.
     std::vector<uint8_t> pkt(o.raw_eth ? 2048u : static_cast<size_t>(o.mtu));
+    std::vector<uint8_t> dma;
+    dma.reserve(static_cast<size_t>(o.pkt) + MAX_PAYLOAD + 256);
 
-    auto send = [&](const uint8_t* p, size_t n, uint8_t flags) {
+    auto append = [&](const uint8_t* p, size_t n, uint8_t flags) {
         std::vector<uint8_t> wire =
             // BW_5 is the nearest code to the 4 MHz RF bandwidth the bring-up
             // scripts set. The field is descriptive -- nothing in this path
@@ -460,10 +509,16 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             // using.
             framer.encode(p, n, flags, ModCode::QPSK, BwCode::BW_5,
                           o.node_id, seq++, nullptr, nullptr);
+        dma.insert(dma.end(), wire.begin(), wire.end());
+    };
+
+    auto flush = [&]() {
+        if (dma.size() < static_cast<size_t>(o.pkt)) return true;
         size_t done = 0;
         auto w0 = std::chrono::steady_clock::now();
-        while (done < wire.size() && g_run.load()) {
-            ssize_t w = ::write(tx_fd, wire.data() + done, wire.size() - done);
+        while (done < static_cast<size_t>(o.pkt) && g_run.load()) {
+            ssize_t w = ::write(tx_fd, dma.data() + done,
+                                static_cast<size_t>(o.pkt) - done);
             if (w < 0) {
                 if (errno == EINTR) continue;
                 g_stats.tx_err.fetch_add(1);
@@ -478,12 +533,34 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
         g_stats.tx_stall_us_total.fetch_add(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - w0).count()));
+        dma.erase(dma.begin(), dma.begin() + o.pkt);
+        return true;
+    };
+
+    // iio_writedev submits complete scan buffers. Small writes through its
+    // stdin pipe were consumed without producing non-zero samples at the
+    // fabric modulator (measured with the TX IQ probe). Always hand it one
+    // complete DMA block. Valid control frames fill idle space, preserving a
+    // continuous decodable stream instead of zero padding or arbitrary bytes.
+    auto fillAndFlush = [&]() {
+        static const uint8_t ka[16] = {0};
+        while (dma.size() < static_cast<size_t>(o.pkt)) {
+            append(ka, sizeof ka, FL_CTRL);
+            g_stats.tx_idle.fetch_add(1);
+        }
+        while (dma.size() >= static_cast<size_t>(o.pkt))
+            if (!flush()) return false;
         return true;
     };
 
     while (g_run.load()) {
         struct pollfd pfd { tun_fd, POLLIN, 0 };
-        int timeout = o.idle_ms > 0 ? o.idle_ms : 1000;
+        // A complete block is paced by iio_writedev/the DAC. Waiting idle_ms
+        // here as well creates a long RF-off gap after every block; measured
+        // receivers decode the first control burst and then lose acquisition.
+        // With keepalives enabled, poll without sleeping and immediately fill
+        // the next block. The blocking write supplies the required pacing.
+        int timeout = o.idle_ms > 0 ? 0 : 1000;
         int pr = ::poll(&pfd, 1, timeout);
         if (pr < 0) { if (errno == EINTR) continue; break; }
 
@@ -495,8 +572,7 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             // FL_CTRL marks it as not user data; the receive side drops it
             // rather than handing an empty packet to the kernel.
             if (o.idle_ms > 0) {
-                static const uint8_t ka[16] = {0};
-                if (send(ka, sizeof ka, FL_CTRL)) g_stats.tx_idle.fetch_add(1);
+                if (!fillAndFlush()) break;
             }
             continue;
         }
@@ -512,7 +588,8 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             g_stats.tx_oversize.fetch_add(1);
             continue;
         }
-        if (send(pkt.data(), static_cast<size_t>(n), 0)) {
+        append(pkt.data(), static_cast<size_t>(n), 0);
+        if (fillAndFlush()) {
             g_stats.tx_pkts.fetch_add(1);
             g_stats.tx_bytes.fetch_add(static_cast<uint64_t>(n));
         }
@@ -591,6 +668,13 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
 
         for (auto& f : frames) {
             g_stats.rx_frames.fetch_add(1);
+            // With coupled radios a unit can hear its own transmitter. Never
+            // inject that packet back into its TUN, and do not let it obscure
+            // a peer frame that happens to use the same sequence number.
+            if (f.node_id == o.node_id) {
+                g_stats.rx_self.fetch_add(1);
+                continue;
+            }
             // A keepalive is not user data; handing an empty or filler packet
             // to the kernel would be a bug visible only as junk on the wire.
             if (f.flags & FL_CTRL) { g_stats.rx_ctrl.fetch_add(1); continue; }
@@ -682,18 +766,16 @@ int main(int argc, char** argv) {
     tx_fd = spawnIio(tx_argv, true, &g_tx_pid);
     if (tx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_writedev\n"); return 1; }
 
-    const char* rx_argv[] = { "iio_readdev", "-b", nbuf,
-                              "cf-ad9361-lpc", "voltage0", "voltage1", nullptr };
-    rx_fd = spawnIio(rx_argv, false, &g_rx_pid);
-    if (rx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_readdev\n"); ::close(tx_fd); return 1; }
-
     // Give the writer time to open the buffer, then redo the source select it
-    // just undid. Order matters and is not recoverable afterwards: get it wrong
-    // and the DAC emits nothing while every register still reads healthy.
+    // just undid. Do not open RX yet. On this image, enabling both IIO buffers
+    // before the first TX transfer leaves the TX DMAC idle: its IRQ count does
+    // not advance and the fabric TX probe is all zero. Starting TX first and
+    // adding RX after a block is in flight was measured at 256/256 non-zero TX
+    // samples with both DMA IRQ counters advancing.
     ::usleep(3000 * 1000);
     selectDmaSource();
-    std::fprintf(stderr, "bridge: iio_writedev pid=%d iio_readdev pid=%d buffer=%s samples\n",
-                 (int)g_tx_pid, (int)g_rx_pid, nbuf);
+    std::fprintf(stderr, "bridge: iio_writedev pid=%d buffer=%s samples (RX deferred)\n",
+                 (int)g_tx_pid, nbuf);
     }
 
     int tun_fd = o.raw_eth ? packetOpen(o.iface, o.mtu) : tunOpen(o.iface, o.mtu);
@@ -703,12 +785,40 @@ int main(int argc, char** argv) {
     if (!o.raw_eth && !tunConfigure(o)) { ::close(tun_fd); ::close(tx_fd); ::close(rx_fd); return 1; }
 
     std::thread tx(txLoop, tun_fd, tx_fd, std::cref(o));
+
+    if (!o.dev_explicit) {
+        // txLoop immediately fills and submits one complete DMA block. Allow
+        // that transfer to start before enabling RX; see the ordering note
+        // above. This is initialization only, not steady-state pacing.
+        ::usleep(1000 * 1000);
+        char nbuf[32];
+        std::snprintf(nbuf, sizeof nbuf, "%d", o.pkt / 4);
+        const char* rx_argv[] = { "iio_readdev", "-b", nbuf,
+                                  "cf-ad9361-lpc", "voltage0", "voltage1", nullptr };
+        rx_fd = spawnIio(rx_argv, false, &g_rx_pid);
+        if (rx_fd < 0) {
+            std::fprintf(stderr, "bridge: could not start deferred iio_readdev\n");
+            g_run.store(false);
+            tx.join();
+            ::close(tun_fd); ::close(tx_fd);
+            return 1;
+        }
+        std::fprintf(stderr, "bridge: deferred iio_readdev pid=%d\n", (int)g_rx_pid);
+    }
     std::thread rx(rxLoop, tun_fd, rx_fd, std::cref(o));
 
     auto t_start = std::chrono::steady_clock::now();
     uint64_t last_decode = 0;
     bool     warned_short = false;
     uint64_t last_short   = 0;
+    uint64_t last_rx_dma  = g_stats.rx_dma.load();
+    uint64_t last_frames  = g_stats.rx_frames.load();
+    DemodStatus last_demod = demodStatus();
+    unsigned stalled_intervals = 0;
+    // Recovery is armed only after this process has decoded a real/control
+    // frame.  With no RF at power-up, noise may exercise the timing loop and
+    // increase mu_clamped; that alone must not cause periodic resets.
+    bool recovery_armed = false;
     // Baseline the kernel's interface drop counters.
     //
     // They are cumulative since boot and count drops from ANY source, so
@@ -730,7 +840,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "bridge: tx %llu pkts / %llu B (idle %llu, err %llu) | "
             "rx %llu dma, %llu frames, %llu B (crcerr %llu, dup %llu, ctrl %llu) | "
-            "offsets %llu/%llu/%llu/%llu\n",
+            "offsets %llu/%llu/%llu/%llu | recoveries %llu\n",
             (unsigned long long)g_stats.tx_pkts.load(),
             (unsigned long long)g_stats.tx_bytes.load(),
             (unsigned long long)g_stats.tx_idle.load(),
@@ -744,7 +854,48 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.off_hits[0].load(),
             (unsigned long long)g_stats.off_hits[1].load(),
             (unsigned long long)g_stats.off_hits[2].load(),
-            (unsigned long long)g_stats.off_hits[3].load());
+            (unsigned long long)g_stats.off_hits[3].load(),
+            (unsigned long long)g_stats.recoveries.load());
+
+        // ── Autonomous demodulator recovery ─────────────────────────────
+        // A stalled core was measured with RX DMA still advancing, no frames
+        // decoding, and mu_clamped rapidly increasing.  Require that exact
+        // combination for two reporting intervals.  One recovery attempt then
+        // disarms the monitor until a frame is decoded again, preventing an
+        // absent RF signal from producing a reset loop.
+        const uint64_t dma_now = g_stats.rx_dma.load();
+        const uint64_t frames_now = g_stats.rx_frames.load();
+        const uint64_t dma_delta = dma_now - last_rx_dma;
+        const uint64_t frame_delta = frames_now - last_frames;
+        DemodStatus demod_now = demodStatus();
+        if (frame_delta > 0) {
+            recovery_armed = true;
+            stalled_intervals = 0;
+        } else if (recovery_armed && demod_now.valid && last_demod.valid) {
+            const uint32_t mu_delta = demod_now.mu_clamped - last_demod.mu_clamped;
+            if (dma_delta >= 2 && mu_delta >= 32) ++stalled_intervals;
+            else stalled_intervals = 0;
+            if (stalled_intervals >= 2) {
+                if (demodSoftResetDrained()) {
+                    g_stats.recoveries.fetch_add(1);
+                    std::fprintf(stderr,
+                        "bridge: RECOVERY drained demod soft_reset "
+                        "(dma +%llu, frames +0, mu_clamped +%u, lock=%u)\n",
+                        (unsigned long long)dma_delta, mu_delta,
+                        demod_now.lock_count);
+                } else {
+                    std::fprintf(stderr,
+                        "bridge: WARNING recovery needed but /dev/mem reset failed\n");
+                }
+                recovery_armed = false;
+                stalled_intervals = 0;
+            }
+        } else {
+            stalled_intervals = 0;
+        }
+        last_rx_dma = dma_now;
+        last_frames = frames_now;
+        last_demod = demod_now;
 
         // ── Overrun verdict ──────────────────────────────────────────────
         // Printed as a conclusion, not as raw numbers. A reader who has to

@@ -83,6 +83,26 @@ void test_duplicates_are_dropped() {
     std::cout << "    duplicate seq suppressed (" << d.duplicates() << " dropped)\n";
 }
 
+// Sequence numbers are per-node. Two radios commonly start at seq zero at the
+// same time, so deduplicating on seq alone drops the peer's first frames after
+// a locally looped-back transmission.
+void test_same_seq_from_different_nodes_survives() {
+    Framer framer;
+    auto pa = makePayload(64, 1);
+    auto pb = makePayload(64, 2);
+    auto wa = framer.encode(pa, 0, ModCode::QPSK, BwCode::BW_5, 1, 0, nullptr, nullptr);
+    auto wb = framer.encode(pb, 0, ModCode::QPSK, BwCode::BW_5, 2, 0, nullptr, nullptr);
+
+    OffsetDeframer d;
+    auto a = d.pushPacket(wa.data(), wa.size());
+    auto b = d.pushPacket(wb.data(), wb.size());
+    assert(a.size() == 1 && b.size() == 1);
+    assert(a[0].node_id == 1 && b[0].node_id == 2);
+    assert(a[0].seq == 0 && b[0].seq == 0);
+    assert(a[0].payload == pa && b[0].payload == pb);
+    std::cout << "    equal seq from distinct node IDs preserved\n";
+}
+
 // Flags must survive, because the bridge decides whether a frame is user data
 // or a keepalive from FL_CTRL alone. Losing it would put filler on the TUN.
 void test_flags_survive() {
@@ -207,6 +227,7 @@ void run_offsets() {
     test_realign_is_inverse_of_delay();
     test_every_offset_recovers();
     test_duplicates_are_dropped();
+    test_same_seq_from_different_nodes_survives();
     test_flags_survive();
     test_corruption_rejected();
     test_phase_changes_between_packets();

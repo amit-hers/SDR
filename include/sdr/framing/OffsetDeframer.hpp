@@ -34,6 +34,7 @@
 namespace sdr {
 
 struct OffsetFrame {
+    uint32_t             node_id;
     uint32_t             seq;
     uint8_t              flags;
     std::vector<uint8_t> payload;
@@ -66,7 +67,7 @@ public:
                 // that does not need them.
                 auto r = d.push(s[i], nullptr, nullptr);
                 if (r) {
-                    got.push_back({r->seq, r->flags, std::move(r->payload)});
+                    got.push_back({r->node_id, r->seq, r->flags, std::move(r->payload)});
                     ++off_hits_[off];
                 }
             }
@@ -74,13 +75,16 @@ public:
         }
 
         // A frame can only be received once; two offsets reporting the same
-        // seq are the same frame seen twice, not two receptions.
+        // (node, seq) are the same frame seen twice, not two receptions.
+        // Sequence counters are local to each node, so seq alone incorrectly
+        // drops a peer frame whenever its counter matches our own transmitter.
         std::vector<OffsetFrame> out;
         for (auto& g : got) {
             bool dup = false;
-            for (uint32_t s : recent_) if (s == g.seq) { dup = true; break; }
+            for (const auto& s : recent_)
+                if (s.first == g.node_id && s.second == g.seq) { dup = true; break; }
             if (dup) { ++dups_; continue; }
-            recent_.push_back(g.seq);
+            recent_.push_back({g.node_id, g.seq});
             if (recent_.size() > RECENT) recent_.pop_front();
             out.push_back(std::move(g));
         }
@@ -96,7 +100,7 @@ private:
     // duplicate arriving from a later offset is still recognised.
     static constexpr size_t RECENT = 256;
 
-    std::deque<uint32_t> recent_;
+    std::deque<std::pair<uint32_t, uint32_t>> recent_;
     uint64_t             crc_errors_ {0};
     uint64_t             dups_       {0};
     uint64_t             off_hits_[4]{};
