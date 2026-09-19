@@ -73,7 +73,29 @@ hardware specifications.
 
 ## 3. Open, not yet explained
 
-### 3.1 The link is asymmetric and it is repeatable
+### 3.1 The link asymmetry disappears at stronger signal
+
+**Updated 2026-09-19.** Re-measured after the boards were repositioned, with
+both running the same binary:
+
+| direction | RSSI | PER | CRC | payload mismatches |
+|---|---|---|---|---|
+| A -> B | 67.75 dB | **0.00%** (3573/3573) | 0 | 0 |
+| B -> A | 65.00 dB | **0.03%** (1/3573) | 1 | 0 |
+
+Signal is about 17 dB stronger than the runs below (65-68 dB against 83-84 dB)
+and the asymmetry is gone: A -> B went from a repeatable 1.4-1.6% to 0.00%.
+
+That supports placement or antenna coupling rather than a defective board, which
+is why no board was named. The antenna-swap test in 1.3 is now lower priority --
+the effect it was meant to explain is not present at this signal level. What it
+does establish is that the earlier figures were a property of the SETUP at that
+distance, not of the units, so neither set should be quoted as a hardware
+specification.
+
+The original measurements are kept below for the record.
+
+### 3.1a The earlier asymmetry, at 83-84 dB RSSI (historical)
 
 Three consecutive runs at 7.68 MS/s, 0 dB: A -> B 1.60 / 1.44 / 1.56%,
 B -> A 0.00 / 0.00 / 0.00%. B -> A decoded ~10,745 consecutive frames with zero
