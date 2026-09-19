@@ -1230,9 +1230,16 @@ int main(int argc, char** argv) {
     bool     warned_short = false;
     uint64_t last_short   = 0;
     uint64_t last_rx_dma  = g_stats.rx_dma.load();
-    uint64_t last_frames  = g_stats.rx_frames.load();
+    uint64_t last_frames  = g_stats.rx_frames.load()
+                          + g_stats.rx_dup.load() + g_stats.rx_crcerr.load();
     DemodStatus last_demod = demodStatus();
     unsigned stalled_intervals = 0;
+    // Recovery is rate-limited by doubling, not a one-shot disarm. A stall a
+    // reset does not clear must not cause a reset every interval for ever, and
+    // must not be abandoned permanently either; backing off reaches a quiet
+    // steady state that still retries.
+    unsigned recovery_backoff = 0;
+    unsigned recovery_penalty = 1;
     // Recovery is armed only after this process has decoded a real/control
     // frame.  With no RF at power-up, noise may exercise the timing loop and
     // increase mu_clamped; that alone must not cause periodic resets.
@@ -1317,15 +1324,38 @@ int main(int argc, char** argv) {
         // absent RF signal from producing a reset loop.
         const uint64_t dma_now = g_stats.rx_dma.load();
         const uint64_t frames_now = g_stats.rx_frames.load();
+        if (recovery_backoff > 0) --recovery_backoff;
         const uint64_t dma_delta = dma_now - last_rx_dma;
-        const uint64_t frame_delta = frames_now - last_frames;
+        // LIVENESS IS ANY DEFRAMER ACTIVITY, not just unique frames delivered.
+        // A duplicate proves the demodulator decoded a frame and checked its
+        // CRC; so does a CRC failure. Counting only unique deliveries declares a
+        // healthy link stalled whenever traffic repeats -- measured here
+        // resetting a working demodulator three times while it decoded ~58,000
+        // frames, all duplicates of a looping test pattern. Real traffic repeats
+        // too: ARP, keepalives, retransmissions, video I-frames.
+        const uint64_t live_now = frames_now + g_stats.rx_dup.load()
+                                             + g_stats.rx_crcerr.load();
+        const uint64_t frame_delta = live_now - last_frames;
         DemodStatus demod_now = demodStatus();
         if (frame_delta > 0) {
             recovery_armed = true;
             stalled_intervals = 0;
-        } else if (recovery_armed && demod_now.valid && last_demod.valid) {
-            const uint32_t mu_delta = demod_now.mu_clamped - last_demod.mu_clamped;
-            if (dma_delta >= 2 && mu_delta >= 32) ++stalled_intervals;
+            recovery_penalty = 1;   // it worked; forget the backoff
+            recovery_backoff = 0;
+        } else if (recovery_armed && recovery_backoff == 0) {
+            // THE FAULT IS "DMA ADVANCING WITH NO FRAMES". That defines a stalled
+            // demodulator and it is what must trigger recovery.
+            //
+            // The previous trigger also demanded mu_clamped climb by 32 per
+            // interval. That signature came from one observed stall and is real,
+            // but it is not the only mode: a second stall was measured where
+            // lock_count advanced steadily, frames stayed at zero, and mu_clamped
+            // moved by ONE in twenty seconds. Keyed on the first mode's symptom,
+            // the detector could not see the second by construction. mu_clamped is
+            // now logged as corroboration rather than required as a precondition.
+            const uint32_t mu_delta = (demod_now.valid && last_demod.valid)
+                                    ? (demod_now.mu_clamped - last_demod.mu_clamped) : 0;
+            if (dma_delta >= 2) ++stalled_intervals;
             else stalled_intervals = 0;
             if (stalled_intervals >= 2) {
                 if (demodSoftResetDrained()) {
@@ -1339,14 +1369,17 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr,
                         "bridge: WARNING recovery needed but /dev/mem reset failed\n");
                 }
-                recovery_armed = false;
+                // Back off rather than disarm, so a stall one reset does
+                // not clear is retried at a decreasing rate.
+                recovery_backoff = recovery_penalty;
+                if (recovery_penalty < 64) recovery_penalty *= 2;
                 stalled_intervals = 0;
             }
         } else {
             stalled_intervals = 0;
         }
         last_rx_dma = dma_now;
-        last_frames = frames_now;
+        last_frames = live_now;
         last_demod = demod_now;
 
         // ── Overrun verdict ──────────────────────────────────────────────

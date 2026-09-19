@@ -64,3 +64,39 @@ feed loops a file and there is a gap at each restart. That is a property of the
 test rig, not the link, but it means "frames stopped" and "the peer stopped
 transmitting" overlap in these runs and must be separated before this stall is
 characterised further. A feed that never gaps is needed.
+
+
+## The detector, corrected twice
+
+**First correction -- trigger on the defining fault.** The trigger now fires on
+RX DMA advancing while the deframer is inactive, with `mu_clamped` logged as
+corroboration rather than demanded. On hardware it immediately caught the mode
+the old trigger could not:
+
+    RECOVERY ... (dma +147, frames +0, mu_clamped +0,      lock=23999595)
+    RECOVERY ... (dma +131, frames +0, mu_clamped +0,      lock=9257078)
+    RECOVERY ... (dma +293, frames +0, mu_clamped +562632, lock=28801962)
+
+Two with `mu_clamped +0` -- invisible to the previous rule by construction.
+
+**Second correction -- those three were FALSE POSITIVES.** The counters in the
+same run showed `dup` climbing 50693 -> 57995: the demodulator was decoding
+around 58,000 frames and suppressing them as duplicates, because the test feed
+loops the same 40 frames. `frames` stayed at 40 because only 40 unique frames
+exist. A perfectly healthy demodulator was reset three times.
+
+Liveness is therefore **any deframer activity** -- unique frames plus duplicates
+plus CRC failures. A duplicate proves the demodulator decoded a frame and
+checked its CRC; so does a CRC failure. Counting only unique deliveries declares
+a healthy link stalled whenever traffic repeats, and **real traffic repeats**:
+ARP, keepalives, retransmissions, video I-frames.
+
+After the fix, the same conditions give **one** recovery (at startup, before
+lock) and none thereafter, while `dup` climbs 34556 -> 41838 across an interval
+-- alive, and correctly left alone.
+
+### The general lesson
+
+Both mistakes were the same shape: a detector keyed on a *proxy* for the fault
+rather than the fault. `mu_clamped` rising was one stall's symptom, not the
+stall. Unique frames delivered was one traffic pattern's liveness, not liveness.
