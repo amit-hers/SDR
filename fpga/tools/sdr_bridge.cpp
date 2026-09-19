@@ -24,6 +24,8 @@
 #include "sdr/framing/Framer.hpp"
 #include "sdr/framing/Deframer.hpp"
 #include "sdr/framing/OffsetDeframer.hpp"
+#include <mutex>
+#include "sdr/bridge/LoopGuard.hpp"
 #include "sdr/framing/PacketReader.hpp"
 #include "sdr/framing/Frame.hpp"
 #include "sdr/framing/DmaBlockAggregator.hpp"
@@ -768,6 +770,7 @@ struct Stats {
     std::atomic<uint64_t> tun_tx_drop{0}, tun_rx_drop{0};
     // Frames too large for the framing layer, dropped rather than truncated.
     std::atomic<uint64_t> tx_oversize{0};
+    std::atomic<uint64_t> loop_suppressed{0};
     std::atomic<uint64_t> tx_blocks{0}, tx_data_blocks{0}, tx_dma_bytes{0};
     std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
     std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
@@ -777,6 +780,9 @@ std::atomic<bool> g_run{true};
 } // namespace
 
 // ── Transmit: TUN -> Framer -> fabric modulator ───────────────────────────
+static sdr::LoopGuard g_loop_guard;
+static std::mutex     g_loop_mx;
+
 static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o) {
     Framer framer;
     const size_t tx_block = static_cast<size_t>(o.tx_block ? o.tx_block : o.pkt);
@@ -910,6 +916,21 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
                 g_stats.tx_oversize.fetch_add(1);
                 continue;
             }
+            // L2 loop suppression. A frame whose SOURCE was last seen arriving
+            // from the radio is our own echo returning over Ethernet, and must
+            // not be sent back. Without this, two appliances on one switch
+            // replicate without bound -- and that segment is the customer's
+            // network, not ours. Only meaningful in raw-eth mode; a TUN carries
+            // no Ethernet header to learn from.
+            if (o.raw_eth) {
+                bool fwd;
+                {
+                    std::lock_guard<std::mutex> lk(g_loop_mx);
+                    fwd = g_loop_guard.shouldForwardToRadio(
+                              pkt.data(), static_cast<size_t>(n), std::chrono::steady_clock::now());
+                }
+                if (!fwd) { g_stats.loop_suppressed.fetch_add(1); continue; }
+            }
             auto wire = encode(pkt.data(), static_cast<size_t>(n), 0);
             const size_t before = blocks.size();
             if (!agg.addFrame(wire, static_cast<size_t>(n), true, blocks)) {
@@ -1014,6 +1035,13 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
             if (f.flags & FL_CTRL) { g_stats.rx_ctrl.fetch_add(1); continue; }
             if (f.payload.empty()) continue;
 
+            // Learn the source BEFORE injecting: the echo can come back around
+            // the switch faster than the next statistics tick.
+            if (o.raw_eth) {
+                std::lock_guard<std::mutex> lk(g_loop_mx);
+                g_loop_guard.learnFromRadio(f.payload.data(), f.payload.size(),
+                                            std::chrono::steady_clock::now());
+            }
             ssize_t w = ::write(tun_fd, f.payload.data(), f.payload.size());
             if (w == static_cast<ssize_t>(f.payload.size()))
                 g_stats.rx_bytes.fetch_add(static_cast<uint64_t>(w));
@@ -1320,7 +1348,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "bridge: cpu decode %.1f%% now / %.1f%% avg (max %llu us/pkt) | "
             "rx gap max %llu us, short %llu | tx stall %llu ms | "
-            "%s drops tx %llu rx %llu (since start) | oversize %llu\n",
+            "%s drops tx %llu rx %llu (since start) | oversize %llu | loopsup %llu\n",
             busy_win, busy,
             (unsigned long long)g_stats.decode_us_max.load(),
             (unsigned long long)g_stats.rx_gap_us_max.load(),
@@ -1329,7 +1357,8 @@ int main(int argc, char** argv) {
             o.iface.c_str(),
             (unsigned long long)g_stats.tun_tx_drop.load(),
             (unsigned long long)g_stats.tun_rx_drop.load(),
-            (unsigned long long)g_stats.tx_oversize.load());
+            (unsigned long long)g_stats.tx_oversize.load(),
+            (unsigned long long)g_stats.loop_suppressed.load());
         if (busy_win > 70.0)
             std::fprintf(stderr,
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"
