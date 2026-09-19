@@ -144,6 +144,7 @@ is opened, DAC datarate not left at its default of 0.
 | `--idle-ms` | keepalive cadence, default 200; `0` disables |
 | `--pkt` | DMA packet size; **must** equal `PKT_BYTES` in `axis_packetizer.v` |
 | `--direct-iio-tx` | use one synchronous libiio TX buffer instead of the queued `iio_writedev` pipe |
+| `--direct-iio-rx` | use one synchronous libiio RX buffer instead of the `iio_readdev` pipe |
 | `--tx-block` | direct-IIO TX block size in bytes; RX `--pkt` remains unchanged |
 | `--tx-qlen` | bound the TUN transmit queue; default 32 packets to control latency under bulk load |
 | `--batch-us` | short window for aggregating several complete RF frames into one TX block |

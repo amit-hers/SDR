@@ -83,6 +83,7 @@ struct Opts {
     // through a pipe. This prevents unsent keepalives from accumulating ahead
     // of newly arrived user data while preserving a continuous sample stream.
     bool        direct_iio_tx = false;
+    bool        direct_iio_rx = false;
     // AF_PACKET carries whole Ethernet frames off a real NIC; TUN carries IP
     // packets on a virtual one. The product wants the former (RJ45 to RJ45 with
     // nothing configured on either PC), and the 5.10 kernel that actually
@@ -112,6 +113,7 @@ void usage() {
       "  --tx DEV         transmit char device (default: resolved by name)\n"
       "  --rx DEV         receive char device\n"
       "  --direct-iio-tx  synchronous single-buffer libiio TX (experimental)\n"
+      "  --direct-iio-rx  synchronous single-buffer libiio RX (experimental)\n"
       "  --node-id N      this node's id; frames carrying it are ignored\n"
       "  --mtu N          default 1400, the framing layer's MAX_PAYLOAD\n"
       "  --pkt N          DMA packet size, must equal PKT_BYTES (default 32768)\n"
@@ -318,6 +320,105 @@ public:
     }
 };
 
+class DirectIioRx {
+    struct iio_context;
+    struct iio_device;
+    struct iio_channel;
+    struct iio_buffer;
+
+    void* so_ = nullptr;
+    iio_context* ctx_ = nullptr;
+    iio_buffer* buf_ = nullptr;
+    size_t bytes_ = 0;
+
+    using CreateContext = iio_context* (*)();
+    using DestroyContext = void (*)(iio_context*);
+    using FindDevice = iio_device* (*)(const iio_context*, const char*);
+    using FindChannel = iio_channel* (*)(const iio_device*, const char*, bool);
+    using EnableChannel = void (*)(iio_channel*);
+    using CreateBuffer = iio_buffer* (*)(const iio_device*, size_t, bool);
+    using DestroyBuffer = void (*)(iio_buffer*);
+    using BufferPtr = void* (*)(const iio_buffer*);
+    using BufferRefill = ssize_t (*)(iio_buffer*);
+
+    DestroyContext destroy_context_ = nullptr;
+    DestroyBuffer destroy_buffer_ = nullptr;
+    BufferPtr buffer_start_ = nullptr;
+    BufferPtr buffer_end_ = nullptr;
+    BufferRefill buffer_refill_ = nullptr;
+
+    template <class T> bool symbol(T& out, const char* name) {
+        out = reinterpret_cast<T>(::dlsym(so_, name));
+        if (out) return true;
+        std::fprintf(stderr, "bridge: libiio missing %s: %s\n", name, ::dlerror());
+        return false;
+    }
+
+public:
+    ~DirectIioRx() {
+        if (buf_ && destroy_buffer_) destroy_buffer_(buf_);
+        if (ctx_ && destroy_context_) destroy_context_(ctx_);
+        if (so_) ::dlclose(so_);
+    }
+
+    bool open(size_t samples, size_t expected_bytes) {
+        so_ = ::dlopen("libiio.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (!so_) {
+            std::fprintf(stderr, "bridge: dlopen(libiio.so.0): %s\n", ::dlerror());
+            return false;
+        }
+        CreateContext create_context = nullptr;
+        FindDevice find_device = nullptr;
+        FindChannel find_channel = nullptr;
+        EnableChannel enable_channel = nullptr;
+        CreateBuffer create_buffer = nullptr;
+        if (!symbol(create_context, "iio_create_local_context") ||
+            !symbol(destroy_context_, "iio_context_destroy") ||
+            !symbol(find_device, "iio_context_find_device") ||
+            !symbol(find_channel, "iio_device_find_channel") ||
+            !symbol(enable_channel, "iio_channel_enable") ||
+            !symbol(create_buffer, "iio_device_create_buffer") ||
+            !symbol(destroy_buffer_, "iio_buffer_destroy") ||
+            !symbol(buffer_start_, "iio_buffer_start") ||
+            !symbol(buffer_end_, "iio_buffer_end") ||
+            !symbol(buffer_refill_, "iio_buffer_refill")) return false;
+
+        ctx_ = create_context();
+        if (!ctx_) { std::fprintf(stderr, "bridge: cannot create local IIO context\n"); return false; }
+        iio_device* dev = find_device(ctx_, "cf-ad9361-lpc");
+        if (!dev) { std::fprintf(stderr, "bridge: RX IIO device not found\n"); return false; }
+        iio_channel* ch0 = find_channel(dev, "voltage0", false);
+        iio_channel* ch1 = find_channel(dev, "voltage1", false);
+        if (!ch0 || !ch1) { std::fprintf(stderr, "bridge: RX IIO channels not found\n"); return false; }
+        enable_channel(ch0);
+        enable_channel(ch1);
+        buf_ = create_buffer(dev, samples, false);
+        if (!buf_) {
+            std::fprintf(stderr, "bridge: cannot create direct RX IIO buffer: %s\n",
+                         std::strerror(errno));
+            return false;
+        }
+        auto* begin = static_cast<uint8_t*>(buffer_start_(buf_));
+        auto* end = static_cast<uint8_t*>(buffer_end_(buf_));
+        bytes_ = static_cast<size_t>(end - begin);
+        if (bytes_ != expected_bytes) {
+            std::fprintf(stderr, "bridge: direct RX buffer is %zu B, expected %zu B\n",
+                         bytes_, expected_bytes);
+            return false;
+        }
+        return true;
+    }
+
+    ssize_t refill(uint8_t* data, size_t size) {
+        if (!buf_ || size != bytes_) { errno = EINVAL; return -1; }
+        ssize_t n = buffer_refill_(buf_);
+        if (n <= 0) return n;
+        if (static_cast<size_t>(n) > size) { errno = EOVERFLOW; return -1; }
+        std::memcpy(data, buffer_start_(buf_), static_cast<size_t>(n));
+        return n;
+    }
+};
+
 // Opening the transmit buffer re-points the DAC channel at the internal DDS, so
 // the DMA source select must be redone AFTER the writer is running. Done here
 // through /dev/mem rather than by shelling out to devmem, so the bridge stays
@@ -335,6 +436,62 @@ static void selectDmaSource() {
         ::munmap(m, len);
     }
     ::close(fd);
+}
+
+// Read one 32-bit PL register without depending on an external devmem utility.
+// Identity validation is deliberately best-effort: an unprivileged diagnostic
+// invocation may not have /dev/mem, while a readable identity which disagrees
+// with the requested packet size is an unsafe, hard error.
+static bool readPhys32(off_t address, uint32_t& value) {
+    const long page_size = ::sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return false;
+    const off_t page_mask = static_cast<off_t>(page_size - 1);
+    const off_t page = address & ~page_mask;
+    const size_t offset = static_cast<size_t>(address - page);
+    int fd = ::open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) return false;
+    void* m = ::mmap(nullptr, static_cast<size_t>(page_size), PROT_READ,
+                     MAP_SHARED, fd, page);
+    if (m == MAP_FAILED) { ::close(fd); return false; }
+    volatile const uint32_t* reg = reinterpret_cast<volatile const uint32_t*>(
+        static_cast<const uint8_t*>(m) + offset);
+    value = *reg;
+    ::munmap(m, static_cast<size_t>(page_size));
+    ::close(fd);
+    return true;
+}
+
+static bool verifyFpgaPacketBytes(int requested) {
+    constexpr off_t identity = 0x43C50000;
+    constexpr uint32_t magic_expected = 0x5344524C;
+    uint32_t magic = 0;
+    if (!readPhys32(identity, magic)) {
+        std::fprintf(stderr,
+                     "bridge: WARNING cannot read FPGA identity; --pkt cannot be verified\n");
+        return true;
+    }
+    if (magic != magic_expected) {
+        std::fprintf(stderr,
+                     "bridge: FPGA identity mismatch: magic=0x%08x, expected 0x%08x\n",
+                     magic, magic_expected);
+        return false;
+    }
+
+    uint32_t packet_bytes = 0;
+    if (!readPhys32(identity + 0x18, packet_bytes) || packet_bytes == 0) {
+        std::fprintf(stderr,
+                     "bridge: WARNING FPGA identity predates RX_PKT_BYTES; --pkt=%d is unverified\n",
+                     requested);
+        return true;
+    }
+    if (packet_bytes != static_cast<uint32_t>(requested)) {
+        std::fprintf(stderr,
+                     "bridge: packet-size mismatch: FPGA RX_PKT_BYTES=%u, --pkt=%d; refusing to start\n",
+                     packet_bytes, requested);
+        return false;
+    }
+    std::fprintf(stderr, "bridge: verified FPGA RX_PKT_BYTES=%u\n", packet_bytes);
+    return true;
 }
 
 struct DemodStatus {
@@ -774,7 +931,7 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
 //
 // The four-offset decode lives in sdr/framing/OffsetDeframer.hpp so that the
 // bridge and its test exercise the same code rather than two copies of it.
-static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
+static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o) {
     std::vector<uint8_t> buf(static_cast<size_t>(o.pkt));
     OffsetDeframer deframer;
     uint64_t crc_seen = 0, dup_seen = 0;
@@ -788,7 +945,8 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
         // one transfer -- the byte grid is continuous only within it -- so a
         // fragment decoded as if it were a packet loses frames at both ends and
         // reports them as loss. Reassemble a full packet before decoding.
-        ssize_t n = readExact(rx_fd, buf.data(), buf.size());
+        ssize_t n = direct_rx ? direct_rx->refill(buf.data(), buf.size())
+                              : readExact(rx_fd, buf.data(), buf.size());
         if (n <= 0) {
             if (n < 0) std::perror("read rx");
             if (!g_run.load()) break;
@@ -881,6 +1039,7 @@ int main(int argc, char** argv) {
         else if (a == "--tx")    { o.tx_dev = next("--tx"); o.dev_explicit = true; }
         else if (a == "--rx")    { o.rx_dev = next("--rx"); o.dev_explicit = true; }
         else if (a == "--direct-iio-tx") o.direct_iio_tx = true;
+        else if (a == "--direct-iio-rx") o.direct_iio_rx = true;
         else if (a == "--node-id") o.node_id = static_cast<uint32_t>(std::strtoul(next("--node-id").c_str(), nullptr, 0));
         else if (a == "--mtu")     o.mtu     = std::atoi(next("--mtu").c_str());
         else if (a == "--pkt")     o.pkt     = std::atoi(next("--pkt").c_str());
@@ -918,10 +1077,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "bridge: --tx-qlen must be between 1 and 10000\n");
         return 2;
     }
-    if (o.dev_explicit && o.direct_iio_tx) {
-        std::fprintf(stderr, "bridge: --direct-iio-tx cannot be combined with --tx/--rx\n");
+    if (o.dev_explicit && (o.direct_iio_tx || o.direct_iio_rx)) {
+        std::fprintf(stderr, "bridge: direct IIO options cannot be combined with --tx/--rx\n");
         return 2;
     }
+    if (o.pkt < 2048 || (o.pkt % 4)) {
+        std::fprintf(stderr, "bridge: --pkt must be a multiple of 4 and at least 2048\n");
+        return 2;
+    }
+    if (!o.dev_explicit && !verifyFpgaPacketBytes(o.pkt)) return 1;
 
     if (o.tx_dev.empty()) o.tx_dev = iioDevByName("cf-ad9361-dds-core-lpc");
     if (o.rx_dev.empty()) o.rx_dev = iioDevByName("cf-ad9361-lpc");
@@ -939,6 +1103,7 @@ int main(int argc, char** argv) {
 
     int tx_fd = -1, rx_fd = -1;
     std::unique_ptr<DirectIioTx> direct_tx;
+    std::unique_ptr<DirectIioRx> direct_rx;
     if (o.dev_explicit) {
         // Raw paths: the test harness's FIFOs, or a deliberate override. This
         // does NOT work against a real radio on 6.12 -- see spawnIio above.
@@ -1006,19 +1171,31 @@ int main(int argc, char** argv) {
         ::usleep(1000 * 1000);
         char nbuf[32];
         std::snprintf(nbuf, sizeof nbuf, "%d", o.pkt / 4);
-        const char* rx_argv[] = { "iio_readdev", "-b", nbuf,
-                                  "cf-ad9361-lpc", "voltage0", "voltage1", nullptr };
-        rx_fd = spawnIio(rx_argv, false, &g_rx_pid);
-        if (rx_fd < 0) {
-            std::fprintf(stderr, "bridge: could not start deferred iio_readdev\n");
-            g_run.store(false);
-            tx.join();
-            ::close(tun_fd); ::close(tx_fd);
-            return 1;
+        if (o.direct_iio_rx) {
+            direct_rx.reset(new DirectIioRx);
+            if (!direct_rx->open(static_cast<size_t>(o.pkt / 4),
+                                 static_cast<size_t>(o.pkt))) {
+                g_run.store(false);
+                tx.join();
+                ::close(tun_fd); ::close(tx_fd);
+                return 1;
+            }
+            std::fprintf(stderr, "bridge: deferred direct single-buffer libiio RX, buffer=%s samples\n", nbuf);
+        } else {
+            const char* rx_argv[] = { "iio_readdev", "-b", nbuf,
+                                      "cf-ad9361-lpc", "voltage0", "voltage1", nullptr };
+            rx_fd = spawnIio(rx_argv, false, &g_rx_pid);
+            if (rx_fd < 0) {
+                std::fprintf(stderr, "bridge: could not start deferred iio_readdev\n");
+                g_run.store(false);
+                tx.join();
+                ::close(tun_fd); ::close(tx_fd);
+                return 1;
+            }
+            std::fprintf(stderr, "bridge: deferred iio_readdev pid=%d\n", (int)g_rx_pid);
         }
-        std::fprintf(stderr, "bridge: deferred iio_readdev pid=%d\n", (int)g_rx_pid);
     }
-    std::thread rx(rxLoop, tun_fd, rx_fd, std::cref(o));
+    std::thread rx(rxLoop, tun_fd, rx_fd, direct_rx.get(), std::cref(o));
 
     auto t_start = std::chrono::steady_clock::now();
     uint64_t last_decode = 0;

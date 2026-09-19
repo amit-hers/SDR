@@ -163,6 +163,7 @@ The FPGA exposes them read-only at **`0x43C50000`**:
 | `0x0C` | `REGISTER_MAP_VERSION` | Bump when a register *moves* or is added. |
 | `0x10` | `BUILD_EPOCH` | UTC seconds, ties the PL to a manifest. |
 | `0x14` | `GIT_SHA` | First 32 bits of the source commit. |
+| `0x18` | `RX_PKT_BYTES` | Compiled RX packetizer boundary. New bridge builds reject a nonzero value that differs from `--pkt`. |
 
 Why this exists: a mismatched bitstream does not fail loudly on its own. The
 register reads still succeed — they just mean something else. That has already

@@ -39,6 +39,16 @@ add_test(NAME offsets COMMAND sdr-tests offsets)
 add_test(NAME packetreader COMMAND sdr-tests packetreader)
 add_test(NAME dma_aggregation COMMAND sdr-tests dma_aggregation)
 
+find_program(IVERILOG_EXECUTABLE iverilog)
+if(IVERILOG_EXECUTABLE)
+    add_test(NAME axis_packetizer_4k
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/axis_packetizer_test.sh
+                     ${PROJECT_SOURCE_DIR})
+    add_test(NAME axi_version_id
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/axi_version_id_test.sh
+                     ${PROJECT_SOURCE_DIR})
+endif()
+
 # Hostile-input harness for the decoders that take data from outside. Separate
 # executable, not a suite in sdr-tests, so it can be run for a long time under
 # sanitizers without slowing the normal test cycle.

@@ -107,7 +107,7 @@ produces a valid CRC.
 | `0x43C20000` | TX IQ probe | `0x00` ctrl, `0x08` stat |
 | `0x43C30000` | RX IQ probe | `0x00` ctrl, `0x08` stat |
 | `0x43C40000` | DAC pin probe | `0x00` ctrl, `0x08` stat |
-| `0x43C50000` | identity | `0x00` MAGIC, `0x04` FPGA_VERSION, `0x08` FPGA_ABI, `0x0C` REGISTER_MAP_VERSION, `0x10` BUILD_EPOCH, `0x14` GIT_SHA |
+| `0x43C50000` | identity | `0x00` MAGIC, `0x04` FPGA_VERSION, `0x08` FPGA_ABI, `0x0C` REGISTER_MAP_VERSION, `0x10` BUILD_EPOCH, `0x14` GIT_SHA, `0x18` RX_PKT_BYTES |
 
 HLS places `s_axilite` ports on an 8-byte grid of its own choosing. Request the
 offsets explicitly and **check the generated `*_hw.h` after any interface

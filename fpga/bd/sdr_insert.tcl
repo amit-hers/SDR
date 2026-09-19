@@ -93,7 +93,19 @@ create_bd_cell -type module -reference adi_iq_to_axis  iq_to_axis
 create_bd_cell -type module -reference axis_to_adi_iq  axis_to_iq
 create_bd_cell -type module -reference axis_packetizer rx_packetizer
 
-# PKT_BYTES 32768, not the module's 1024 default.
+# Keep DMA descriptor turnover from backpressuring the HLS demodulator.  The
+# demodulator is a streaming timing-recovery loop: if its byte output blocks,
+# the whole core stops consuming IQ and the upstream clock-converter eventually
+# drops live samples.  At 32 KiB this happened rarely enough to recover; at
+# 4 KiB it happened eight times as often and both radios remained mu_clamped
+# with zero decoded frames despite continuous RX DMA.  One complete 4 KiB
+# packet of elasticity lets software re-arm the DMA without stopping the core.
+ad_ip_instance axis_data_fifo rx_byte_fifo [list \
+  TDATA_NUM_BYTES 1 FIFO_DEPTH 4096 HAS_TLAST 1 HAS_TKEEP 1 IS_ACLK_ASYNC 0]
+
+# PKT_BYTES defaults to 32768, not the module's 1024 default.  A build may set
+# SDR_PKT_BYTES in the environment to produce an explicitly labelled
+# low-latency diagnostic image (4096 is the first supported experiment).
 #
 # The packet boundary is where a captured frame dies. The DMA is re-armed after
 # every transfer and the demodulator does not stop for it, so a couple of bytes
@@ -120,7 +132,17 @@ create_bd_cell -type module -reference axis_packetizer rx_packetizer
 # The IIO buffer must be at least this large or the transfer is truncated
 # instead: scan size is 4 bytes, so buffer/length needs >= 8192. See
 # fpga/scripts/rx_framed.sh, which sets 16384 for headroom.
-set_property CONFIG.PKT_BYTES {32768} [get_bd_cells rx_packetizer]
+set sdr_pkt_bytes 32768
+if {[info exists ::env(SDR_PKT_BYTES)] && $::env(SDR_PKT_BYTES) ne ""} {
+    set sdr_pkt_bytes $::env(SDR_PKT_BYTES)
+}
+if {![string is integer -strict $sdr_pkt_bytes] ||
+    $sdr_pkt_bytes < 2048 || $sdr_pkt_bytes > 65536 ||
+    ($sdr_pkt_bytes & ($sdr_pkt_bytes - 1)) != 0} {
+    error "sdr_insert: SDR_PKT_BYTES must be a power of two from 2048 to 65536 (got '$sdr_pkt_bytes')"
+}
+set_property CONFIG.PKT_BYTES $sdr_pkt_bytes [get_bd_cells rx_packetizer]
+puts "sdr_insert: RX packetizer PKT_BYTES=$sdr_pkt_bytes"
 
 # ── RX: radio -> adapter -> demod -> packetizer -> DMA ───────────────────
 ad_connect axi_ad9361/adc_valid_i0  iq_to_axis/adc_valid
@@ -128,7 +150,8 @@ ad_connect axi_ad9361/adc_enable_i0 iq_to_axis/adc_enable_i
 ad_connect axi_ad9361/adc_enable_q0 iq_to_axis/adc_enable_q
 ad_connect axi_ad9361/adc_data_i0   iq_to_axis/adc_data_i
 ad_connect axi_ad9361/adc_data_q0   iq_to_axis/adc_data_q
-ad_connect qpsk_demod_0/m_axis_bits rx_packetizer/s_axis
+ad_connect qpsk_demod_0/m_axis_bits rx_byte_fifo/S_AXIS
+ad_connect rx_byte_fifo/M_AXIS      rx_packetizer/s_axis
 
 # ── TX: DMA -> modulator -> adapter -> radio ─────────────────────────────
 # Modulator first, then anything touching IQ: pulse shaping PRODUCES IQ.
@@ -250,6 +273,8 @@ foreach p {qpsk_demod_0 qpsk_mod_0} {
 }
 ad_connect $modem_clk  rx_packetizer/clk
 ad_connect $modem_rstn rx_packetizer/resetn
+ad_connect $modem_clk  rx_byte_fifo/s_axis_aclk
+ad_connect $modem_rstn rx_byte_fifo/s_axis_aresetn
 
 # Both DMA stream clocks were already driven from l_clk by ADI's script, so
 # they must be released before being re-driven -- connect_bd_net refuses a

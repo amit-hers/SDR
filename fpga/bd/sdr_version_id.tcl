@@ -12,11 +12,12 @@
 puts "sdr_version_id: identity block at 0x43C50000"
 
 set _magic  0x5344524C
-set _ver    [expr {[info exists ::env(SDR_FPGA_VERSION)] ? $::env(SDR_FPGA_VERSION) : 0x00010000}]
-set _abi    [expr {[info exists ::env(SDR_FPGA_ABI)]     ? $::env(SDR_FPGA_ABI)     : 1}]
-set _regmap [expr {[info exists ::env(SDR_REGMAP_VER)]   ? $::env(SDR_REGMAP_VER)   : 1}]
+set _ver    [expr {[info exists ::env(SDR_FPGA_VERSION)] ? $::env(SDR_FPGA_VERSION) : 0x00010300}]
+set _abi    [expr {[info exists ::env(SDR_FPGA_ABI)]     ? $::env(SDR_FPGA_ABI)     : 3}]
+set _regmap [expr {[info exists ::env(SDR_REGMAP_VER)]   ? $::env(SDR_REGMAP_VER)   : 4}]
 set _epoch  [expr {[info exists ::env(SDR_BUILD_EPOCH)]  ? $::env(SDR_BUILD_EPOCH)  : 0}]
 set _sha    [expr {[info exists ::env(SDR_GIT_SHA32)]    ? $::env(SDR_GIT_SHA32)    : 0}]
+set _pkt    [expr {[info exists ::env(SDR_PKT_BYTES)]    ? $::env(SDR_PKT_BYTES)    : 32768}]
 
 create_bd_cell -type module -reference axi_version_id version_id
 set_property -dict [list \
@@ -26,6 +27,7 @@ set_property -dict [list \
   CONFIG.REGMAP_VER   $_regmap \
   CONFIG.BUILD_EPOCH  $_epoch \
   CONFIG.GIT_SHA      $_sha   \
+  CONFIG.RX_PKT_BYTES $_pkt   \
 ] [get_bd_cells version_id]
 
 # Same clock and reset as the rest of the CPU-facing peripherals. Deliberately
@@ -38,4 +40,4 @@ ad_connect sys_rstgen/peripheral_aresetn version_id/s_axi_aresetn
 # 0x43C50000: the next free window after the dac pin probe at 0x43C40000.
 ad_cpu_interconnect 0x43C50000 version_id
 
-puts "sdr_version_id: MAGIC=$_magic VERSION=$_ver ABI=$_abi REGMAP=$_regmap"
+puts "sdr_version_id: MAGIC=$_magic VERSION=$_ver ABI=$_abi REGMAP=$_regmap RX_PKT_BYTES=$_pkt"

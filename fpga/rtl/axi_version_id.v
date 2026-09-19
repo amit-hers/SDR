@@ -23,13 +23,15 @@
 //   0x0C  REGISTER_MAP_VERSION  bumped when a register moves or is added
 //   0x10  BUILD_EPOCH           UTC seconds, ties the PL to a manifest
 //   0x14  GIT_SHA              first 32 bits of the source commit
+//   0x18  RX_PKT_BYTES         compiled axis_packetizer transfer boundary
 module axi_version_id #(
     parameter [31:0] MAGIC        = 32'h5344524C,  // "SDRL"
     parameter [31:0] FPGA_VERSION = 32'h00010300,  // 1.3.0
     parameter [31:0] FPGA_ABI     = 32'd3,
-    parameter [31:0] REGMAP_VER   = 32'd3,
+    parameter [31:0] REGMAP_VER   = 32'd4,
     parameter [31:0] BUILD_EPOCH  = 32'd0,
-    parameter [31:0] GIT_SHA      = 32'd0
+    parameter [31:0] GIT_SHA      = 32'd0,
+    parameter [31:0] RX_PKT_BYTES = 32'd32768
 ) (
     input  wire        s_axi_aclk,
     input  wire        s_axi_aresetn,
@@ -102,6 +104,7 @@ module axi_version_id #(
                     4'h3:    s_axi_rdata <= REGMAP_VER;
                     4'h4:    s_axi_rdata <= BUILD_EPOCH;
                     4'h5:    s_axi_rdata <= GIT_SHA;
+                    4'h6:    s_axi_rdata <= RX_PKT_BYTES;
                     // Unmapped words read zero rather than erroring: a probe
                     // walking the window must not wedge the interconnect.
                     default: s_axi_rdata <= 32'd0;
