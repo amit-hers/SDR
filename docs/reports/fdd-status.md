@@ -49,11 +49,38 @@ Ethernet plus idle fill from `sdr_bridge`. Both units run the same binary, so
 whatever this is, it is not symmetric between them -- which is the part that
 does not yet make sense and should not be explained away.
 
-That asymmetry is the thread to pull next: capture UNIT-B's transmitted IQ with
-the TX probe while its bridge drives it, and compare against the same probe
-while `tx_feed.sh` drives it. If the waveforms differ, the fault is in what the
-bridge hands the modulator; if they match, it is in UNIT-A's receive path at
-444 MHz.
+### That thread was pulled: the transmitter is not the difference
+
+UNIT-B's TX IQ probe (`0x43C20000`, the modulator's own output) captured under
+each driver, 512 samples:
+
+| driver | rms | peak | crest | distinct I levels |
+|---|---|---|---|---|
+| `sdr_bridge` | 5398 | 5894 | 1.09 | 306 |
+| `tx_feed.sh` | 5403 | 5944 | 1.10 | 439 |
+
+Statistically the same waveform. **The bridge does not hand the modulator
+something different**, so that hypothesis is closed and the fault is on the
+receive side.
+
+By elimination the remaining candidate is UNIT-A's receive path *as driven by
+the bridge*, as distinct from the same RF captured raw. The same signal recovers
+8333 frames when captured with `iio_readdev` and analysed offline, and zero when
+the bridge deframes it live. UNIT-B's bridge deframes its peer without trouble,
+so this is not simply "the bridge cannot deframe".
+
+Testing that cleanly is awkward: the RX character device is single-open, so
+capturing raw on UNIT-A requires stopping its bridge, which removes the very
+condition under test. A comparison that does not disturb it would use the RX IQ
+probe on UNIT-A while its bridge runs, and check whether the demodulator input
+is the same as in the working case.
+
+### Unrelated observation, recorded so it is not lost
+
+Crest factor at the modulator output is **1.09-1.10 under both drivers**, where
+the known-good figure in this project is rms 4465 / peak 7648 = **1.71**.
+Because both drivers agree it cannot explain the asymmetry, but it does not look
+like filtered QPSK and is worth understanding on its own.
 
 ## Configuration changes made
 
