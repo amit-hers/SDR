@@ -214,7 +214,19 @@ sooner or later, and a binary built from one session's tree was already found
 deployed while the other session was debugging it. **Decide which session owns
 `fpga/tools/sdr_bridge.cpp` before either changes it again.**
 
-### 3.8 The bridge path still does not carry Ethernet end to end
+### 3.8 RESOLVED: the two units shared a node id
+
+**Closed 2026-09-19.** Both ran `node_id 1`, so the self-reception filter
+discarded every frame the peer sent. The discard preceded the FL_CTRL test, so
+keepalives were not counted as control either -- 445,000 frames, 0 bytes,
+ctrl 0 were three symptoms of that one cause. `rx_self` was counted but never
+printed, which is what made it invisible.
+
+Fixed in `43d56e3`: NODE_ID is a bridge.conf setting, `rx_self` is reported, and
+the bridge warns once by name. Ethernet now crosses end to end -- 4100 B
+delivered from 50 injected frames, exactly 100%.
+
+### 3.8a Historical description
 
 With FDD configured and both units transmitting, a raw byte stream crosses at
 0.00% / 0.06% PER. The appliance bridges do not reproduce it: injected Ethernet
