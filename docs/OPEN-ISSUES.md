@@ -7,7 +7,17 @@ measured was measured; anything unproven says so.
 
 ## 1. Blocked on physical setup (not software)
 
-### 1.1 Phase 8 cannot start: the two RJ45 ports are cabled together
+### 1.1 Phase 8 cannot start: both RJ45 ports share one switch segment
+
+**Corrected 2026-09-19.** This was recorded as a direct cable between the two
+units. It is a switch, and the development host's `enp3s0` is on it too. Proven
+by injecting a broadcast from the host: both boards' NICs received exactly 39
+frames each. `enp3s0` also carries the host's internet (`67.186.1.88/24`), so a
+forwarding loop here would disrupt more than the test.
+
+A ping between two hosts on this segment crosses copper and would report a
+sub-millisecond RTT that says nothing about the radio. Isolation needs either
+two separate NICs or VLAN-separated switch ports.
 
 UNIT-A emitted 12 ARP broadcasts and UNIT-B received exactly 12 **while
 UNIT-B's demodulator was disabled and no bridge was running**, so they crossed
@@ -107,6 +117,36 @@ Now baselined at bridge start and reported as a delta, and labelled with the
 actual interface rather than "tun" -- which was wrong in raw-eth mode and sent
 attention to the wrong device. Verified: kernel still reads 4 and 3, the bridge
 reports `eth0 drops tx 0 rx 0 (since start)` on both.
+
+### 3.6 A deployed bridge binary forwarded nothing; the repo build does
+
+Observed on UNIT-A, 2026-09-19. With the binary that was on the board
+(md5 `3173e787...`) the appliance brought the modem up correctly and the NIC
+received 201 injected frames, while the bridge reported **`tx 0 pkts`** -- it
+forwarded none of them. Rebuilding from the repo (md5 `d80799ee...`) and running
+the identical appliance config forwarded **all 200** (`tx 200 pkts / 15600 B`)
+and additionally decoded 91 frames of its own transmission through antenna
+self-coupling.
+
+The difference is the binary, not the configuration. The previous one is saved
+on the board at `/tmp/sdr_bridge.other` rather than discarded.
+
+**Always verify a deployed binary against the build it is supposed to be.** A
+bridge that silently forwards nothing looks exactly like a dead RF link, and
+that is where the investigation would have gone.
+
+### 3.7 Two sessions are editing the same files
+
+The repository carries three commits and twelve uncommitted changes from another
+session, including a 4 KiB packetizer, `axi_version_id` changes, and autonomous
+demodulator recovery built on the soft_reset finding above. `sdr_bridge.cpp` is
+modified in that set.
+
+That work is left untouched here, and nothing has been committed over it. But
+concurrent edits to the same files will produce a conflict or a silent revert
+sooner or later, and a binary built from one session's tree was already found
+deployed while the other session was debugging it. **Decide which session owns
+`fpga/tools/sdr_bridge.cpp` before either changes it again.**
 
 ### 3.5 UNIT-B's flash is prefix-identical, not identical
 
