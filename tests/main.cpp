@@ -17,6 +17,7 @@ void run_scramble();
 void run_telemetry();
 void run_offsets();
 void run_packetreader();
+void run_dma_aggregation();
 
 int main(int argc, char* argv[]) {
     const char* filter = (argc > 1) ? argv[1] : nullptr;
@@ -38,6 +39,7 @@ int main(int argc, char* argv[]) {
         run("telemetry", run_telemetry);
         run("offsets", run_offsets);
         run("packetreader", run_packetreader);
+        run("dma_aggregation", run_dma_aggregation);
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << "\n";
         return 1;

@@ -26,6 +26,7 @@
 #include "sdr/framing/OffsetDeframer.hpp"
 #include "sdr/framing/PacketReader.hpp"
 #include "sdr/framing/Frame.hpp"
+#include "sdr/framing/DmaBlockAggregator.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -34,11 +35,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -76,6 +79,10 @@ struct Opts {
     // Left unset, the transfers go through libiio, which is the only path that
     // actually programs the DMA on this kernel.
     bool        dev_explicit = false;
+    // Use one synchronous libiio TX buffer instead of feeding iio_writedev
+    // through a pipe. This prevents unsent keepalives from accumulating ahead
+    // of newly arrived user data while preserving a continuous sample stream.
+    bool        direct_iio_tx = false;
     // AF_PACKET carries whole Ethernet frames off a real NIC; TUN carries IP
     // packets on a virtual one. The product wants the former (RJ45 to RJ45 with
     // nothing configured on either PC), and the 5.10 kernel that actually
@@ -84,7 +91,10 @@ struct Opts {
     uint32_t    node_id = 1;
     int         mtu     = 1400;        // == MAX_PAYLOAD; TUN carries no L2 header
     int         pkt     = 32768;       // PKT_BYTES in axis_packetizer.v
+    int         tx_block = 0;          // direct-IIO TX bytes; 0 uses pkt
+    int         tx_qlen = 32;          // bound bulk backlog without dropping interactive traffic
     int         idle_ms = 200;         // keepalive cadence when there is no traffic
+    int         batch_us = 3000;       // collect TUN packets before a data-block flush
     bool        forward = false;
     std::string route;                 // network behind the peer, via the radio
     int         stats_s = 5;
@@ -101,10 +111,14 @@ void usage() {
       "  --prefix N       prefix length (default 30)\n"
       "  --tx DEV         transmit char device (default: resolved by name)\n"
       "  --rx DEV         receive char device\n"
+      "  --direct-iio-tx  synchronous single-buffer libiio TX (experimental)\n"
       "  --node-id N      this node's id; frames carrying it are ignored\n"
       "  --mtu N          default 1400, the framing layer's MAX_PAYLOAD\n"
       "  --pkt N          DMA packet size, must equal PKT_BYTES (default 32768)\n"
+      "  --tx-block N     direct-IIO TX block bytes (default: same as --pkt)\n"
+      "  --tx-qlen N      TUN transmit queue length in packets (default 32)\n"
       "  --idle-ms N      keepalive cadence, 0 disables (default 200)\n"
+      "  --batch-us N     TX aggregation window in microseconds (default 3000)\n"
       "  --route CIDR     a network behind the peer, routed over the radio\n"
       "  --forward        enable IPv4 forwarding (eth0 <-> radio)\n"
       "  --stats N        statistics interval in seconds, 0 disables\n");
@@ -178,6 +192,17 @@ static pid_t g_tx_pid = -1, g_rx_pid = -1;
 static int spawnIio(const char* const argv[], bool to_child, pid_t* pid_out) {
     int fds[2];
     if (::pipe(fds) < 0) { std::perror("pipe"); return -1; }
+    // Do not let continuous keepalive blocks build a deep queue in front of a
+    // newly arrived data packet.  One DMA block already takes about 120 ms at
+    // the product's 3.84 MS/s setting; a multi-block pipe turns that into
+    // user-visible latency in each direction.  RX is unaffected: its pipe must
+    // retain the kernel default so a brief decode delay does not discard data.
+#ifdef F_SETPIPE_SZ
+    if (to_child) {
+        const int dma_block_bytes = 32768;
+        (void)::fcntl(fds[1], F_SETPIPE_SZ, dma_block_bytes);
+    }
+#endif
     pid_t pid = ::fork();
     if (pid < 0) { std::perror("fork"); ::close(fds[0]); ::close(fds[1]); return -1; }
     if (pid == 0) {
@@ -193,6 +218,105 @@ static int spawnIio(const char* const argv[], bool to_child, pid_t* pid_out) {
     if (to_child) { ::close(fds[0]); return fds[1]; }
     ::close(fds[1]); return fds[0];
 }
+
+// Minimal runtime binding to the libiio 0.x ABI already shipped by the board.
+// Keeping the types opaque avoids importing target headers into the host build,
+// and dlopen keeps FIFO-based tests independent of libiio being installed.
+class DirectIioTx {
+    struct iio_context;
+    struct iio_device;
+    struct iio_channel;
+    struct iio_buffer;
+
+    void* so_ = nullptr;
+    iio_context* ctx_ = nullptr;
+    iio_buffer* buf_ = nullptr;
+    size_t bytes_ = 0;
+
+    using CreateContext = iio_context* (*)();
+    using DestroyContext = void (*)(iio_context*);
+    using FindDevice = iio_device* (*)(const iio_context*, const char*);
+    using FindChannel = iio_channel* (*)(const iio_device*, const char*, bool);
+    using EnableChannel = void (*)(iio_channel*);
+    using CreateBuffer = iio_buffer* (*)(const iio_device*, size_t, bool);
+    using DestroyBuffer = void (*)(iio_buffer*);
+    using BufferPtr = void* (*)(const iio_buffer*);
+    using BufferPush = ssize_t (*)(iio_buffer*);
+
+    DestroyContext destroy_context_ = nullptr;
+    DestroyBuffer destroy_buffer_ = nullptr;
+    BufferPtr buffer_start_ = nullptr;
+    BufferPtr buffer_end_ = nullptr;
+    BufferPush buffer_push_ = nullptr;
+
+    template <class T> bool symbol(T& out, const char* name) {
+        out = reinterpret_cast<T>(::dlsym(so_, name));
+        if (out) return true;
+        std::fprintf(stderr, "bridge: libiio missing %s: %s\n", name, ::dlerror());
+        return false;
+    }
+
+public:
+    ~DirectIioTx() {
+        if (buf_ && destroy_buffer_) destroy_buffer_(buf_);
+        if (ctx_ && destroy_context_) destroy_context_(ctx_);
+        if (so_) ::dlclose(so_);
+    }
+
+    bool open(size_t samples, size_t expected_bytes) {
+        so_ = ::dlopen("libiio.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (!so_) {
+            std::fprintf(stderr, "bridge: dlopen(libiio.so.0): %s\n", ::dlerror());
+            return false;
+        }
+        CreateContext create_context = nullptr;
+        FindDevice find_device = nullptr;
+        FindChannel find_channel = nullptr;
+        EnableChannel enable_channel = nullptr;
+        CreateBuffer create_buffer = nullptr;
+        if (!symbol(create_context, "iio_create_local_context") ||
+            !symbol(destroy_context_, "iio_context_destroy") ||
+            !symbol(find_device, "iio_context_find_device") ||
+            !symbol(find_channel, "iio_device_find_channel") ||
+            !symbol(enable_channel, "iio_channel_enable") ||
+            !symbol(create_buffer, "iio_device_create_buffer") ||
+            !symbol(destroy_buffer_, "iio_buffer_destroy") ||
+            !symbol(buffer_start_, "iio_buffer_start") ||
+            !symbol(buffer_end_, "iio_buffer_end") ||
+            !symbol(buffer_push_, "iio_buffer_push")) return false;
+
+        ctx_ = create_context();
+        if (!ctx_) { std::fprintf(stderr, "bridge: cannot create local IIO context\n"); return false; }
+        iio_device* dev = find_device(ctx_, "cf-ad9361-dds-core-lpc");
+        if (!dev) { std::fprintf(stderr, "bridge: TX IIO device not found\n"); return false; }
+        iio_channel* ch0 = find_channel(dev, "voltage0", true);
+        iio_channel* ch1 = find_channel(dev, "voltage1", true);
+        if (!ch0 || !ch1) { std::fprintf(stderr, "bridge: TX IIO channels not found\n"); return false; }
+        enable_channel(ch0);
+        enable_channel(ch1);
+        buf_ = create_buffer(dev, samples, false);
+        if (!buf_) {
+            std::fprintf(stderr, "bridge: cannot create direct TX IIO buffer: %s\n",
+                         std::strerror(errno));
+            return false;
+        }
+        auto* begin = static_cast<uint8_t*>(buffer_start_(buf_));
+        auto* end = static_cast<uint8_t*>(buffer_end_(buf_));
+        bytes_ = static_cast<size_t>(end - begin);
+        if (bytes_ != expected_bytes) {
+            std::fprintf(stderr, "bridge: direct TX buffer is %zu B, expected %zu B\n",
+                         bytes_, expected_bytes);
+            return false;
+        }
+        return true;
+    }
+
+    ssize_t push(const uint8_t* data, size_t size) {
+        if (!buf_ || size != bytes_) { errno = EINVAL; return -1; }
+        std::memcpy(buffer_start_(buf_), data, size);
+        return buffer_push_(buf_);
+    }
+};
 
 // Opening the transmit buffer re-points the DAC channel at the internal DDS, so
 // the DMA source select must be redone AFTER the writer is running. Done here
@@ -419,7 +543,8 @@ static bool tunConfigure(const Opts& o) {
                   "nmcli device set %s managed no >/dev/null 2>&1", o.iface.c_str());
     runCmd(cmd);
 
-    std::snprintf(cmd, sizeof cmd, "ip link set %s mtu %d up", o.iface.c_str(), o.mtu);
+    std::snprintf(cmd, sizeof cmd, "ip link set %s mtu %d qlen %d up",
+                  o.iface.c_str(), o.mtu, o.tx_qlen);
     if (runCmd(cmd) != 0) { std::fprintf(stderr, "bridge: '%s' failed\n", cmd); return false; }
 
     // A point-to-point address, because that is what a radio hop is: it gives a
@@ -486,72 +611,80 @@ struct Stats {
     std::atomic<uint64_t> tun_tx_drop{0}, tun_rx_drop{0};
     // Frames too large for the framing layer, dropped rather than truncated.
     std::atomic<uint64_t> tx_oversize{0};
+    std::atomic<uint64_t> tx_blocks{0}, tx_data_blocks{0}, tx_dma_bytes{0};
+    std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
+    std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
 };
 Stats g_stats;
 std::atomic<bool> g_run{true};
 } // namespace
 
 // ── Transmit: TUN -> Framer -> fabric modulator ───────────────────────────
-static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
+static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o) {
     Framer framer;
+    const size_t tx_block = static_cast<size_t>(o.tx_block ? o.tx_block : o.pkt);
+    DmaBlockAggregator agg(tx_block);
     uint32_t seq = 0;
     // Room for a whole Ethernet frame in raw mode, so an oversize frame is seen
     // and counted rather than silently arriving pre-truncated by the read.
     std::vector<uint8_t> pkt(o.raw_eth ? 2048u : static_cast<size_t>(o.mtu));
-    std::vector<uint8_t> dma;
-    dma.reserve(static_cast<size_t>(o.pkt) + MAX_PAYLOAD + 256);
     bool burst_idle = true;
 
-    auto append = [&](const uint8_t* p, size_t n, uint8_t flags) {
-        std::vector<uint8_t> wire =
+    auto encode = [&](const uint8_t* p, size_t n, uint8_t flags) {
+        return
             // BW_5 is the nearest code to the 4 MHz RF bandwidth the bring-up
             // scripts set. The field is descriptive -- nothing in this path
             // acts on it -- but it should not claim a width the radio is not
             // using.
             framer.encode(p, n, flags, ModCode::QPSK, BwCode::BW_5,
                           o.node_id, seq++, nullptr, nullptr);
-        dma.insert(dma.end(), wire.begin(), wire.end());
     };
 
-    auto flush = [&]() {
-        if (dma.size() < static_cast<size_t>(o.pkt)) return true;
-        size_t done = 0;
-        auto w0 = std::chrono::steady_clock::now();
-        while (done < static_cast<size_t>(o.pkt) && g_run.load()) {
-            ssize_t w = ::write(tx_fd, dma.data() + done,
-                                static_cast<size_t>(o.pkt) - done);
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                g_stats.tx_err.fetch_add(1);
-                return false;
+    auto transmit = [&](std::vector<CompletedDmaBlock>& blocks) {
+        for (auto& block : blocks) {
+            size_t done = 0;
+            auto w0 = std::chrono::steady_clock::now();
+            if (direct_tx) {
+                ssize_t w = direct_tx->push(block.bytes.data(), block.bytes.size());
+                if (w < 0 || static_cast<size_t>(w) != block.bytes.size()) {
+                    std::fprintf(stderr, "bridge: direct IIO TX push: %s (returned %zd)\n",
+                                 w < 0 ? std::strerror(errno) : "short push", w);
+                    g_stats.tx_err.fetch_add(1);
+                    return false;
+                }
+                done = block.bytes.size();
             }
-            done += static_cast<size_t>(w);
+            while (done < block.bytes.size() && g_run.load()) {
+                ssize_t w = ::write(tx_fd, block.bytes.data() + done,
+                                    block.bytes.size() - done);
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    g_stats.tx_err.fetch_add(1);
+                    return false;
+                }
+                done += static_cast<size_t>(w);
+            }
+            g_stats.tx_stall_us_total.fetch_add(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - w0).count()));
+            g_stats.tx_blocks.fetch_add(1);
+            g_stats.tx_dma_bytes.fetch_add(block.bytes.size());
+            g_stats.tx_padding.fetch_add(block.padding_bytes);
+            if (block.data_packets) g_stats.tx_data_blocks.fetch_add(1);
         }
-        // Blocked time here is the DAC pacing us, which is normal and is the
-        // link's flow control. It is recorded so that a transmitter starved by
-        // something else -- a stalled core, a wedged device -- is visibly
-        // different from one that is simply waiting for the air.
-        g_stats.tx_stall_us_total.fetch_add(static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - w0).count()));
-        dma.erase(dma.begin(), dma.begin() + o.pkt);
+        blocks.clear();
         return true;
     };
 
-    // iio_writedev submits complete scan buffers. Small writes through its
-    // stdin pipe were consumed without producing non-zero samples at the
-    // fabric modulator (measured with the TX IQ probe). Always hand it one
-    // complete DMA block. Valid control frames fill idle space, preserving a
-    // continuous decodable stream instead of zero padding or arbitrary bytes.
-    auto fillAndFlush = [&]() {
+    auto controlBlock = [&]() {
+        std::vector<CompletedDmaBlock> blocks;
         static const uint8_t ka[16] = {0};
-        while (dma.size() < static_cast<size_t>(o.pkt)) {
-            append(ka, sizeof ka, FL_CTRL);
+        while (blocks.empty()) {
+            auto wire = encode(ka, sizeof ka, FL_CTRL);
+            if (!agg.addFrame(wire, 0, false, blocks)) return false;
             g_stats.tx_idle.fetch_add(1);
         }
-        while (dma.size() >= static_cast<size_t>(o.pkt))
-            if (!flush()) return false;
-        return true;
+        return transmit(blocks);
     };
 
     while (g_run.load()) {
@@ -560,7 +693,7 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
         // here as well creates a long RF-off gap after every block; measured
         // receivers decode the first control burst and then lose acquisition.
         // With keepalives enabled, poll without sleeping and immediately fill
-        // the next block. The blocking write supplies the required pacing.
+        // the next block. The bounded child pipe limits avoidable queueing.
         int timeout = o.idle_ms > 0 ? 0 : 1000;
         int pr = ::poll(&pfd, 1, timeout);
         if (pr < 0) { if (errno == EINTR) continue; break; }
@@ -573,7 +706,7 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             // FL_CTRL marks it as not user data; the receive side drops it
             // rather than handing an empty packet to the kernel.
             if (o.idle_ms > 0) {
-                if (!fillAndFlush()) break;
+                if (!controlBlock()) break;
             }
             else {
                 // The next packet starts a new RF burst and needs acquisition
@@ -583,17 +716,6 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             continue;
         }
 
-        ssize_t n = ::read(tun_fd, pkt.data(), pkt.size());
-        if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
-        // A frame larger than the framing layer can carry must be DROPPED, not
-        // truncated. An Ethernet frame is up to 1514 bytes and MAX_PAYLOAD is
-        // 1400, so with --raw-eth this is reachable with ordinary traffic; a
-        // truncated frame would arrive corrupt and be blamed on the radio.
-        // Counted so the cause is visible rather than inferred from loss.
-        if (static_cast<size_t>(n) > MAX_PAYLOAD) {
-            g_stats.tx_oversize.fetch_add(1);
-            continue;
-        }
         if (o.idle_ms == 0 && burst_idle) {
             // A cold demodulator cannot decode a data frame placed at the very
             // start of a burst. Thirty-two control-only DMA blocks give its AGC,
@@ -602,14 +724,49 @@ static void txLoop(int tun_fd, int tx_fd, const Opts& o) {
             // transmitter becomes quiet afterwards, the peer can answer
             // without same-frequency self-interference.
             for (int i = 0; i < 32; ++i)
-                if (!fillAndFlush()) return;
+                if (!controlBlock()) return;
             burst_idle = false;
         }
-        append(pkt.data(), static_cast<size_t>(n), 0);
-        if (fillAndFlush()) {
+
+        // Collect all packets arriving inside one short window. Each remains
+        // an independently sequenced/CRC-protected RF frame, and complete
+        // frames are packed into a DMA block without crossing its boundary.
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::microseconds(o.batch_us);
+        std::vector<CompletedDmaBlock> blocks;
+        bool first = true;
+        while (g_run.load()) {
+            if (!first) {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) break;
+                auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
+                struct pollfd more { tun_fd, POLLIN, 0 };
+                int wait_ms = static_cast<int>((left + 999) / 1000);
+                int ready = ::poll(&more, 1, wait_ms);
+                if (ready < 0) { if (errno == EINTR) continue; break; }
+                if (ready == 0) break;
+            }
+            first = false;
+            ssize_t n = ::read(tun_fd, pkt.data(), pkt.size());
+            if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
+            if (static_cast<size_t>(n) > MAX_PAYLOAD) {
+                g_stats.tx_oversize.fetch_add(1);
+                continue;
+            }
+            auto wire = encode(pkt.data(), static_cast<size_t>(n), 0);
+            const size_t before = blocks.size();
+            if (!agg.addFrame(wire, static_cast<size_t>(n), true, blocks)) {
+                g_stats.tx_oversize.fetch_add(1);
+                continue;
+            }
+            if (blocks.size() != before) g_stats.tx_full_flush.fetch_add(1);
             g_stats.tx_pkts.fetch_add(1);
             g_stats.tx_bytes.fetch_add(static_cast<uint64_t>(n));
+            if (!transmit(blocks)) return;
         }
+        agg.flush(blocks);
+        if (!blocks.empty()) g_stats.tx_timeout_flush.fetch_add(1);
+        if (!transmit(blocks)) return;
     }
 }
 
@@ -679,7 +836,9 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
 
         // The component keeps running totals; publish the deltas.
         uint64_t c = deframer.crcErrors(),  d = deframer.duplicates();
-        g_stats.rx_crcerr.fetch_add(c - crc_seen); crc_seen = c;
+        g_stats.rx_crcerr.fetch_add(c - crc_seen);
+        g_stats.rx_rejected.fetch_add(c - crc_seen);
+        crc_seen = c;
         g_stats.rx_dup.fetch_add(d - dup_seen);    dup_seen = d;
         for (int i = 0; i < 4; ++i) g_stats.off_hits[i].store(deframer.offsetHits(i));
 
@@ -698,7 +857,10 @@ static void rxLoop(int tun_fd, int rx_fd, const Opts& o) {
             if (f.payload.empty()) continue;
 
             ssize_t w = ::write(tun_fd, f.payload.data(), f.payload.size());
-            if (w > 0) g_stats.rx_bytes.fetch_add(static_cast<uint64_t>(w));
+            if (w == static_cast<ssize_t>(f.payload.size()))
+                g_stats.rx_bytes.fetch_add(static_cast<uint64_t>(w));
+            else
+                g_stats.rx_tun_err.fetch_add(1);
         }
     }
 }
@@ -718,10 +880,14 @@ int main(int argc, char** argv) {
         else if (a == "--prefix")  o.prefix  = std::atoi(next("--prefix").c_str());
         else if (a == "--tx")    { o.tx_dev = next("--tx"); o.dev_explicit = true; }
         else if (a == "--rx")    { o.rx_dev = next("--rx"); o.dev_explicit = true; }
+        else if (a == "--direct-iio-tx") o.direct_iio_tx = true;
         else if (a == "--node-id") o.node_id = static_cast<uint32_t>(std::strtoul(next("--node-id").c_str(), nullptr, 0));
         else if (a == "--mtu")     o.mtu     = std::atoi(next("--mtu").c_str());
         else if (a == "--pkt")     o.pkt     = std::atoi(next("--pkt").c_str());
+        else if (a == "--tx-block") o.tx_block = std::atoi(next("--tx-block").c_str());
+        else if (a == "--tx-qlen") o.tx_qlen = std::atoi(next("--tx-qlen").c_str());
         else if (a == "--idle-ms") o.idle_ms = std::atoi(next("--idle-ms").c_str());
+        else if (a == "--batch-us") o.batch_us = std::atoi(next("--batch-us").c_str());
         else if (a == "--route")   o.route   = next("--route");
         // --raw-eth names the NIC and selects the AF_PACKET backend. The option
         // was documented in usage() and honoured everywhere below, but never
@@ -740,6 +906,22 @@ int main(int argc, char** argv) {
                      o.mtu, MAX_PAYLOAD);
         return 2;
     }
+    if (o.batch_us < 0 || o.batch_us > 1000000) {
+        std::fprintf(stderr, "bridge: --batch-us must be between 0 and 1000000\n");
+        return 2;
+    }
+    if (o.tx_block && (!o.direct_iio_tx || o.tx_block < 2048 || (o.tx_block % 4))) {
+        std::fprintf(stderr, "bridge: --tx-block requires --direct-iio-tx and a multiple of 4 >= 2048\n");
+        return 2;
+    }
+    if (o.tx_qlen < 1 || o.tx_qlen > 10000) {
+        std::fprintf(stderr, "bridge: --tx-qlen must be between 1 and 10000\n");
+        return 2;
+    }
+    if (o.dev_explicit && o.direct_iio_tx) {
+        std::fprintf(stderr, "bridge: --direct-iio-tx cannot be combined with --tx/--rx\n");
+        return 2;
+    }
 
     if (o.tx_dev.empty()) o.tx_dev = iioDevByName("cf-ad9361-dds-core-lpc");
     if (o.rx_dev.empty()) o.rx_dev = iioDevByName("cf-ad9361-lpc");
@@ -756,6 +938,7 @@ int main(int argc, char** argv) {
     ::signal(SIGPIPE, SIG_IGN);
 
     int tx_fd = -1, rx_fd = -1;
+    std::unique_ptr<DirectIioTx> direct_tx;
     if (o.dev_explicit) {
         // Raw paths: the test harness's FIFOs, or a deliberate override. This
         // does NOT work against a real radio on 6.12 -- see spawnIio above.
@@ -777,11 +960,20 @@ int main(int argc, char** argv) {
     // and matching the two keeps that scoping meaningful across the pipe.
     char nbuf[32];
     std::snprintf(nbuf, sizeof nbuf, "%d", o.pkt / 4);
+    const int tx_bytes = o.tx_block ? o.tx_block : o.pkt;
+    char tx_nbuf[32];
+    std::snprintf(tx_nbuf, sizeof tx_nbuf, "%d", tx_bytes / 4);
 
-    const char* tx_argv[] = { "iio_writedev", "-b", nbuf,
-                              "cf-ad9361-dds-core-lpc", "voltage0", "voltage1", nullptr };
-    tx_fd = spawnIio(tx_argv, true, &g_tx_pid);
-    if (tx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_writedev\n"); return 1; }
+    if (o.direct_iio_tx) {
+        direct_tx.reset(new DirectIioTx);
+        if (!direct_tx->open(static_cast<size_t>(tx_bytes / 4),
+                             static_cast<size_t>(tx_bytes))) return 1;
+    } else {
+        const char* tx_argv[] = { "iio_writedev", "-b", nbuf,
+                                  "cf-ad9361-dds-core-lpc", "voltage0", "voltage1", nullptr };
+        tx_fd = spawnIio(tx_argv, true, &g_tx_pid);
+        if (tx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_writedev\n"); return 1; }
+    }
 
     // Give the writer time to open the buffer, then redo the source select it
     // just undid. Do not open RX yet. On this image, enabling both IIO buffers
@@ -791,8 +983,12 @@ int main(int argc, char** argv) {
     // samples with both DMA IRQ counters advancing.
     ::usleep(3000 * 1000);
     selectDmaSource();
-    std::fprintf(stderr, "bridge: iio_writedev pid=%d buffer=%s samples (RX deferred)\n",
-                 (int)g_tx_pid, nbuf);
+    if (direct_tx)
+        std::fprintf(stderr, "bridge: direct single-buffer libiio TX, buffer=%s samples/%d bytes (RX deferred)\n",
+                     tx_nbuf, tx_bytes);
+    else
+        std::fprintf(stderr, "bridge: iio_writedev pid=%d buffer=%s samples (RX deferred)\n",
+                     (int)g_tx_pid, nbuf);
     }
 
     int tun_fd = o.raw_eth ? packetOpen(o.iface, o.mtu) : tunOpen(o.iface, o.mtu);
@@ -801,7 +997,7 @@ int main(int argc, char** argv) {
     // no IP of its own.
     if (!o.raw_eth && !tunConfigure(o)) { ::close(tun_fd); ::close(tx_fd); ::close(rx_fd); return 1; }
 
-    std::thread tx(txLoop, tun_fd, tx_fd, std::cref(o));
+    std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
 
     if (!o.dev_explicit) {
         // txLoop immediately fills and submits one complete DMA block. Allow
@@ -873,6 +1069,25 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.off_hits[2].load(),
             (unsigned long long)g_stats.off_hits[3].load(),
             (unsigned long long)g_stats.recoveries.load());
+
+        const uint64_t blocks = g_stats.tx_blocks.load();
+        const uint64_t data_blocks = g_stats.tx_data_blocks.load();
+        const uint64_t dma_bytes = g_stats.tx_dma_bytes.load();
+        const uint64_t payload_bytes = g_stats.tx_bytes.load();
+        const double util = dma_bytes ? 100.0 * payload_bytes / dma_bytes : 0.0;
+        const double ppb = data_blocks ? 1.0 * g_stats.tx_pkts.load() / data_blocks : 0.0;
+        std::fprintf(stderr,
+            "bridge: aggregate tx blocks %llu (data %llu), dma %llu B, padding %llu B, "
+            "util %.2f%%, %.2f pkt/data-block, full %llu, timeout %llu | "
+            "rx rejected %llu, tun-write-err %llu\n",
+            (unsigned long long)blocks,
+            (unsigned long long)data_blocks,
+            (unsigned long long)dma_bytes,
+            (unsigned long long)g_stats.tx_padding.load(), util, ppb,
+            (unsigned long long)g_stats.tx_full_flush.load(),
+            (unsigned long long)g_stats.tx_timeout_flush.load(),
+            (unsigned long long)g_stats.rx_rejected.load(),
+            (unsigned long long)g_stats.rx_tun_err.load());
 
         // ── Autonomous demodulator recovery ─────────────────────────────
         // A stalled core was measured with RX DMA still advancing, no frames
