@@ -14,5 +14,10 @@ IFACE=eth0
 SAMPLE_RATE=15360000       # 6.96 Mbit/s payload measured at this rate
 FREQUENCY=434000000        # THIS unit transmits here
 RX_FREQUENCY=444000000     # THIS unit listens here = the PEER's FREQUENCY
+# Each unit needs a DISTINCT node id. Frames carrying this unit's own id are
+# discarded as self-reception, so two units left on the default exchange
+# NOTHING while every counter looks healthy: frames decode, bytes delivered
+# stay at zero, and the discard was not even reported. UNIT-A 1, UNIT-B 2.
+NODE_ID=1
 DIFF_MODE=1
 STATS_S=30

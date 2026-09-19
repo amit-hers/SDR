@@ -771,6 +771,7 @@ struct Stats {
     // Frames too large for the framing layer, dropped rather than truncated.
     std::atomic<uint64_t> tx_oversize{0};
     std::atomic<uint64_t> loop_suppressed{0};
+    std::atomic<uint64_t> rx_inject_err{0};
     std::atomic<uint64_t> tx_blocks{0}, tx_data_blocks{0}, tx_dma_bytes{0};
     std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
     std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
@@ -1028,6 +1029,20 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
             // a peer frame that happens to use the same sequence number.
             if (f.node_id == o.node_id) {
                 g_stats.rx_self.fetch_add(1);
+                // Say so ONCE. Two units left on the default id discard every
+                // frame the other sends, silently: frames decode, nothing is
+                // delivered, and every other counter looks healthy. That is
+                // indistinguishable from a dead link unless this is reported.
+                static bool warned_self = false;
+                if (!warned_self) {
+                    warned_self = true;
+                    std::fprintf(stderr,
+                        "bridge: WARNING discarding a frame carrying THIS node's id (%u).\n"
+                        "bridge:         If the peer is not transmitting into a coupled\n"
+                        "bridge:         antenna, the two units share a node id and will\n"
+                        "bridge:         never exchange data. Give each --node-id.\n",
+                        o.node_id);
+                }
                 continue;
             }
             // A keepalive is not user data; handing an empty or filler packet
@@ -1042,7 +1057,23 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
                 g_loop_guard.learnFromRadio(f.payload.data(), f.payload.size(),
                                             std::chrono::steady_clock::now());
             }
+            // A FAILED INJECTION MUST BE VISIBLE. This previously did nothing
+            // on w <= 0: no counter, no message. A bridge decoding frames
+            // perfectly and failing to put a single one on the wire then looks
+            // identical to a dead RF link, and the interface's own tx counter
+            // -- the only other evidence -- sits at its boot value.
             ssize_t w = ::write(tun_fd, f.payload.data(), f.payload.size());
+            if (w <= 0) {
+                g_stats.rx_inject_err.fetch_add(1);
+                static bool said = false;
+                if (!said) {
+                    said = true;
+                    std::fprintf(stderr,
+                        "bridge: WARNING injecting a decoded frame onto %s failed: %s\n"
+                        "bridge:         (payload %zu B) -- further failures counted only\n",
+                        o.iface.c_str(), std::strerror(errno), f.payload.size());
+                }
+            }
             if (w == static_cast<ssize_t>(f.payload.size()))
                 g_stats.rx_bytes.fetch_add(static_cast<uint64_t>(w));
             else
@@ -1279,7 +1310,7 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr,
             "bridge: tx %llu pkts / %llu B (idle %llu, err %llu) | "
-            "rx %llu dma, %llu frames, %llu B (crcerr %llu, dup %llu, ctrl %llu) | "
+            "rx %llu dma, %llu frames, %llu B (crcerr %llu, dup %llu, ctrl %llu, self %llu) | "
             "offsets %llu/%llu/%llu/%llu | recoveries %llu\n",
             (unsigned long long)g_stats.tx_pkts.load(),
             (unsigned long long)g_stats.tx_bytes.load(),
@@ -1291,6 +1322,7 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.rx_crcerr.load(),
             (unsigned long long)g_stats.rx_dup.load(),
             (unsigned long long)g_stats.rx_ctrl.load(),
+            (unsigned long long)g_stats.rx_self.load(),
             (unsigned long long)g_stats.off_hits[0].load(),
             (unsigned long long)g_stats.off_hits[1].load(),
             (unsigned long long)g_stats.off_hits[2].load(),
@@ -1396,7 +1428,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "bridge: cpu decode %.1f%% now / %.1f%% avg (max %llu us/pkt) | "
             "rx gap max %llu us, short %llu | tx stall %llu ms | "
-            "%s drops tx %llu rx %llu (since start) | oversize %llu | loopsup %llu\n",
+            "%s drops tx %llu rx %llu (since start) | oversize %llu | loopsup %llu | injecterr %llu\n",
             busy_win, busy,
             (unsigned long long)g_stats.decode_us_max.load(),
             (unsigned long long)g_stats.rx_gap_us_max.load(),
@@ -1406,7 +1438,8 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.tun_tx_drop.load(),
             (unsigned long long)g_stats.tun_rx_drop.load(),
             (unsigned long long)g_stats.tx_oversize.load(),
-            (unsigned long long)g_stats.loop_suppressed.load());
+            (unsigned long long)g_stats.loop_suppressed.load(),
+            (unsigned long long)g_stats.rx_inject_err.load());
         if (busy_win > 70.0)
             std::fprintf(stderr,
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"

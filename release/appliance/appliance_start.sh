@@ -34,6 +34,11 @@ log() { printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)s" "$*" >> "$LOG"; }
 : "${FREQUENCY:=434000000}"          # this unit's TRANSMIT frequency
 : "${RX_FREQUENCY:=${FREQUENCY}}"    # this unit's RECEIVE frequency
 : "${DIFF_MODE:=1}"
+# Each unit needs a DISTINCT node id. Frames carrying this unit's own id are
+# discarded as self-reception, so two units left on the default exchange
+# nothing while every counter looks healthy -- frames decode, bytes delivered
+# stay at zero, and the discard is not reported.
+: "${NODE_ID:=1}"
 
 [ -x "$BRIDGE" ] || { log "no $BRIDGE"; exit 1; }
 [ -d "$TOOLS" ] || { log "no $TOOLS (modem bring-up scripts missing)"; exit 1; }
@@ -107,7 +112,7 @@ fi
 log "modem enabled (mod=$MOD_EN dem=$DEM_EN)"
 
 case "$MODE" in
-  raw-eth) set -- --raw-eth "$IFACE" ;;
+  raw-eth) set -- --raw-eth "$IFACE" --node-id "$NODE_ID" ;;
   tun)     set -- --local "${LOCAL_IP:?}" --peer "${PEER_IP:?}" --iface "${TUN_IFACE:-sdr0}" ;;
   *)       log "unknown MODE '$MODE'"; exit 1 ;;
 esac
