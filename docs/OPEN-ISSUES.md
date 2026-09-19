@@ -187,9 +187,21 @@ by the permission layer.
   minimum against the far end's measured level.
 - **jffs2 is 896 KB and fragments.** Delete, `sync`, confirm the space came back,
   write, then verify by checksum.
-- **USB port 1-8 on the development machine is unreliable.** It failed two
-  devices with `error -71` about 5 s after enumeration. UNIT-B has been stable
-  since moving to 1-6. Not a board fault.
+- **UNIT-B drops off USB shortly after enumerating. The fault follows the
+  BOARD, not the port.** It enumerates correctly -- serial `3SXRLJMXS7EL5IBJ`,
+  RNDIS registered -- then resets with `device descriptor read/64, error -71`
+  (`-EPROTO`) and disconnects, between 1 and 5 seconds later.
+
+  **This corrects an earlier entry here** which blamed host port 1-8 and said it
+  was "not a board fault". UNIT-B failed on 1-8, and now fails identically on
+  1-7, while UNIT-A runs fine on 1-8. Two ports, one board.
+
+  Clean enumeration followed by collapse on reset points at the cable or the
+  board's USB connector/supply rather than the host. Try in order: a different
+  USB cable (cheapest and most likely), then a powered hub, then a different
+  board-side connector if one is available. Note the appliance brings the AD9363
+  up at 0 dB attenuation shortly after boot, so current draw steps up around the
+  time of the failure -- a marginal supply would show exactly this.
 - **Never `pkill -f <pattern>` where the pattern appears in your own command
   line.** It matches the searching shell. Resolve by `/proc/PID/exe`, or use
   `pkill -x`.
