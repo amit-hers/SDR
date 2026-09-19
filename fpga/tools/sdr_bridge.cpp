@@ -1236,7 +1236,22 @@ int main(int argc, char** argv) {
     // Recovery is armed only after this process has decoded a real/control
     // frame.  With no RF at power-up, noise may exercise the timing loop and
     // increase mu_clamped; that alone must not cause periodic resets.
-    bool recovery_armed = false;
+    // Armed from the start, NOT after the first decoded frame.
+    //
+    // Arming on first success cannot rescue a COLD stall, and a cold stall is
+    // the case that actually occurs: the appliance resets the demodulator
+    // during bring-up, before the peer is transmitting, and the core comes up
+    // stalled on an idle channel. It then never decodes a frame, so recovery
+    // never arms and the link stays dead for ever. Measured: a unit whose
+    // demodulator input correlated 0.9969 against the reference at the correct
+    // level reported rx 2105 dma, 0 frames, crcerr 0 -- a perfect signal in and
+    // nothing out -- with recoveries 0 because the monitor was never armed.
+    // Restarting it once the peer was transmitting delivered 48,000 bytes.
+    //
+    // Arming immediately is safe: firing still requires DMA advancing AND
+    // mu_clamped climbing for two consecutive intervals, which an absent signal
+    // does not produce, and one attempt still disarms until a frame decodes.
+    bool recovery_armed = true;
     // Baseline the kernel's interface drop counters.
     //
     // They are cumulative since boot and count drops from ANY source, so
