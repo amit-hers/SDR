@@ -109,6 +109,66 @@ if [ "$FREQUENCY" = "$RX_FREQUENCY" ]; then
     log "        receiver, because idle fill keeps the transmitter keyed. Set"
     log "        RX_FREQUENCY to the peer's FREQUENCY in bridge.conf."
 fi
+# ── Preflight: refuse to forward on a configuration that cannot work ────────
+#
+# Every check here is a fault that has actually occurred, and each one produced
+# TOTAL SILENT FAILURE: frames decoded, counters healthy, nothing delivered.
+# A bridge that forwards nothing is indistinguishable from a dead radio, so the
+# safe state is not forwarding at all, loudly.
+PF=0
+pf_fail() { log "PREFLIGHT FAIL: $*"; PF=1; }
+
+# 1. FPGA identity. A userspace/bitstream mismatch changes register meanings;
+#    the register map has shifted between builds before.
+FPGA_MAGIC=$(devmem 0x43C50000 32 2>/dev/null)
+FPGA_ABI=$(devmem 0x43C50008 32 2>/dev/null)
+FPGA_MAP=$(devmem 0x43C5000C 32 2>/dev/null)
+[ "$FPGA_MAGIC" = "0x5344524C" ] || pf_fail "FPGA magic $FPGA_MAGIC, expected 0x5344524C"
+[ "$FPGA_ABI" = "0x00000003" ]   || pf_fail "FPGA ABI $FPGA_ABI, expected 0x00000003"
+[ "$FPGA_MAP" = "0x00000003" ]   || pf_fail "register map $FPGA_MAP, expected 0x00000003"
+
+# 2. TX and RX must differ. Equal means the unit jams its own receiver, because
+#    idle fill keeps the transmitter keyed: measured 207,991 false frames and
+#    zero bytes delivered.
+[ "$FREQUENCY" != "$RX_FREQUENCY" ] || pf_fail "tx and rx both $FREQUENCY; this unit will jam itself"
+
+# 3. diff_mode must match between this unit's modulator and demodulator.
+MOD_DIFF=$(devmem 0x43C10020 32 2>/dev/null)
+DEM_DIFF=$(devmem 0x43C00028 32 2>/dev/null)
+[ "$MOD_DIFF" = "$DEM_DIFF" ] || pf_fail "diff_mode mod=$MOD_DIFF dem=$DEM_DIFF; a mismatch decodes nothing"
+
+# 4. ADC data format. 0x71 rails the demodulator input at full scale whatever
+#    the RF does; the correct value on core 10.03 is 0x51.
+for _ch in 0 1; do
+    _f=$(devmem $((0x79020400 + 64*_ch)) 32 2>/dev/null)
+    [ "$_f" = "0x00000051" ] || pf_fail "ADC chan$_ch format $_f, expected 0x00000051"
+done
+
+# 5. Node id. Two units sharing one discard every frame the other sends, as
+#    self-reception, silently. This cannot be checked against the peer from
+#    here, but an unset id is the case that actually happened.
+case "$NODE_ID" in
+    ''|*[!0-9]*) pf_fail "NODE_ID '$NODE_ID' is not a number" ;;
+    *) [ "$NODE_ID" -gt 0 ] 2>/dev/null || pf_fail "NODE_ID must be > 0" ;;
+esac
+
+# 6. The data interface must exist and be up before it is put in promiscuous
+#    mode and bridged.
+if [ -d "/sys/class/net/$IFACE" ]; then
+    [ "$(cat /sys/class/net/$IFACE/carrier 2>/dev/null)" = "1" ] \
+        || log "PREFLIGHT WARN: $IFACE has no carrier; forwarding will start but carry nothing"
+else
+    pf_fail "interface $IFACE does not exist"
+fi
+
+if [ "$PF" -ne 0 ]; then
+    log "REFUSING TO FORWARD. The modem is configured but the bridge will not"
+    log "start, because a fault above makes silent total loss the likely result."
+    log "Networking is left in a safe non-forwarding state."
+    exit 1
+fi
+log "preflight OK (fpga=$FPGA_MAGIC abi=$FPGA_ABI map=$FPGA_MAP tx=$FREQUENCY rx=$RX_FREQUENCY node=$NODE_ID diff=$MOD_DIFF)"
+
 log "modem enabled (mod=$MOD_EN dem=$DEM_EN)"
 
 case "$MODE" in
