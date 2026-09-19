@@ -95,6 +95,17 @@ hardware specifications.
 
 ---
 
+## 2b. Fixed on 2026-09-19 (verify after any regression)
+
+| | fix | commit |
+|---|---|---|
+| Both units transmitted and received on ONE frequency, so each jammed its own receiver and nothing crossed | frequency-division duplex; `rx_framed.sh` RX LO is now a parameter, `appliance_start.sh` passes `RX_FREQUENCY` and warns when TX==RX | `2057ba7` |
+| No L2 loop suppression: two appliances on one segment would replicate without bound | `LoopGuard` source learning, 18 unit tests | `2efd8ab` |
+| Demod recovery could not rescue a COLD stall -- `recovery_armed` started false and only armed after a frame decoded | armed from startup | `dacbbd0` |
+| Recovery trigger demanded `mu_clamped` climb, missing a stall where it moved by 1 in 20 s | trigger on DMA advancing with the deframer inactive | `34f2160` |
+| Recovery then reset HEALTHY demodulators whenever traffic repeated | liveness counts frames + duplicates + CRC failures | `34f2160` |
+| Interface drop counter reported the kernel's boot-time total as bridge loss | baselined at start, labelled with the real interface | `780968f` |
+
 ## 3. Open, not yet explained
 
 ### 3.1 The link asymmetry disappears at stronger signal
@@ -202,6 +213,33 @@ concurrent edits to the same files will produce a conflict or a silent revert
 sooner or later, and a binary built from one session's tree was already found
 deployed while the other session was debugging it. **Decide which session owns
 `fpga/tools/sdr_bridge.cpp` before either changes it again.**
+
+### 3.8 The bridge path still does not carry Ethernet end to end
+
+With FDD configured and both units transmitting, a raw byte stream crosses at
+0.00% / 0.06% PER. The appliance bridges do not reproduce it: injected Ethernet
+frames reach the far unit's radio and are decoded, but the payload has not been
+observed arriving on the far wire. Best observed was 40 frames / 48,000 B on
+UNIT-A before the counter went flat.
+
+This is the single blocker for Phase 8, for the loop-guard hardware acceptance,
+and for any latency measurement.
+
+### 3.9 The two units run different bridge binaries
+
+UNIT-A `96dede1f...`, UNIT-B `ed148d99...`. Version skew between the ends makes
+every result ambiguous -- a binary that forwards nothing was already found
+deployed on one unit while the other was being debugged (3.6). **Check both
+checksums before interpreting any two-unit measurement.**
+
+### 3.10 Modulator crest factor is 1.09, not 1.71
+
+The TX IQ probe reads rms 5398 / peak 5894 under both the bridge and
+`tx_feed.sh`, a crest factor of 1.09-1.10, where the known-good figure recorded
+in this project is rms 4465 / peak 7648 = 1.71. Because both drivers agree it
+does not explain any current fault, but a near-constant envelope is not what
+root-raised-cosine filtered QPSK looks like. Either the probe taps before pulse
+shaping or the shaping is not doing what is assumed.
 
 ### 3.5 UNIT-B's flash is prefix-identical, not identical
 
