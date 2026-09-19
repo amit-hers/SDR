@@ -179,4 +179,11 @@ esac
 [ -n "${STATS_S:-}" ] && set -- "$@" --stats "$STATS_S"
 
 log "starting bridge: $*"
+# Hand over to the supervisor rather than exec'ing the bridge directly, so a
+# crash or a hang is recovered instead of ending the appliance silently.
+SUP=/mnt/jffs2/appliance_supervise.sh
+if [ -x "$SUP" ]; then
+    BRIDGE_ARGS="$*" LOG="$LOG" exec "$SUP"
+fi
+log "no $SUP; running the bridge unsupervised"
 exec "$BRIDGE" "$@" >>"$LOG" 2>&1
