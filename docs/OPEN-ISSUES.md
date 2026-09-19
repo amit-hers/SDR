@@ -119,7 +119,16 @@ cliff is a demodulator threshold rather than a front-end effect.
 Consequence for Phase 12: an adaptive scheme cannot wait for rising PER, because
 between "working" and "nothing" there is roughly one 10 dB step.
 
-### 3.3 The appliance runs at a rate where the weak direction is much worse
+### 3.3 RESOLVED: the low-rate anomaly was a signal-level artifact
+
+**Closed 2026-09-19.** Re-measured at RSSI 68 dB: 3.84 MS/s gives **0.00% PER**
+(3598 frames) and 2.40 MS/s also 0.00%, while 7.68 MS/s gives 0.03%. Throughput
+scales linearly and stays within 0.9% of theoretical at every rate. The
+"degrades at the lower rate" effect below is absent at adequate signal -- it was
+the same marginal-level artifact as the direction asymmetry in 3.1, not a
+property of the rate. Original text follows.
+
+### 3.3a The original observation (historical)
 
 `bridge.conf` sets 3.84 MS/s. Measured A -> B PER is 4.71% there against 0.67%
 at 7.68 MS/s, while B -> A is 0.00% at both. Degrading at the LOWER sample rate

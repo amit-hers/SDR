@@ -46,6 +46,31 @@ limit, and whatever the two bridges cost.
 about 1.74 Mbit/s of payload. Choosing the product rate should follow the
 Phase 8 Ethernet measurement rather than this one.
 
+## Rate sweep: taking it down
+
+Same link, RSSI held at 68 dB, 20 s per point, transmitter at 0 dB.
+
+| rate (MS/s) | demod (Mbit/s) | theoretical | frames | PER | goodput (Mbit/s) |
+|---|---|---|---|---|---|
+| 7.68 | 3.823 | 3.84 (99.6%) | 7219 | 0.03% | **3.462** |
+| 3.84 | 1.902 | 1.92 (99.1%) | 3598 | **0.00%** | **1.725** |
+| 2.40 | 1.193 | 1.20 (99.4%) | 2258 | **0.00%** | **1.083** |
+
+Throughput scales linearly with sample rate and stays within 0.9% of
+theoretical at every point, so nothing in the chain becomes a bottleneck as the
+rate changes. PER improves as the rate comes down -- 0.03% to zero -- which is
+the expected trade and is now measured rather than assumed.
+
+**This closes issue 3.3.** That issue recorded A -> B at 4.71% PER at
+3.84 MS/s against 0.67% at 7.68 MS/s, degrading at the LOWER rate, and called it
+unexplained and a reason not to pick a product rate yet. At adequate signal the
+anomaly is absent: 3.84 MS/s now measures 0.00%. It was the same marginal-level
+artifact as the direction asymmetry in 3.1, not a property of the rate.
+
+**For the product**, 3.84 MS/s gives 1.725 Mbit/s of payload at zero measured
+frame loss, and 7.68 MS/s doubles that for 0.03%. Both are modem-layer ceilings;
+the Ethernet path has not been measured yet.
+
 ## Measurement caution
 
 The RSSI printed at the end of this run was 114.50 dB, which is the noise floor:
