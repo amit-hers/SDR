@@ -22,7 +22,17 @@ log() { printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)s" "$*" >> "$LOG"; }
 : "${MODE:=raw-eth}"
 : "${IFACE:=eth0}"
 : "${SAMPLE_RATE:=3840000}"
-: "${FREQUENCY:=434000000}"
+# TX and RX frequencies are SEPARATE, and must be crossed between the two
+# units: A transmits where B listens and vice versa.
+#
+# A single frequency does not work. The bridge transmits idle fill continuously
+# to hold the demodulator's timing lock, so both radios key up permanently; on
+# one channel each unit then jams its own receiver. Measured with one unit alone
+# on the air: 207,991 false frames, 121,622 CRC failures, zero bytes delivered
+# -- it was demodulating itself. With TX and RX 10 MHz apart and BOTH units
+# transmitting, the same pair runs at 0.00% and 0.06% PER.
+: "${FREQUENCY:=434000000}"          # this unit's TRANSMIT frequency
+: "${RX_FREQUENCY:=${FREQUENCY}}"    # this unit's RECEIVE frequency
 : "${DIFF_MODE:=1}"
 
 [ -x "$BRIDGE" ] || { log "no $BRIDGE"; exit 1; }
@@ -77,9 +87,9 @@ for d in /proc/[0-9]*; do
     esac
 done
 
-log "bring-up: fs=$SAMPLE_RATE lo=$FREQUENCY diff=$DIFF_MODE"
+log "bring-up: fs=$SAMPLE_RATE tx_lo=$FREQUENCY rx_lo=$RX_FREQUENCY diff=$DIFF_MODE"
 sh "$TOOLS/tx_fabric.sh" "$SAMPLE_RATE" "$FREQUENCY" "$DIFF_MODE" >>"$LOG" 2>&1
-sh "$TOOLS/rx_framed.sh" "$SAMPLE_RATE"                            >>"$LOG" 2>&1
+sh "$TOOLS/rx_framed.sh" "$SAMPLE_RATE" "$DIFF_MODE" "$RX_FREQUENCY" >>"$LOG" 2>&1
 
 # Verify the fabric actually came up before handing over, so a failure is
 # reported here rather than as unexplained bridge errors later.
@@ -88,6 +98,11 @@ DEM_EN=$(devmem 0x43C00010 32 2>/dev/null)
 if [ "$MOD_EN" != "0x00000001" ] || [ "$DEM_EN" != "0x00000001" ]; then
     log "modem did not enable (mod=$MOD_EN dem=$DEM_EN); refusing to start the bridge"
     exit 1
+fi
+if [ "$FREQUENCY" = "$RX_FREQUENCY" ]; then
+    log "WARNING tx and rx are both $FREQUENCY -- this unit will jam its own"
+    log "        receiver, because idle fill keeps the transmitter keyed. Set"
+    log "        RX_FREQUENCY to the peer's FREQUENCY in bridge.conf."
 fi
 log "modem enabled (mod=$MOD_EN dem=$DEM_EN)"
 

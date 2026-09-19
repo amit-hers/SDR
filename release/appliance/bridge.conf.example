@@ -1,13 +1,18 @@
-# Appliance configuration. Copy to /mnt/jffs2/bridge.conf to enable autostart.
-# Absent, the radio boots and does nothing -- deliberately opt-in, so a
-# misconfiguration cannot leave a board unreachable with no way back.
-MODE=raw-eth          # raw-eth (transparent Ethernet) | tun (routed IP)
+# Appliance configuration. Copy to /mnt/jffs2/bridge.conf.
+#
+# FREQUENCY and RX_FREQUENCY must be CROSSED between the two units:
+#   UNIT-A:  FREQUENCY=434000000   RX_FREQUENCY=444000000
+#   UNIT-B:  FREQUENCY=444000000   RX_FREQUENCY=434000000
+#
+# Setting both to the same value makes each unit jam its own receiver: the
+# bridge transmits idle fill continuously to hold the demodulator's timing
+# lock, so the radio is keyed permanently. Measured on one channel: zero bytes
+# delivered in either direction. Measured 10 MHz apart with both units
+# transmitting: 0.00% and 0.06% PER.
+MODE=raw-eth
 IFACE=eth0
-SAMPLE_RATE=3840000
-FREQUENCY=434000000
+SAMPLE_RATE=15360000       # 6.96 Mbit/s payload measured at this rate
+FREQUENCY=434000000        # THIS unit transmits here
+RX_FREQUENCY=444000000     # THIS unit listens here = the PEER's FREQUENCY
 DIFF_MODE=1
 STATS_S=30
-# TUN mode only:
-# LOCAL_IP=10.7.0.1
-# PEER_IP=10.7.0.2
-# TUN_IFACE=sdr0
