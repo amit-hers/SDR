@@ -36,6 +36,30 @@ autostart, so the loop is armed the moment any host sends a frame.
 
 **Needed:** remove the cable.
 
+### 1.1a LOOP GUARD IN PLACE: UNIT-B's appliance autostart is disabled
+
+The loop in 1.1 became reachable once forwarding was fixed. Earlier it could not
+fire because the binary deployed on the boards forwarded nothing (issue 3.6);
+both boards now run a build that does, and both had the appliance hooked into
+`autorun.sh`. The next power cycle would have brought up two promiscuous
+bridges on one switch segment -- and that segment carries the development
+host's internet uplink, so the storm would not have stayed inside the test.
+
+**Mitigation applied:** the appliance hook in `/mnt/jffs2/autorun.sh` on
+**UNIT-B only** is commented out, marked `LOOP GUARD`, with the original saved
+as `autorun.sh.bak`. UNIT-A still autostarts -- a single bridge cannot loop.
+
+**To re-enable** (after the two RJ45 ports are on separate segments): delete the
+`#` in front of the `[ -x /mnt/jffs2/appliance_start.sh ]` line on UNIT-B, or
+restore `autorun.sh.bak`.
+
+This is a workaround for the topology, not a fix. A transparent L2 bridge that
+can be cabled into a loop should defend itself -- the frames it injects are
+indistinguishable to it from frames a peer originated, so suppressing them needs
+something the bridge can recognise, such as tagging its own injections or
+learning which source MACs arrive from the radio. Worth designing before the
+product is deployed anywhere with a switch behind it.
+
 ### 1.2 No host endpoints
 
 Phase 8 needs an independent Ethernet endpoint per unit. The development machine
