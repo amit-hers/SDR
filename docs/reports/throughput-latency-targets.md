@@ -20,9 +20,43 @@ actually FALLS below the 7.68 figure; at 17.28 MS/s the link collapses
 entirely at 96% PER.
 
 So **3.46 Mbit/s is the honest current ceiling**, about a third of the way into
-the 5-10 Mbit/s band. Reaching that band needs the 15.36 MS/s path to sustain,
-which it does not today -- the loss there is capture/DMA side, not the channel,
-since PER is still only 0.28% on the frames that do arrive.
+the 5-10 Mbit/s band.
+
+### The ceiling is in the demodulator, not the DMA
+
+**Corrected.** This was first recorded as a capture/DMA limitation. It is not.
+At 15.36 MS/s the receive path is clean by every available measure:
+
+    DMA gap between consecutive packets: median 0 B, mean 0 B, p90 0 B, max 0 B
+    capture duty cycle: 100.0% of the demodulated stream reached userspace
+    PER 0.34%, CRC failures 1, payload mismatches 0
+
+Nothing is lost in capture. And the sample interface is running at full rate --
+`l_clk_mon` reads 5033 / 10066 / 20132 at 3.84 / 7.68 / 15.36 MS/s, exactly
+doubling each time, a constant 1310.7 counts per MS/s. So the AD9363 is
+delivering samples as configured.
+
+What saturates is the demodulator's own output:
+
+| fs | theoretical | measured | % of theory | behaves like |
+|---|---|---|---|---|
+| 3.84 MS/s | 1.92 Mbit/s | 1.902 | 99.1% | 3.80 MS/s |
+| 7.68 MS/s | 3.84 Mbit/s | 3.823 | 99.6% | 7.65 MS/s |
+| 15.36 MS/s | 7.68 Mbit/s | 5.520 | **71.9%** | **11.04 MS/s** |
+| 17.28 MS/s | 8.64 Mbit/s | 3.725 | **43.1%** | 7.45 MS/s |
+
+The core tracks the sample rate exactly up to 7.68 MS/s and then stops scaling,
+flattening at roughly 5.5 Mbit/s of output -- as though it were fed about
+11 MS/s. At 17.28 MS/s it is worse than at 7.68, which looks like intermittent
+loss of lock rather than a clean throughput limit.
+
+**This redirects the throughput work.** A smaller `PKT_BYTES` will not raise
+throughput, because the packetizer is not the constraint; and raising the sample
+rate past 7.68 MS/s buys 44% more at 15.36 and nothing at all at 17.28. The
+5-10 Mbit/s target needs the demodulator core itself to sustain a higher symbol
+rate. `docs/fabric-modem.md` puts the modem clock ceiling at 35 MHz / 2 =
+17.5 MS/s, so the limit being hit here at an effective 11 MS/s is below that and
+is worth understanding before any FPGA rebuild is attempted.
 
 Note the project history records 7.85 Mbit/s at 17.28 MS/s. That is not
 reproduced here and should not be relied on until it is: this run collapses at
