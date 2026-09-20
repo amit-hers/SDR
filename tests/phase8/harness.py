@@ -264,9 +264,14 @@ def check_preconditions(a_host: str, b_host: str,
     add("peer compatibility reported", pc_a == "COMPATIBLE",
         f"peer handshake reports {pc_a}; tests needing it are skipped, not assumed",
         blocking=False)
-    q = sb.get("queues", {}).get("control_depth", "UNKNOWN")
-    add("queue metrics available", q != "UNKNOWN",
-        "scheduler not wired into txLoop; queue tests skipped", blocking=False)
+    # Queue metrics now come from the bridge's own JSON, so this reads from
+    # there. It was left pointing at the old location after the scheduler was
+    # integrated, and reported "not wired into txLoop" about a scheduler that
+    # was -- a precondition describing a stale layout is itself a fixture bug.
+    q = _dig(sb, ("bridge", "queues", "control_depth"))
+    add("queue metrics available", isinstance(q, (int, float)),
+        "scheduler metrics not published by the bridge; queue tests skipped",
+        blocking=False)
     return P
 
 
