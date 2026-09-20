@@ -17,6 +17,24 @@ LOG=/tmp/appliance.log
 log() { printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)s" "$*" >> "$LOG"; }
 
 [ -f "$CONF" ] || { log "no $CONF; appliance mode not configured, doing nothing"; exit 0; }
+
+# VALIDATE BEFORE SOURCING. `.` executes the file, so a half-written config --
+# power lost during a write -- can end mid-token and either abort startup or run
+# whatever the truncation spells. Parse it as data first, and refuse to forward
+# on anything that does not validate rather than falling back to defaults:
+# defaults are how two units ended up sharing node_id 1 and silently discarding
+# every frame the other sent.
+SCHEMA=/mnt/jffs2/config_schema.sh
+if [ -x "$SCHEMA" ]; then
+    if ! _cfgerr=$("$SCHEMA" validate "$CONF" 2>&1); then
+        log "CONFIGURATION REJECTED -- not forwarding:"
+        echo "$_cfgerr" | while IFS= read -r _l; do log "  $_l"; done
+        log "Fix $CONF. Networking is left in a safe non-forwarding state."
+        exit 1
+    fi
+else
+    log "WARNING $SCHEMA missing; config is being sourced unvalidated"
+fi
 . "$CONF"
 
 : "${MODE:=raw-eth}"
