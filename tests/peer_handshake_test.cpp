@@ -27,6 +27,11 @@ static void pair(PeerIdentity& a, PeerIdentity& b) {
     a.pkt_bytes=b.pkt_bytes=32768;
     a.fpga_abi=b.fpga_abi=3; a.fpga_map=b.fpga_map=3;
     a.sw_version=b.sw_version=0xABCD;
+    // Distinct MACs: the authoritative identity. Without these the two would be
+    // the same unit hearing itself, not a pair.
+    uint8_t ma[6]={0x00,0x60,0x88,0x3d,0x32,0xae};
+    uint8_t mb[6]={0x00,0x60,0x88,0x3e,0x18,0x23};
+    std::memcpy(a.mac, ma, 6); std::memcpy(b.mac, mb, 6);
 }
 
 int main() {
@@ -49,7 +54,7 @@ int main() {
     pair(a,b); b.node_id = a.node_id;            // both left on the default
     { auto c = checkPeer(a,b);
       check(c.verdict == PeerVerdict::INCOMPATIBLE, "duplicate node_id -> PEER_INCOMPATIBLE");
-      check(mentions(c,"duplicate node_id"), "the reason names the duplicate id"); }
+      check(mentions(c,"node_id COLLISION"), "the reason names the shared id"); }
 
     std::printf("\nfrequency misconfiguration\n");
     pair(a,b); b.tx_freq = b.rx_freq = 434000000; // peer not crossed: jams itself
@@ -86,6 +91,22 @@ int main() {
     pair(a,b); b.node_id = a.node_id; b.diff_mode = 0; b.sample_rate = 7680000;
     { auto c = checkPeer(a,b);
       check(c.reasons.size() >= 3, "three faults give at least three reasons (got " + std::to_string(c.reasons.size()) + ")"); }
+
+    std::printf("\nMAC as authoritative identity\n");
+    pair(a,b);
+    { auto w = encodeHello(a); PeerIdentity r; decodeHello(w.data(), w.size(), r);
+      check(std::memcmp(r.mac, a.mac, 6) == 0, "the MAC survives the wire format"); }
+    pair(a,b); std::memcpy(b.mac, a.mac, 6);      // same MAC = our own signal
+    { auto c = checkPeer(a,b);
+      check(c.verdict == PeerVerdict::UNKNOWN, "a HELLO carrying our own MAC is not a peer");
+      check(c.reasons.empty(), "hearing our own transmitter is not an incompatibility"); }
+
+    std::printf("\nnode_id hash collision between DIFFERENT boards\n");
+    pair(a,b); b.node_id = a.node_id;             // distinct MACs, same derived id
+    { auto c = checkPeer(a,b);
+      check(c.verdict == PeerVerdict::INCOMPATIBLE, "same id from different MACs -> INCOMPATIBLE");
+      check(mentions(c,"COLLISION"), "the reason says COLLISION, not merely duplicate");
+      check(mentions(c,"Reprovision"), "and tells the operator what to do"); }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;

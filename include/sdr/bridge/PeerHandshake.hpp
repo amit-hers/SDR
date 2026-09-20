@@ -32,6 +32,12 @@ struct PeerIdentity {
     uint32_t rx_freq      = 0;
     uint32_t sw_version   = 0;   // build hash, advisory only
     uint8_t  diff_mode    = 0;
+    // THE AUTHORITATIVE IDENTITY. node_id is a 31-bit hash of this, carried in
+    // every frame header because the header has no room for more; the MAC
+    // itself is carried here, where there is room. Two units can only share a
+    // node_id by hash collision, and when they do this is what distinguishes
+    // them.
+    uint8_t  mac[6]       = {0,0,0,0,0,0};
     char     serial[17]   = {0}; // NUL-terminated, advisory
 };
 
@@ -45,7 +51,7 @@ struct PeerCheck {
 
 static constexpr uint32_t HELLO_MAGIC   = 0x48524453;  // "SDRH" little-endian
 static constexpr uint8_t  HELLO_VERSION = 1;
-static constexpr std::size_t HELLO_SIZE = 4 + 1 + 4*8 + 1 + 16;   // 54 bytes
+static constexpr std::size_t HELLO_SIZE = 4 + 1 + 4*8 + 1 + 6 + 16;   // 60 bytes
 
 inline void put32(uint8_t*& p, uint32_t v) { std::memcpy(p, &v, 4); p += 4; }
 inline uint32_t get32(const uint8_t*& p) { uint32_t v; std::memcpy(&v, p, 4); p += 4; return v; }
@@ -59,6 +65,7 @@ inline std::vector<uint8_t> encodeHello(const PeerIdentity& id) {
     put32(p, id.pkt_bytes); put32(p, id.sample_rate); put32(p, id.tx_freq);
     put32(p, id.rx_freq);   put32(p, id.sw_version);
     *p++ = id.diff_mode;
+    std::memcpy(p, id.mac, 6); p += 6;
     std::memcpy(p, id.serial, 16);
     return out;
 }
@@ -72,6 +79,7 @@ inline bool decodeHello(const uint8_t* b, std::size_t n, PeerIdentity& out) {
     out.pkt_bytes = get32(p); out.sample_rate = get32(p); out.tx_freq = get32(p);
     out.rx_freq = get32(p); out.sw_version = get32(p);
     out.diff_mode = *p++;
+    std::memcpy(out.mac, p, 6); p += 6;
     std::memcpy(out.serial, p, 16); out.serial[16] = 0;
     return true;
 }
@@ -82,11 +90,27 @@ inline PeerCheck checkPeer(const PeerIdentity& me, const PeerIdentity& peer) {
     PeerCheck c;
     auto bad = [&](const std::string& s) { c.reasons.push_back(s); };
 
-    // The failure this was written for. Identical ids mean each unit discards
-    // the other's frames as its own transmission.
+    const bool same_mac = std::memcmp(me.mac, peer.mac, 6) == 0;
+
+    // Our own signal coming back, not a peer. A unit with a coupled antenna
+    // hears itself; that is expected and is not an incompatibility.
+    if (same_mac) {
+        c.warnings.push_back("this HELLO carries our own MAC: hearing our own transmitter");
+        c.verdict = PeerVerdict::UNKNOWN;
+        return c;
+    }
+
+    // The failure this was written for, and the hash collision behind it.
+    // node_id is 31 bits derived from a 48-bit MAC, so two units CAN derive the
+    // same id. Different MACs with the same id is that collision, and it is
+    // fatal in a way the operator cannot otherwise see: each unit discards the
+    // other's frames as self-reception, so neither ever receives this HELLO.
+    // It is named here for the case where one side is reachable by other means.
     if (peer.node_id == me.node_id)
-        bad("duplicate node_id " + std::to_string(me.node_id) +
-            ": each unit will discard the other's frames as self-reception");
+        bad("node_id COLLISION: both units derived " + std::to_string(me.node_id) +
+            " from different MACs. Each discards the other's frames as "
+            "self-reception, so neither will ever see the other's HELLO. "
+            "Reprovision one unit.");
 
     // Frequencies must be CROSSED. Equal on one unit means it jams itself;
     // uncrossed between units means they never hear each other.

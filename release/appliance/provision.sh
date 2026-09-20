@@ -95,9 +95,42 @@ verify() {
     echo "VERIFY OK: NODE_ID=$_cfg matches this board"
 }
 
+# Manufacturing-time collision detection.
+#
+# node_id is 31 bits derived from a 48-bit MAC, so two boards CAN derive the
+# same value. In the field that collision is undetectable in band: each unit
+# discards the other's frames as self-reception, so neither ever receives the
+# other's HELLO to be told. It therefore has to be caught before the units
+# leave, against a registry of what has already been assigned.
+register() {
+    reg=${1:?registry path}
+    _mac=$(mac_of eth0)
+    _nid=$(derive_node_id) || { echo "REGISTER FAIL: no usable eth0 MAC" >&2; return 1; }
+    [ -f "$reg" ] || : > "$reg"
+    # Same board registered again is fine and idempotent.
+    if grep -q "^$_mac " "$reg" 2>/dev/null; then
+        _prev=$(grep "^$_mac " "$reg" | head -1 | cut -d' ' -f2)
+        if [ "$_prev" = "$_nid" ]; then echo "REGISTER OK: $_mac already registered as $_nid"; return 0; fi
+        echo "REGISTER FAIL: $_mac was registered as $_prev, now derives $_nid" >&2; return 1
+    fi
+    # A different board claiming an id already taken is the collision.
+    if _clash=$(grep " $_nid\$" "$reg" 2>/dev/null | head -1) && [ -n "$_clash" ]; then
+        echo "REGISTER FAIL: node_id $_nid is already held by MAC $(echo "$_clash" | cut -d' ' -f1)" >&2
+        echo "REGISTER FAIL: this is a hash collision between two different boards." >&2
+        echo "REGISTER FAIL: it CANNOT be detected once both units are deployed --" >&2
+        echo "REGISTER FAIL: each would discard the other's frames as self-reception." >&2
+        echo "REGISTER FAIL: assign this unit an explicit NODE_ID and record it here." >&2
+        return 1
+    fi
+    printf '%s %s\n' "$_mac" "$_nid" >> "$reg"
+    sync
+    echo "REGISTER OK: $_mac -> $_nid"
+}
+
 case "${1:-}" in
+    register) register "${2:?registry path}" ;;
     show)   show ;;
     apply)  apply "${2:-/mnt/jffs2/bridge.conf}" ;;
     verify) verify "${2:-/mnt/jffs2/bridge.conf}" ;;
-    *) echo "usage: $0 show|apply|verify [config]" >&2; exit 2 ;;
+    *) echo "usage: $0 show|apply|verify [config] | register <registry>" >&2; exit 2 ;;
 esac
