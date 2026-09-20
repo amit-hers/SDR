@@ -82,7 +82,18 @@ while :; do
     stall=0
     while [ "$stall" -lt "$HANG_CHECKS" ]; do
         sleep "$POLL"
-        [ "$(count_bridges)" -eq 0 ] && { log "bridge died; will restart"; break; }
+        _n=$(count_bridges)
+        [ "$_n" -eq 0 ] && { log "bridge died; will restart"; break; }
+        # Check for duplicates HERE too, not only at the top of the outer loop.
+        # That loop can sit in this poll for HANG_CHECKS*POLL seconds, and a
+        # second bridge doubles every frame onto the radio for the whole of
+        # that window. Measured: a manually started bridge survived alongside
+        # the supervised one for the full interval.
+        if [ "$_n" -gt 1 ]; then
+            log "found $_n bridges mid-poll; killing all (duplicates double every frame)"
+            kill_bridges; sleep 2
+            break
+        fi
         after=$(wc -c < "$LOG" 2>/dev/null || echo 0)
         if [ "$after" -gt "$before" ]; then stall=0; before=$after
         else stall=$((stall+1)); fi

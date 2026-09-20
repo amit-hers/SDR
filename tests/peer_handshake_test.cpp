@@ -3,6 +3,7 @@
 // The requirement: swapping in a misconfigured or duplicate-ID unit must
 // produce a clear PEER_INCOMPATIBLE state, not silent packet loss.
 #include "sdr/bridge/PeerHandshake.hpp"
+#include "precondition.hpp"
 #include <cstdio>
 #include <string>
 
@@ -36,6 +37,20 @@ static void pair(PeerIdentity& a, PeerIdentity& b) {
 
 int main() {
     PeerIdentity a, b;
+
+    // PRECONDITIONS. Prove the fixtures represent two distinct units before any
+    // peer behaviour is evaluated. Without this, every result below is about a
+    // unit compared with itself -- which is exactly how 13 assertions here once
+    // passed while testing nothing.
+    std::printf("preconditions\n");
+    pair(a,b);
+    sdr::test::requireDistinctUnits(a.mac, b.mac);
+    sdr::test::require(a.node_id != b.node_id, "fixture node_ids differ");
+    sdr::test::require(a.tx_freq == b.rx_freq && a.rx_freq == b.tx_freq,
+                       "fixture frequencies are crossed (a valid pair)");
+    sdr::test::require(checkPeer(a,b).verdict == PeerVerdict::COMPATIBLE,
+                       "the baseline pair is COMPATIBLE");
+    std::printf("\n");
 
     std::printf("wire format\n");
     pair(a,b);
