@@ -63,17 +63,29 @@ def status(host: str) -> dict:
 # reported must be a delta. Reporting a boot-time total as a test loss has
 # already happened once in this project: "tun drops tx 4" was the kernel's own
 # pre-bridge count.
+# The bridge publishes its own counters as JSON and the status view embeds them
+# verbatim under "bridge", so these read from there. Kernel interface counters
+# stay under "ethernet" because they are NOT the bridge's: a boot-time
+# tx_dropped was once reported as bridge loss precisely because the two were
+# conflated.
 COUNTER_PATHS = [
-    ("rx.dma", ("rx", "dma")), ("rx.frames", ("rx", "frames")),
-    ("rx.delivered_bytes", ("rx", "delivered_bytes")),
-    ("rx.crc_errors", ("rx", "crc_errors")), ("rx.duplicates", ("rx", "duplicates")),
-    ("rx.control", ("rx", "control")), ("rx.self_discarded", ("rx", "self_discarded")),
-    ("tx.packets", ("tx", "packets")), ("tx.errors", ("tx", "errors")),
-    ("tx.oversize", ("tx", "oversize")),
+    ("rx.dma", ("bridge", "rx", "dma")), ("rx.frames", ("bridge", "rx", "frames")),
+    ("rx.delivered_bytes", ("bridge", "rx", "bytes")),
+    ("rx.crc_errors", ("bridge", "rx", "crc_errors")),
+    ("rx.duplicates", ("bridge", "rx", "duplicates")),
+    ("rx.control", ("bridge", "rx", "control")),
+    ("rx.self_discarded", ("bridge", "rx", "self")),
+    ("rx.inject_err", ("bridge", "rx", "inject_err")),
+    ("tx.packets", ("bridge", "tx", "packets")), ("tx.errors", ("bridge", "tx", "errors")),
+    ("tx.oversize", ("bridge", "tx", "oversize")),
+    ("q.control_depth", ("bridge", "queues", "control_depth")),
+    ("q.bulk_depth", ("bridge", "queues", "bulk_depth")),
+    ("q.control_drops", ("bridge", "queues", "control_drops")),
+    ("q.bulk_drops", ("bridge", "queues", "bulk_drops")),
     ("eth.rx_packets", ("ethernet", "rx_packets")),
     ("eth.tx_packets", ("ethernet", "tx_packets")),
-    ("loop.suppressed", ("loop_guard", "suppressed")),
-    ("sup.recoveries", ("supervisor", "recoveries")),
+    ("loop.suppressed", ("bridge", "loop_guard", "suppressed")),
+    ("sup.recoveries", ("bridge", "recoveries")),
     ("sup.restarts", ("supervisor", "restarts")),
     ("sup.faulted", ("supervisor", "faulted")),
 ]

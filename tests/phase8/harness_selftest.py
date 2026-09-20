@@ -23,11 +23,14 @@ GOOD_A = {
              "tx_hz": "434000000", "rx_hz": "444000000", "sample_rate": "15360000"},
   "peer": {"compatibility": "UNKNOWN"},
   "modem": {}, "queues": {"control_depth": "UNKNOWN"},
-  "rx": {"dma": 10, "frames": 20, "delivered_bytes": 30, "crc_errors": 0, "duplicates": 0,
-         "control": 5, "self_discarded": 0},
-  "tx": {"packets": 1, "errors": 0, "oversize": 0},
+  "bridge": {"node_id": 327951062,
+             "rx": {"dma": 10, "frames": 20, "bytes": 30, "crc_errors": 0,
+                    "duplicates": 0, "control": 5, "self": 0, "inject_err": 0},
+             "tx": {"packets": 1, "errors": 0, "oversize": 0},
+             "queues": {"control_depth": 0, "bulk_depth": 0, "control_drops": 0,
+                        "bulk_drops": 0, "drain_ms": 0},
+             "loop_guard": {"suppressed": 0}, "recoveries": 0},
   "ethernet": {"rx_packets": 5, "tx_packets": 5},
-  "loop_guard": {"suppressed": 0},
   "supervisor": {"bridges_running": 1, "supervisors": 1, "recoveries": 0, "restarts": 1, "faulted": 0},
   "progress": {"frames_idle_s": 0, "delivered_idle_s": 0, "verdict": "forwarding"},
 }
@@ -106,10 +109,10 @@ try: s.validate(10.0); ck(True, "a live source that produced its quota validates
 except H.Invalid: ck(False, "a live source that produced its quota validates")
 
 print("\ncounter deltas -- boot totals must never be reported as losses")
-a2 = copy.deepcopy(GOOD_A); a2["rx"]["crc_errors"] = 7
+a2 = copy.deepcopy(GOOD_A); a2["bridge"]["rx"]["crc_errors"] = 7
 d = H.deltas(GOOD_A, a2)
 ck(d["rx.crc_errors"] == {"before": 0, "after": 7, "delta": 7}, "delta is after-before, not after")
-a3 = copy.deepcopy(GOOD_A); del a3["rx"]["duplicates"]
+a3 = copy.deepcopy(GOOD_A); del a3["bridge"]["rx"]["duplicates"]
 ck(H.deltas(GOOD_A, a3)["rx.duplicates"]["delta"] is None, "a missing field is None, not zero")
 
 print("\nprogress and liveness -- which layer stopped?")
@@ -126,7 +129,7 @@ ck(not H.progress_stalled(copy.deepcopy(GOOD_A))[0], "a healthy unit is not repo
 print("\nhidden instability -- delivering every byte while recovering")
 d = H.deltas(GOOD_A, GOOD_A)
 ck(H.unexpected_recovery(d) == [], "a quiet run reports no instability")
-a4 = copy.deepcopy(GOOD_A); a4["supervisor"]["recoveries"] = 3; a4["supervisor"]["restarts"] = 2
+a4 = copy.deepcopy(GOOD_A); a4["bridge"]["recoveries"] = 3; a4["supervisor"]["restarts"] = 2
 r = H.unexpected_recovery(H.deltas(GOOD_A, a4))
 ck(len(r) == 2, "recoveries and restarts during a run are both surfaced")
 

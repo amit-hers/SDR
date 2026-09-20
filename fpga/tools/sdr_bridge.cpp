@@ -1491,6 +1491,61 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.q_ctrl_drop.load(),
             (unsigned long long)g_stats.q_bulk_drop.load(),
             (unsigned long long)g_stats.q_drain_ms.load());
+        // Emit the same numbers as MACHINE-READABLE JSON.
+        //
+        // The line above is for a person reading a log. It is not an interface,
+        // and twice now something has re-parsed it and got a plausible wrong
+        // answer: a pattern for "rx" also matched "rx gap" and reported 0 where
+        // the line said 863, and a pattern containing a slash collided with
+        // sed's delimiter and reported null where a number existed. The format
+        // was the bug source, not the patterns, so the numbers are published
+        // directly here and nothing needs to parse prose.
+        //
+        // Written to a temp and renamed, so a reader never sees a half-written
+        // file.
+        {
+            const char* path = "/tmp/bridge_stats.json";
+            const char* tmpp = "/tmp/bridge_stats.json.new";
+            if (FILE* jf = std::fopen(tmpp, "w")) {
+                std::fprintf(jf,
+                    "{\"iface\":\"%s\",\"node_id\":%u,"
+                    "\"tx\":{\"packets\":%llu,\"bytes\":%llu,\"idle\":%llu,"
+                    "\"errors\":%llu,\"oversize\":%llu,\"stall_ms\":%llu},"
+                    "\"rx\":{\"dma\":%llu,\"frames\":%llu,\"bytes\":%llu,"
+                    "\"crc_errors\":%llu,\"duplicates\":%llu,\"control\":%llu,"
+                    "\"self\":%llu,\"inject_err\":%llu},"
+                    "\"queues\":{\"control_depth\":%llu,\"bulk_depth\":%llu,"
+                    "\"control_drops\":%llu,\"bulk_drops\":%llu,\"drain_ms\":%llu},"
+                    "\"loop_guard\":{\"suppressed\":%llu},"
+                    "\"recoveries\":%llu,\"cpu_decode_pct\":%.1f}\n",
+                    o.iface.c_str(), o.node_id,
+                    (unsigned long long)g_stats.tx_pkts.load(),
+                    (unsigned long long)g_stats.tx_bytes.load(),
+                    (unsigned long long)g_stats.tx_idle.load(),
+                    (unsigned long long)g_stats.tx_err.load(),
+                    (unsigned long long)g_stats.tx_oversize.load(),
+                    (unsigned long long)(g_stats.tx_stall_us_total.load() / 1000),
+                    (unsigned long long)g_stats.rx_dma.load(),
+                    (unsigned long long)g_stats.rx_frames.load(),
+                    (unsigned long long)g_stats.rx_bytes.load(),
+                    (unsigned long long)g_stats.rx_crcerr.load(),
+                    (unsigned long long)g_stats.rx_dup.load(),
+                    (unsigned long long)g_stats.rx_ctrl.load(),
+                    (unsigned long long)g_stats.rx_self.load(),
+                    (unsigned long long)g_stats.rx_inject_err.load(),
+                    (unsigned long long)g_stats.q_ctrl_depth.load(),
+                    (unsigned long long)g_stats.q_bulk_depth.load(),
+                    (unsigned long long)g_stats.q_ctrl_drop.load(),
+                    (unsigned long long)g_stats.q_bulk_drop.load(),
+                    (unsigned long long)g_stats.q_drain_ms.load(),
+                    (unsigned long long)g_stats.loop_suppressed.load(),
+                    (unsigned long long)g_stats.recoveries.load(),
+                    busy_win);
+                std::fclose(jf);
+                ::rename(tmpp, path);
+            }
+        }
+
         if (busy_win > 70.0)
             std::fprintf(stderr,
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"

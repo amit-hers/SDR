@@ -87,22 +87,25 @@ printf '  "peer": {'; js compatibility UNKNOWN; printf ','
 printf '  "modem": {'; js mod_en "$(reg 0x43C10010)"; printf ','; js dem_en "$(reg 0x43C00010)"; printf ','
   js lock_count "$(reg 0x43C00018)"; printf ','; js mu_clamped "$(reg 0x43C00030)"; printf ','
   js rssi_db "$(cat /sys/bus/iio/devices/iio:device0/in_voltage0_rssi 2>/dev/null | cut -d' ' -f1)"; printf '},\n'
-printf '  "rx": {'; j dma "$(num '| rx \([0-9][0-9]*\) dma')"; printf ','; j frames "$cur_frames"; printf ','
-  j delivered_bytes "${cur_bytes:-null}"; printf ','; j crc_errors "$(num '(crcerr \([0-9][0-9]*\)')"; printf ','
-  j duplicates "$(num 'dup \([0-9][0-9]*\)')"; printf ','; j control "$(num 'ctrl \([0-9][0-9]*\)')"; printf ','
-  j self_discarded "$(num 'self \([0-9][0-9]*\)')"; printf '},\n'
-printf '  "tx": {'; j packets "$(num 'bridge: tx \([0-9][0-9]*\) pkts')"; printf ','; j idle_fill "$(num '(idle \([0-9][0-9]*\)')"; printf ','
-  j errors "$(num 'err \([0-9][0-9]*\))')"; printf ','; j oversize "$(num 'oversize \([0-9][0-9]*\)')"; printf '},\n'
+# EMBED the bridge's own JSON rather than re-extracting its fields.
+#
+# The human-readable statistics line is for a person reading a log. Re-parsing
+# it produced a plausible wrong answer twice: a pattern for "rx" also matched
+# "rx gap" and reported 0 where the line said 863, and a pattern containing a
+# slash collided with sed's delimiter and reported null where a number existed.
+# The bridge now publishes the numbers directly, so they are passed through
+# untouched and there is nothing left to mis-parse.
+BSTATS=/tmp/bridge_stats.json
+if [ -s "$BSTATS" ]; then
+    printf '  "bridge": '; cat "$BSTATS" | tr -d '\n'; printf ',\n'
+else
+    printf '  "bridge": {'; js status UNAVAILABLE; printf ','
+      js note "no /tmp/bridge_stats.json yet; the bridge has not reported"; printf '},\n'
+fi
 printf '  "ethernet": {'; j rx_packets "$(cat /sys/class/net/$IFACE/statistics/rx_packets 2>/dev/null || echo null)"; printf ','
   j tx_packets "$(cat /sys/class/net/$IFACE/statistics/tx_packets 2>/dev/null || echo null)"; printf ','
   j mtu "$(cat /sys/class/net/$IFACE/mtu 2>/dev/null || echo null)"; printf ','
   js flags "$(cat /sys/class/net/$IFACE/flags 2>/dev/null)"; printf '},\n'
-printf '  "loop_guard": {'; j suppressed "$(num 'loopsup \([0-9][0-9]*\)')"; printf '},\n'
-printf '  "queues": {'; j control_depth "$(num 'qctrl \([0-9][0-9]*\)')"; printf ','
-  j bulk_depth "$(num 'qbulk \([0-9][0-9]*\)')"; printf ','
-  j control_drops "$(num 'qdrop \([0-9][0-9]*\)/')"; printf ','
-  j bulk_drops "$(num 'qdrop [0-9][0-9]*/\([0-9][0-9]*\)')"; printf ','
-  j drain_ms "$(num 'qdrain \([0-9][0-9]*\)ms')"; printf '},\n'
 printf '  "supervisor": {'; j bridges_running "$nbridge"; printf ','; j supervisors "$nsup"; printf ','
   j recoveries "$(num 'recoveries \([0-9][0-9]*\)')"; printf ','
   j restarts "$(grep -c 'SUPERVISOR starting bridge' $LOG 2>/dev/null | head -1 || echo 0)"; printf ','
