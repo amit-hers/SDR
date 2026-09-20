@@ -30,7 +30,11 @@ lastcpu=$(grep -E '^bridge: cpu ' "$LOG" 2>/dev/null | tail -1)
 # "rx gap", "err" inside "crcerr" -- and silently returns a plausible number
 # from the wrong place, which is the failure mode this whole view exists to
 # prevent.
-g() { echo "$last$lastcpu" | sed -n "s/.*$1.*/\1/p" | head -1; }
+# '#' as the delimiter, not '/': two queue patterns legitimately contain a
+# slash ("qdrop 3/7"), which silently broke the substitution and reported null
+# where a number existed -- the same shape of parsing fault this view exists to
+# catch.
+g() { echo "$last$lastcpu" | sed -n "s#.*$1.*#\1#p" | head -1; }
 num() { v=$(g "$1"); [ -n "$v" ] && echo "$v" || echo null; }
 
 nbridge=0
