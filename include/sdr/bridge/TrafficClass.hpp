@@ -58,14 +58,53 @@ public:
                   unsigned    bulk_every    = 8)
         : climit_(control_limit), blimit_(bulk_limit), bulk_every_(bulk_every) {}
 
+    // BOUND THE QUEUE BY TIME, NOT BY PACKET COUNT.
+    //
+    // A count limit permits unbounded latency: 256 frames of 1270 B at
+    // 6.96 Mbit/s is 373 ms of queue, which is 37x a 10 ms budget and is
+    // exactly the bufferbloat this must avoid. The honest limit is how long the
+    // queue takes to drain at the link rate, so the depth follows the rate
+    // instead of being guessed.
+    //
+    // Control gets a SHORTER budget than bulk. A control queue that is allowed
+    // to grow has already failed at its job -- latency is the whole reason the
+    // class exists -- whereas video would rather be buffered than dropped.
+    void setRateBudget(uint64_t link_bits_per_sec,
+                       unsigned control_budget_ms = 10,
+                       unsigned bulk_budget_ms    = 100) {
+        rate_bps_ = link_bits_per_sec;
+        cbytes_max_ = rate_bps_ * control_budget_ms / 8000;
+        bbytes_max_ = rate_bps_ * bulk_budget_ms    / 8000;
+    }
+
+    // Occupancy in bytes, and what that means in milliseconds at the link rate.
+    // Depth in packets is not an operational number; drain time is.
+    std::size_t controlBytes() const { return cbytes_; }
+    std::size_t bulkBytes()    const { return bbytes_; }
+    unsigned    drainMs() const {
+        if (rate_bps_ == 0) return 0;
+        return unsigned((uint64_t(cbytes_ + bbytes_) * 8000) / rate_bps_);
+    }
+
     // Returns false when the frame was dropped because its queue is full.
     // A bounded queue that drops is honest; an unbounded one converts a
     // transient overload into unbounded memory growth on a board with no swap,
     // and into latency that grows without limit for everything behind it.
     bool push(const uint8_t* f, std::size_t n, std::size_t bulk_min = 512) {
-        auto& q = (classify(f, n, bulk_min) == Class::CONTROL) ? ctrl_ : bulk_;
-        const std::size_t lim = (&q == &ctrl_) ? climit_ : blimit_;
-        if (q.size() >= lim) { ++dropped_[&q == &ctrl_ ? 0 : 1]; return false; }
+        const bool is_ctrl = (classify(f, n, bulk_min) == Class::CONTROL);
+        auto& q = is_ctrl ? ctrl_ : bulk_;
+        const std::size_t lim    = is_ctrl ? climit_ : blimit_;
+        const std::size_t bmax   = is_ctrl ? cbytes_max_ : bbytes_max_;
+        std::size_t&      bytes  = is_ctrl ? cbytes_ : bbytes_;
+        // Tail-drop on whichever bound binds first: the packet count caps
+        // memory, the byte budget caps latency. Dropping the arriving frame
+        // rather than an queued one keeps delivery in order for what is already
+        // committed.
+        if (q.size() >= lim || (bmax > 0 && bytes + n > bmax)) {
+            ++dropped_[is_ctrl ? 0 : 1];
+            return false;
+        }
+        bytes += n;
         q.push_back(Frame{std::vector<uint8_t>(f, f + n)});
         return true;
     }
@@ -81,6 +120,7 @@ public:
         else if (!bulk_.empty())              pick = &bulk_;
         if (!pick) return false;
         out = std::move(pick->front().bytes);
+        (pick == &ctrl_ ? cbytes_ : bbytes_) -= out.size();
         pick->pop_front();
         if (pick == &bulk_) since_bulk_ = 0; else ++since_bulk_;
         return true;
@@ -97,6 +137,9 @@ private:
     unsigned    bulk_every_;
     unsigned    since_bulk_ = 0;
     uint64_t    dropped_[2] = {0, 0};
+    std::size_t cbytes_ = 0, bbytes_ = 0;
+    std::size_t cbytes_max_ = 0, bbytes_max_ = 0;   // 0 = no byte budget set
+    uint64_t    rate_bps_ = 0;
 };
 
 } // namespace sdr

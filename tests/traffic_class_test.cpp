@@ -67,6 +67,47 @@ int main() {
         check(q.bulkDepth() == 1, "a control flood fills only the control queue");
     }
 
+    std::printf("\ncongestion: the queue is bounded by TIME, not packet count\n");
+    {
+        // 6.96 Mbit/s measured, 10 ms control budget, 100 ms bulk budget.
+        TrafficQueues q(100000, 100000, 8);        // count limits deliberately huge
+        q.setRateBudget(6960000, 10, 100);
+        int accepted = 0;
+        for (int i = 0; i < 1000; ++i) { auto b = frame(0x0800, 1400); if (q.push(b.data(), b.size())) ++accepted; }
+        check(accepted > 0 && accepted < 1000, "bulk is capped by the byte budget, not the count limit");
+        check(q.drainMs() <= 110, "queued bulk drains within its 100 ms budget (got " + std::to_string(q.drainMs()) + " ms)");
+        check(q.bulkDropped() > 0, "overload produces counted drops, not growth");
+    }
+    {
+        TrafficQueues q(100000, 100000, 8);
+        q.setRateBudget(6960000, 10, 100);
+        for (int i = 0; i < 1000; ++i) { auto c = frame(0x0800, 64); q.push(c.data(), c.size()); }
+        check(q.drainMs() <= 12, "control queue stays inside its 10 ms budget (got " + std::to_string(q.drainMs()) + " ms)");
+    }
+    {
+        // Sustained overload must not let memory grow without bound.
+        TrafficQueues q(100000, 100000, 8);
+        q.setRateBudget(6960000, 10, 100);
+        std::vector<uint8_t> out;
+        for (int round = 0; round < 500; ++round) {
+            for (int i = 0; i < 20; ++i) { auto b = frame(0x0800, 1400); q.push(b.data(), b.size()); }
+            q.pop(out);                                  // drain slower than we fill
+        }
+        check(q.bulkBytes() <= 6960000 * 100 / 8000 + 1400,
+              "after 500 overload rounds the queue is still bounded (" + std::to_string(q.bulkBytes()) + " B)");
+        check(q.drainMs() <= 110, "and latency has not run away (" + std::to_string(q.drainMs()) + " ms)");
+    }
+    {
+        // A video flood must not push control traffic out.
+        TrafficQueues q(100000, 100000, 8);
+        q.setRateBudget(6960000, 10, 100);
+        for (int i = 0; i < 5000; ++i) { auto b = frame(0x0800, 1400); q.push(b.data(), b.size()); }
+        auto c = frame(0x0800, 64);
+        check(q.push(c.data(), c.size()), "a control frame is still accepted during a bulk flood");
+        std::vector<uint8_t> out; q.pop(out);
+        check(out.size() == 64, "and it is transmitted first");
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }
