@@ -179,13 +179,31 @@ else
     pf_fail "interface $IFACE does not exist"
 fi
 
+# 7. Packet size. The bridge reads PKT_BYTES-sized blocks and sizes its IIO
+#    buffer at PKT_BYTES/4 samples; decoding across a packet boundary loses
+#    frames silently, so a bridge/bitstream disagreement is not a tuning error,
+#    it is undetected loss. Take the value from the bitstream itself rather than
+#    from config, so the software follows the hardware and cannot drift.
+#    An identity block predating the field reads 0 -- leave --pkt unset there and
+#    let the bridge keep its 32768 default, which is what those builds are.
+PKT_DEC=""
+FPGA_PKT=$(devmem 0x43C50018 32 2>/dev/null)
+if [ -n "$FPGA_PKT" ] && [ "$FPGA_PKT" != "0x00000000" ]; then
+    PKT_DEC=$((FPGA_PKT))
+    if [ "$PKT_DEC" -lt 2048 ] || [ "$PKT_DEC" -gt 65536 ] \
+       || [ $((PKT_DEC & (PKT_DEC - 1))) -ne 0 ]; then
+        pf_fail "FPGA RX_PKT_BYTES $FPGA_PKT is not a power of two in 2048..65536"
+        PKT_DEC=""
+    fi
+fi
+
 if [ "$PF" -ne 0 ]; then
     log "REFUSING TO FORWARD. The modem is configured but the bridge will not"
     log "start, because a fault above makes silent total loss the likely result."
     log "Networking is left in a safe non-forwarding state."
     exit 1
 fi
-log "preflight OK (fpga=$FPGA_MAGIC abi=$FPGA_ABI map=$FPGA_MAP tx=$FREQUENCY rx=$RX_FREQUENCY node=$NODE_ID diff=$MOD_DIFF)"
+log "preflight OK (fpga=$FPGA_MAGIC abi=$FPGA_ABI map=$FPGA_MAP tx=$FREQUENCY rx=$RX_FREQUENCY node=$NODE_ID diff=$MOD_DIFF pkt=${PKT_DEC:-default})"
 
 log "modem enabled (mod=$MOD_EN dem=$DEM_EN)"
 
@@ -194,6 +212,7 @@ case "$MODE" in
   tun)     set -- --local "${LOCAL_IP:?}" --peer "${PEER_IP:?}" --iface "${TUN_IFACE:-sdr0}" ;;
   *)       log "unknown MODE '$MODE'"; exit 1 ;;
 esac
+[ -n "$PKT_DEC" ] && set -- "$@" --pkt "$PKT_DEC"
 [ -n "${STATS_S:-}" ] && set -- "$@" --stats "$STATS_S"
 
 log "starting bridge: $*"
