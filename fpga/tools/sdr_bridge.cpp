@@ -26,6 +26,7 @@
 #include "sdr/framing/OffsetDeframer.hpp"
 #include <mutex>
 #include "sdr/bridge/LoopGuard.hpp"
+#include "sdr/bridge/TrafficClass.hpp"
 #include "sdr/framing/PacketReader.hpp"
 #include "sdr/framing/Frame.hpp"
 #include "sdr/framing/DmaBlockAggregator.hpp"
@@ -92,6 +93,15 @@ struct Opts {
     // transmits has no CONFIG_TUN, so this is the default path on hardware.
     bool        raw_eth = false;
     uint32_t    node_id = 1;
+    // Traffic classes. bulk_min is the size above which a frame is treated as
+    // bulk when it carries no 802.1Q priority; the budgets bound queue latency.
+    std::size_t bulk_min       = 512;
+    std::size_t q_ctrl_frames  = 256;
+    std::size_t q_bulk_frames  = 256;
+    unsigned    bulk_every     = 8;
+    uint64_t    link_bps       = 6960000;   // measured payload goodput
+    unsigned    ctrl_budget_ms = 10;
+    unsigned    bulk_budget_ms = 100;
     int         mtu     = 1400;        // == MAX_PAYLOAD; TUN carries no L2 header
     int         pkt     = 32768;       // PKT_BYTES in axis_packetizer.v
     int         tx_block = 0;          // direct-IIO TX bytes; 0 uses pkt
@@ -772,6 +782,9 @@ struct Stats {
     std::atomic<uint64_t> tx_oversize{0};
     std::atomic<uint64_t> loop_suppressed{0};
     std::atomic<uint64_t> rx_inject_err{0};
+    std::atomic<uint64_t> q_ctrl_depth{0}, q_bulk_depth{0};
+    std::atomic<uint64_t> q_ctrl_drop{0},  q_bulk_drop{0};
+    std::atomic<uint64_t> q_drain_ms{0};
     std::atomic<uint64_t> tx_blocks{0}, tx_data_blocks{0}, tx_dma_bytes{0};
     std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
     std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
@@ -785,6 +798,11 @@ static sdr::LoopGuard g_loop_guard;
 static std::mutex     g_loop_mx;
 
 static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o) {
+    // Depth is a TIME budget, not a packet count: 256 frames of 1270 B at
+    // 6.96 Mbit/s is 373 ms of queue, 37x a 10 ms target. The budget follows
+    // the configured link rate so the bound moves with the radio.
+    sdr::TrafficQueues tq(o.q_ctrl_frames, o.q_bulk_frames, o.bulk_every);
+    tq.setRateBudget(o.link_bps, o.ctrl_budget_ms, o.bulk_budget_ms);
     Framer framer;
     const size_t tx_block = static_cast<size_t>(o.tx_block ? o.tx_block : o.pkt);
     DmaBlockAggregator agg(tx_block);
@@ -932,16 +950,44 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
                 }
                 if (!fwd) { g_stats.loop_suppressed.fetch_add(1); continue; }
             }
-            auto wire = encode(pkt.data(), static_cast<size_t>(n), 0);
-            const size_t before = blocks.size();
-            if (!agg.addFrame(wire, static_cast<size_t>(n), true, blocks)) {
-                g_stats.tx_oversize.fetch_add(1);
+            // QUEUE, do not transmit yet.
+            //
+            // Encoding straight into the aggregator is strict arrival order, so
+            // a 20-byte command queued behind ten video frames waits for all of
+            // them. Queueing first lets the drain below choose what enters the
+            // block still being assembled -- the only point where order can
+            // still change. A block already handed to the DMA is never
+            // reordered.
+            if (!tq.push(pkt.data(), static_cast<size_t>(n), o.bulk_min)) {
+                // A bounded queue that drops is honest. Growing instead turns a
+                // transient overload into unbounded memory on a board with no
+                // swap, and into latency rising without limit behind it.
+                if (sdr::classify(pkt.data(), static_cast<size_t>(n), o.bulk_min)
+                        == sdr::Class::CONTROL) g_stats.q_ctrl_drop.fetch_add(1);
+                else                            g_stats.q_bulk_drop.fetch_add(1);
                 continue;
             }
-            if (blocks.size() != before) g_stats.tx_full_flush.fetch_add(1);
-            g_stats.tx_pkts.fetch_add(1);
-            g_stats.tx_bytes.fetch_add(static_cast<uint64_t>(n));
-            if (!transmit(blocks)) return;
+            // DRAIN BY PRIORITY into the block still being assembled. Control
+            // first, with one slot in eight reserved for bulk so a steady
+            // telemetry stream cannot stop video entirely.
+            {
+                std::vector<uint8_t> qout;
+                while (tq.pop(qout)) {
+                    auto wire = encode(qout.data(), qout.size(), 0);
+                    const size_t before = blocks.size();
+                    if (!agg.addFrame(wire, qout.size(), true, blocks)) {
+                        g_stats.tx_oversize.fetch_add(1);
+                        continue;
+                    }
+                    if (blocks.size() != before) g_stats.tx_full_flush.fetch_add(1);
+                    g_stats.tx_pkts.fetch_add(1);
+                    g_stats.tx_bytes.fetch_add(static_cast<uint64_t>(qout.size()));
+                    if (!transmit(blocks)) return;
+                }
+                g_stats.q_ctrl_depth.store(tq.controlDepth());
+                g_stats.q_bulk_depth.store(tq.bulkDepth());
+                g_stats.q_drain_ms.store(tq.drainMs());
+            }
         }
         agg.flush(blocks);
         if (!blocks.empty()) g_stats.tx_timeout_flush.fetch_add(1);
@@ -1428,7 +1474,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "bridge: cpu decode %.1f%% now / %.1f%% avg (max %llu us/pkt) | "
             "rx gap max %llu us, short %llu | tx stall %llu ms | "
-            "%s drops tx %llu rx %llu (since start) | oversize %llu | loopsup %llu | injecterr %llu\n",
+            "%s drops tx %llu rx %llu (since start) | oversize %llu | loopsup %llu | injecterr %llu | qctrl %llu qbulk %llu qdrop %llu/%llu qdrain %llums\n",
             busy_win, busy,
             (unsigned long long)g_stats.decode_us_max.load(),
             (unsigned long long)g_stats.rx_gap_us_max.load(),
@@ -1439,7 +1485,12 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.tun_rx_drop.load(),
             (unsigned long long)g_stats.tx_oversize.load(),
             (unsigned long long)g_stats.loop_suppressed.load(),
-            (unsigned long long)g_stats.rx_inject_err.load());
+            (unsigned long long)g_stats.rx_inject_err.load(),
+            (unsigned long long)g_stats.q_ctrl_depth.load(),
+            (unsigned long long)g_stats.q_bulk_depth.load(),
+            (unsigned long long)g_stats.q_ctrl_drop.load(),
+            (unsigned long long)g_stats.q_bulk_drop.load(),
+            (unsigned long long)g_stats.q_drain_ms.load());
         if (busy_win > 70.0)
             std::fprintf(stderr,
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"
