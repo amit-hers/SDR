@@ -27,6 +27,7 @@
 #include <mutex>
 #include "sdr/bridge/LoopGuard.hpp"
 #include "sdr/bridge/TrafficClass.hpp"
+#include "sdr/bridge/PeerHandshake.hpp"
 #include "sdr/framing/PacketReader.hpp"
 #include "sdr/framing/Frame.hpp"
 #include "sdr/framing/DmaBlockAggregator.hpp"
@@ -785,6 +786,18 @@ struct Stats {
     std::atomic<uint64_t> q_ctrl_depth{0}, q_bulk_depth{0};
     std::atomic<uint64_t> q_ctrl_drop{0},  q_bulk_drop{0};
     std::atomic<uint64_t> q_drain_ms{0};
+    // Peer handshake state. Guarded by its own mutex: written by the receive
+    // thread when a HELLO arrives, read by the transmit thread and the stats
+    // printer.
+    std::atomic<int>      peer_verdict{0};   // 0 unknown, 1 compatible, 2 incompatible
+    std::atomic<uint64_t> peer_hellos{0};
+    // When the last HELLO arrived. A verdict with no recent evidence is STALE,
+    // not still true: if the peer's frequency crossing breaks, this unit stops
+    // hearing it entirely and would otherwise keep reporting the last good
+    // verdict for ever. Measured: UNIT-A reported COMPATIBLE indefinitely after
+    // UNIT-B was deliberately misconfigured, because no contradicting HELLO can
+    // arrive when nothing can be heard at all.
+    std::atomic<uint64_t> peer_last_ms{0};
     std::atomic<uint64_t> tx_blocks{0}, tx_data_blocks{0}, tx_dma_bytes{0};
     std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
     std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
@@ -794,7 +807,42 @@ std::atomic<bool> g_run{true};
 } // namespace
 
 // ── Transmit: TUN -> Framer -> fabric modulator ───────────────────────────
+// Small readers for the identity above. Each returns 0 on failure rather than
+// guessing, so an unreadable value is advertised as 0 and compared as unequal
+// instead of silently matching whatever the peer has.
+static uint64_t readSysfsU64(const char* path) {
+    FILE* f = std::fopen(path, "r"); if (!f) return 0;
+    unsigned long long v = 0; if (std::fscanf(f, "%llu", &v) != 1) v = 0;
+    std::fclose(f); return v;
+}
+static uint32_t readReg32(unsigned long addr) {
+    int fd = ::open("/dev/mem", O_RDONLY | O_SYNC); if (fd < 0) return 0;
+    const long ps = sysconf(_SC_PAGESIZE);
+    off_t base = static_cast<off_t>(addr & ~(unsigned long)(ps - 1));
+    void* m = ::mmap(nullptr, ps, PROT_READ, MAP_SHARED, fd, base);
+    uint32_t v = 0;
+    if (m != MAP_FAILED) {
+        v = *reinterpret_cast<volatile uint32_t*>(
+                static_cast<char*>(m) + (addr - static_cast<unsigned long>(base)));
+        ::munmap(m, ps);
+    }
+    ::close(fd); return v;
+}
+static void readIfaceMac(const std::string& iface, uint8_t out[6]) {
+    std::memset(out, 0, 6);
+    std::string p = "/sys/class/net/" + iface + "/address";
+    FILE* f = std::fopen(p.c_str(), "r"); if (!f) return;
+    unsigned a,b,c,d,e,g2;
+    if (std::fscanf(f, "%x:%x:%x:%x:%x:%x", &a,&b,&c,&d,&e,&g2) == 6) {
+        out[0]=a; out[1]=b; out[2]=c; out[3]=d; out[4]=e; out[5]=g2;
+    }
+    std::fclose(f);
+}
+
 static sdr::LoopGuard g_loop_guard;
+static sdr::PeerIdentity g_me;                 // filled at start-up
+static std::string       g_peer_reasons;       // why the peer is incompatible
+static std::mutex        g_peer_mx;
 static std::mutex     g_loop_mx;
 
 static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o) {
@@ -860,9 +908,15 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
 
     auto controlBlock = [&]() {
         std::vector<CompletedDmaBlock> blocks;
-        static const uint8_t ka[16] = {0};
+        // The keepalive carries our IDENTITY rather than sixteen zero bytes.
+        // It is already transmitted continuously to hold the demodulator's
+        // timing loop, so the handshake costs no new protocol and no extra
+        // airtime. A peer that never hears one learns nothing, which is why the
+        // verdict starts UNKNOWN and is never assumed compatible.
+        const std::vector<uint8_t> hello = sdr::encodeHello(g_me);
+        const uint8_t* ka = hello.data();
         while (blocks.empty()) {
-            auto wire = encode(ka, sizeof ka, FL_CTRL);
+            auto wire = encode(ka, hello.size(), FL_CTRL);
             if (!agg.addFrame(wire, 0, false, blocks)) return false;
             g_stats.tx_idle.fetch_add(1);
         }
@@ -1093,7 +1147,40 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
             }
             // A keepalive is not user data; handing an empty or filler packet
             // to the kernel would be a bug visible only as junk on the wire.
-            if (f.flags & FL_CTRL) { g_stats.rx_ctrl.fetch_add(1); continue; }
+            if (f.flags & FL_CTRL) {
+                g_stats.rx_ctrl.fetch_add(1);
+                // A control frame may carry the peer's identity. Judging it
+                // here means a misconfiguration is NAMED rather than showing up
+                // as silence: two units sharing a node id, frequencies that are
+                // not crossed, a mismatched rate or ABI all produce total loss
+                // with every other counter looking healthy.
+                sdr::PeerIdentity pid;
+                if (sdr::decodeHello(f.payload.data(), f.payload.size(), pid)) {
+                    g_stats.peer_hellos.fetch_add(1);
+                    g_stats.peer_last_ms.store((uint64_t)
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                    auto chk = sdr::checkPeer(g_me, pid);
+                    int v = chk.verdict == sdr::PeerVerdict::COMPATIBLE   ? 1
+                          : chk.verdict == sdr::PeerVerdict::INCOMPATIBLE ? 2 : 0;
+                    int prev = g_stats.peer_verdict.exchange(v);
+                    if (v != prev) {
+                        std::lock_guard<std::mutex> lk(g_peer_mx);
+                        g_peer_reasons.clear();
+                        for (auto& r : chk.reasons) {
+                            if (!g_peer_reasons.empty()) g_peer_reasons += "; ";
+                            g_peer_reasons += r;
+                        }
+                        if (v == 2)
+                            std::fprintf(stderr, "bridge: PEER_INCOMPATIBLE -- %s\n",
+                                         g_peer_reasons.c_str());
+                        else if (v == 1)
+                            std::fprintf(stderr, "bridge: PEER_COMPATIBLE (node %u)\n",
+                                         pid.node_id);
+                    }
+                }
+                continue;
+            }
             if (f.payload.empty()) continue;
 
             // Learn the source BEFORE injecting: the echo can come back around
@@ -1267,7 +1354,23 @@ int main(int argc, char** argv) {
     // no IP of its own.
     if (!o.raw_eth && !tunConfigure(o)) { ::close(tun_fd); ::close(tx_fd); ::close(rx_fd); return 1; }
 
-    std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
+        // Our identity, as advertised in every keepalive. Read from the live
+    // registers rather than assumed, so a mismatch between what we believe and
+    // what the fabric actually is cannot be advertised as agreement.
+    g_me.node_id     = o.node_id;
+    g_me.pkt_bytes   = static_cast<uint32_t>(o.pkt);
+    g_me.sample_rate = static_cast<uint32_t>(readSysfsU64(
+                           "/sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency"));
+    g_me.tx_freq     = static_cast<uint32_t>(readSysfsU64(
+                           "/sys/bus/iio/devices/iio:device0/out_altvoltage1_TX_LO_frequency"));
+    g_me.rx_freq     = static_cast<uint32_t>(readSysfsU64(
+                           "/sys/bus/iio/devices/iio:device0/out_altvoltage0_RX_LO_frequency"));
+    g_me.fpga_abi    = static_cast<uint32_t>(readReg32(0x43C50008));
+    g_me.fpga_map    = static_cast<uint32_t>(readReg32(0x43C5000C));
+    g_me.diff_mode   = static_cast<uint8_t>(readReg32(0x43C10020) & 1u);
+    readIfaceMac(o.iface, g_me.mac);
+
+std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
 
     if (!o.dev_explicit) {
         // txLoop immediately fills and submits one complete DMA block. Allow
@@ -1491,6 +1594,23 @@ int main(int argc, char** argv) {
             (unsigned long long)g_stats.q_ctrl_drop.load(),
             (unsigned long long)g_stats.q_bulk_drop.load(),
             (unsigned long long)g_stats.q_drain_ms.load());
+        // A verdict with no recent evidence is STALE, not still true. If the
+        // peer's frequency crossing breaks, this unit stops hearing it entirely
+        // and would otherwise keep reporting the last good verdict for ever --
+        // measured: UNIT-A reported COMPATIBLE indefinitely after UNIT-B was
+        // deliberately misconfigured, because no contradicting HELLO can arrive
+        // when nothing can be heard at all. Silence is not agreement.
+        const uint64_t now_ms = (uint64_t)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        const uint64_t last_ms = g_stats.peer_last_ms.load();
+        const uint64_t PEER_STALE_MS = 15000;
+        const int pv = g_stats.peer_verdict.load();
+        const char* peer_state =
+            (last_ms == 0)                     ? "UNKNOWN" :
+            (now_ms - last_ms > PEER_STALE_MS) ? "STALE"   :
+            (pv == 1) ? "COMPATIBLE" : (pv == 2) ? "INCOMPATIBLE" : "UNKNOWN";
+
         // Emit the same numbers as MACHINE-READABLE JSON.
         //
         // The line above is for a person reading a log. It is not an interface,
@@ -1504,6 +1624,14 @@ int main(int argc, char** argv) {
         // Written to a temp and renamed, so a reader never sees a half-written
         // file.
         {
+            std::string peer_reasons_escaped;
+            {
+                std::lock_guard<std::mutex> lk(g_peer_mx);
+                for (char ch : g_peer_reasons)
+                    if (ch == '"' || ch == '\\') { peer_reasons_escaped += '\\'; peer_reasons_escaped += ch; }
+                    else if (ch == '\n') peer_reasons_escaped += ' ';
+                    else peer_reasons_escaped += ch;
+            }
             const char* path = "/tmp/bridge_stats.json";
             const char* tmpp = "/tmp/bridge_stats.json.new";
             if (FILE* jf = std::fopen(tmpp, "w")) {
@@ -1517,7 +1645,8 @@ int main(int argc, char** argv) {
                     "\"queues\":{\"control_depth\":%llu,\"bulk_depth\":%llu,"
                     "\"control_drops\":%llu,\"bulk_drops\":%llu,\"drain_ms\":%llu},"
                     "\"loop_guard\":{\"suppressed\":%llu},"
-                    "\"recoveries\":%llu,\"cpu_decode_pct\":%.1f}\n",
+                    "\"recoveries\":%llu,\"cpu_decode_pct\":%.1f,"
+                    "\"peer\":{\"compatibility\":\"%s\",\"hellos\":%llu,\"reasons\":\"%s\"}}\n",
                     o.iface.c_str(), o.node_id,
                     (unsigned long long)g_stats.tx_pkts.load(),
                     (unsigned long long)g_stats.tx_bytes.load(),
@@ -1540,12 +1669,27 @@ int main(int argc, char** argv) {
                     (unsigned long long)g_stats.q_drain_ms.load(),
                     (unsigned long long)g_stats.loop_suppressed.load(),
                     (unsigned long long)g_stats.recoveries.load(),
-                    busy_win);
+                    busy_win,
+                    peer_state,
+                    (unsigned long long)g_stats.peer_hellos.load(),
+                    peer_reasons_escaped.c_str());
                 std::fclose(jf);
                 ::rename(tmpp, path);
             }
         }
 
+        {
+            static bool said_stale = false;
+            if (std::strcmp(peer_state, "STALE") == 0 && !said_stale) {
+                said_stale = true;
+                std::fprintf(stderr,
+                    "bridge: PEER_STALE -- no HELLO recently. The peer may have stopped,\n"
+                    "bridge:        or its frequencies may no longer be crossed with ours,\n"
+                    "bridge:        in which case we cannot hear it at all.\n");
+            } else if (std::strcmp(peer_state, "STALE") != 0) {
+                said_stale = false;
+            }
+        }
         if (busy_win > 70.0)
             std::fprintf(stderr,
                 "bridge: WARNING decode is using %.0f%% of one core. Loss from here\n"

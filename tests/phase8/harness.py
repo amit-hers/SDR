@@ -260,7 +260,10 @@ def check_preconditions(a_host: str, b_host: str,
         == sh(b_host, "md5sum /mnt/jffs2/sdr_bridge | cut -d' ' -f1"))
 
     # --- dependencies that are not integrated yet: record, do not invent ---
-    pc_a = sa.get("peer", {}).get("compatibility", "UNKNOWN")
+    # The bridge publishes its own verdict, and reports STALE when it has not
+    # heard a HELLO recently -- silence is not agreement, and a verdict with no
+    # recent evidence must not be treated as one.
+    pc_a = _dig(sa, ("bridge", "peer", "compatibility")) or "UNKNOWN"
     add("peer compatibility reported", pc_a == "COMPATIBLE",
         f"peer handshake reports {pc_a}; tests needing it are skipped, not assumed",
         blocking=False)
