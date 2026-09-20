@@ -95,3 +95,11 @@ add_test(NAME bridge_e2e
 add_test(NAME sdrctl_atomic
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdrctl_atomic_test.sh
                  $<TARGET_FILE:sdrctl> ${PROJECT_SOURCE_DIR}/config.json)
+
+# The production diagnostics surface must fail closed: every endpoint requires
+# authentication, mutation methods are rejected, and loose token permissions
+# prevent the service from starting.
+add_test(NAME diagnostics_api
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/diagnostics_api_test.sh
+                 $<TARGET_FILE:sdr-diagnostics-api>)
+set_tests_properties(diagnostics_api PROPERTIES SKIP_RETURN_CODE 77)

@@ -18,7 +18,7 @@ def ck(ok, what):
 
 GOOD_A = {
   "unit": {"serial": "A", "mac": "00:60:88:3d:32:ae", "uptime_s": 100},
-  "fpga": {"magic": "0x5344524C", "version": "0x00010300", "abi": "0x00000003", "regmap": "0x00000003"},
+  "fpga": {"magic": "0x5344524C", "version": "0x00010300", "abi": "0x00000003", "regmap": "0x00000004"},
   "config": {"status": "valid", "provisioning": "matches_hardware", "node_id": "327951062",
              "tx_hz": "434000000", "rx_hz": "444000000", "sample_rate": "15360000"},
   "peer": {"compatibility": "UNKNOWN"},

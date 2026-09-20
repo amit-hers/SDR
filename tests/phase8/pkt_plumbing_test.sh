@@ -77,7 +77,8 @@ cat > "$ROOT/bin/devmem" <<'DM'
 a=$(printf '0x%08X' "$(( $1 ))")
 case "$a" in
     0x43C50000) echo 0x5344524C ;;
-    0x43C50008|0x43C5000C) echo 0x00000003 ;;
+    0x43C50008) echo 0x00000003 ;;
+    0x43C5000C) echo 0x00000004 ;;
     0x43C50018) echo "$FPGA_PKT" ;;
     0x43C10010|0x43C00010) echo 0x00000001 ;;
     0x43C10020|0x43C00028) echo 0x00000001 ;;

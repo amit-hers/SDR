@@ -143,7 +143,7 @@ FPGA_ABI=$(devmem 0x43C50008 32 2>/dev/null)
 FPGA_MAP=$(devmem 0x43C5000C 32 2>/dev/null)
 [ "$FPGA_MAGIC" = "0x5344524C" ] || pf_fail "FPGA magic $FPGA_MAGIC, expected 0x5344524C"
 [ "$FPGA_ABI" = "0x00000003" ]   || pf_fail "FPGA ABI $FPGA_ABI, expected 0x00000003"
-[ "$FPGA_MAP" = "0x00000003" ]   || pf_fail "register map $FPGA_MAP, expected 0x00000003"
+[ "$FPGA_MAP" = "0x00000004" ]   || pf_fail "register map $FPGA_MAP, expected 0x00000004"
 
 # 2. TX and RX must differ. Equal means the unit jams its own receiver, because
 #    idle fill keeps the transmitter keyed: measured 207,991 false frames and

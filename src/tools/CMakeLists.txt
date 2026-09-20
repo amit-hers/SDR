@@ -23,3 +23,8 @@ add_executable(sdrctl sdrctl.cpp)
 target_include_directories(sdrctl PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(sdrctl PRIVATE sdr_core)
 install(TARGETS sdrctl DESTINATION bin)
+
+# Small authenticated, read-only HTTP sidecar for on-board diagnostics.  It is
+# dependency-free so the same source can be cross-built statically for Pluto+.
+add_executable(sdr-diagnostics-api ../../fpga/tools/diagnostics_api.cpp)
+install(TARGETS sdr-diagnostics-api DESTINATION bin)

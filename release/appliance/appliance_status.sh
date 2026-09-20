@@ -74,16 +74,13 @@ printf '  "unit": {'; js serial "$(cat /mnt/jffs2/serial.txt 2>/dev/null | head 
   js mac "$(cat /sys/class/net/$IFACE/address 2>/dev/null)"; printf ','
   j uptime_s "$now"; printf '},\n'
 printf '  "fpga": {'; js magic "$(reg 0x43C50000)"; printf ','; js version "$(reg 0x43C50004)"; printf ','
-  js abi "$(reg 0x43C50008)"; printf ','; js regmap "$(reg 0x43C5000C)"; printf '},\n'
+  js abi "$(reg 0x43C50008)"; printf ','; js regmap "$(reg 0x43C5000C)"; printf ','
+  js packet_bytes "$(reg 0x43C50018)"; printf '},\n'
 printf '  "config": {'; js status "$cfg_ok"; printf ','; js provisioning "$prov"; printf ','
   js node_id "$(grep -s '^NODE_ID=' $CONF | cut -d= -f2)"; printf ','
   js tx_hz "$(grep -s '^FREQUENCY=' $CONF | cut -d= -f2)"; printf ','
   js rx_hz "$(grep -s '^RX_FREQUENCY=' $CONF | cut -d= -f2)"; printf ','
   js sample_rate "$(grep -s '^SAMPLE_RATE=' $CONF | cut -d= -f2)"; printf '},\n'
-# Peer state needs the handshake wired into the bridge; it is not, and saying
-# so is the honest answer rather than inferring compatibility from traffic.
-printf '  "peer": {'; js compatibility UNKNOWN; printf ','
-  js note "handshake not yet integrated into the bridge"; printf '},\n'
 printf '  "modem": {'; js mod_en "$(reg 0x43C10010)"; printf ','; js dem_en "$(reg 0x43C00010)"; printf ','
   js lock_count "$(reg 0x43C00018)"; printf ','; js mu_clamped "$(reg 0x43C00030)"; printf ','
   js rssi_db "$(cat /sys/bus/iio/devices/iio:device0/in_voltage0_rssi 2>/dev/null | cut -d' ' -f1)"; printf '},\n'
