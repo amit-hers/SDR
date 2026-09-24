@@ -1,8 +1,10 @@
-# Authenticated diagnostics API
+# Authenticated diagnostics API (`sdr-agent`)
 
-`sdr-diagnostics-api` is the appliance's read-only HTTP diagnostics surface.
-It is intended to replace routine SSH inspection; it does not expose a shell,
-configuration writes, resets, or arbitrary file access.
+`sdr-agent` is the on-board management daemon: one small service per unit that
+owns the read-only HTTP diagnostics surface. It is intended to replace routine
+SSH inspection; it does not expose a shell, configuration writes, resets, or
+arbitrary file access. Source: `fpga/tools/sdr_agent.c`; test:
+`tests/sdr_agent_test.sh`.
 
 ## Endpoints
 
@@ -11,15 +13,29 @@ All endpoints require `Authorization: Bearer <token>`.
 | Endpoint | Source |
 |---|---|
 | `GET /api/v1/health` | API process health |
-| `GET /api/v1/status` | `/mnt/jffs2/appliance_status.sh` |
+| `GET /api/v1/status` | `/mnt/jffs2/appliance_status.sh` (the whole document) |
+| `GET /api/v1/fpga`, `/modem`, `/config`, `/ethernet`, `/supervisor`, `/progress` | That top-level section of the status document |
+| `GET /api/v1/radio` | Requested (`bridge.conf`) **and** actual (AD9363 IIO sysfs) RF configuration, side by side, with a `match` verdict |
 | `GET /api/v1/metrics` | `/tmp/bridge_stats.json` |
-| `GET /metrics` | Alias of `/api/v1/metrics` |
+| `GET /metrics`, `/api/v1/bridge` | Aliases of `/api/v1/metrics` |
+| `GET /api/v1/peer`, `/queues` | That top-level section of the bridge metrics |
 | `GET /api/v1/events` | Bounded selection of important appliance events |
 | `GET /api/v1/logs` | Last 64 KiB of the appliance log |
-| `GET /api/v1/diagnostic-bundle` | Status, metrics, events, and recent log in one bounded JSON document |
+| `GET /api/v1/diagnostic-bundle` | Status, metrics, radio, events, and recent log in one bounded JSON document (`bundle_version` 2) |
 
 Unknown routes return 404. Any method other than GET returns 405. Missing or
-incorrect authentication returns 401.
+incorrect authentication returns 401. A section that the source document does
+not contain returns 503, never an empty object.
+
+`/api/v1/radio` exists because debugging from what software asked for is how a
+link was once chased while the LO sat at the previous frequency. `requested`
+comes from `bridge.conf` (`FREQUENCY`, `RX_FREQUENCY`, `SAMPLE_RATE`, and the
+not-yet-schema'd `TX_RF_BANDWIDTH`, `RX_RF_BANDWIDTH`, `TX_ATTENUATION_DB`,
+`RX_GAIN_MODE`, null until they exist); `actual` is read live from the
+`ad9361-phy` IIO device (LOs, sample rate, RF bandwidths, `ensm_mode`, TX
+attenuation, TX LO powerdown, RX gain mode and gain, RSSI, die temperature).
+`match` compares LOs and sample rate within `tolerance_hz`, because the PLL
+quantises (444000000 requested reads back 443999998).
 
 ## Security contract
 
@@ -50,8 +66,30 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## Deployment state
 
-The stripped static ARMv7 binary is approximately 810 KiB. It does not fit
-safely in the current JFFS2 partition, which has about 288 KiB free after the
-bridge installation. Production persistence must therefore place the binary
-in the next rootfs FIT and start it after the management interface is ready.
-Do not consume JFFS2 emergency space to install it.
+`sdr-agent` is plain C, cross-built **dynamically** against the board's shared
+glibc (`release/build-release.sh`): ~22 KiB stripped, needing only `libc.so.6`.
+Its static C++ predecessor was ~810 KiB and never fitted the jffs2 partition
+(~280 KiB free after the bridge), so it only ever ran from `/tmp` and vanished
+at reboot. The release installs the agent to `/mnt/jffs2/sdr-agent` and
+`autorun.sh` starts it at boot, bound to the usb0 address the board actually
+has, port 8088.
+
+Tokens: `flash.sh` generates one per unit **once** (kept across re-flashes so
+host copies stay valid), stores it at `/mnt/jffs2/agent.token` (0600) and
+mirrors it to `$SDR_TOKEN_DIR` (default `~/.config/sdr/tokens/<serial>.token`,
+directory 0700, file 0600).
+
+## Central collection
+
+The host collector retrieves all bounded endpoints from one or more units and
+writes a timestamped mode-0700 evidence directory. Tokens are never archived.
+
+```sh
+scripts/collect-diagnostics.py \
+  --unit UNIT-A,http://192.168.2.17:8088,~/.config/sdr/tokens/AKRLJ24FWXM7H65X.token \
+  --unit UNIT-B,http://192.168.2.1:8088,~/.config/sdr/tokens/3SXRLJMXS7EL5IBJ.token \
+  --output diagnostic-archive
+```
+
+Token files must be mode 0600. A partial collection is retained, records each
+failed endpoint in `manifest.json`, and exits nonzero.

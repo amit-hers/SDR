@@ -22,6 +22,22 @@
 //      and DROPS it -- the loop terminates here
 // Replication is bounded at one extra copy rather than unbounded.
 //
+// THE SECOND RULE (2026-09-20): a frame arriving FROM the radio that is
+// byte-identical to one this unit recently forwarded FROM ITS OWN WIRE is a
+// copy of a locally originated frame, and is not injected. The source rule
+// above assumes a radio-side station never also lives on the local wire; on a
+// shared switch that is false for every station, and the race between the RF
+// copy and the peer's injection defeats step 4 whenever the wire copy arrives
+// first. Measured on one switch: a PC's TCP handshake with unit A looped at
+// ~400 frames/s each way, and worse, every injected copy carried the PC's
+// source address, so the switch learned the PC behind unit B's port and
+// delivered A's replies there -- SSH to either unit over the switch hung while
+// ping, which re-teaches the switch on every request, worked. Content
+// identity needs no frame modification: it is a hash and a timestamp per
+// forwarded frame, kept for a window longer than the RF round trip. On the
+// product topology (separate segments) the rule never fires, because a frame
+// from the far side was never on this wire.
+//
 // WHY NOT TAG OUR OWN INJECTIONS. A tag would have to live in the frame, and
 // altering frames is exactly what a transparent bridge must not do. Source
 // learning needs no modification and is what an ordinary bridge already does.
@@ -54,6 +70,13 @@ public:
     // "forward it" rather than to a stall.
     static constexpr std::size_t DEFAULT_MAX_ENTRIES = 4096;
 
+    // Content window: how long a forwarded frame's hash identifies a returning
+    // copy. Must exceed the RF round trip (~150 ms measured, up to a few
+    // seconds under recovery); short enough that a legitimate identical
+    // retransmission from the far side much later is not mistaken for a copy.
+    static constexpr std::chrono::milliseconds DEFAULT_CONTENT_WINDOW{3000};
+    static constexpr std::size_t DEFAULT_MAX_CONTENT = 8192;
+
     explicit LoopGuard(std::chrono::seconds ttl = DEFAULT_TTL,
                        std::size_t max_entries = DEFAULT_MAX_ENTRIES)
         : ttl_(ttl), max_entries_(max_entries) {}
@@ -77,15 +100,40 @@ public:
         return false;
     }
 
+    // A frame from the wire is being forwarded to the radio: remember its
+    // content so a copy returning over the radio can be recognised.
+    void noteForwarded(const uint8_t* frame, std::size_t len, time_point now) {
+        if (len < 14) return;
+        if (content_.size() >= DEFAULT_MAX_CONTENT) {
+            expireContent(now);
+            if (content_.size() >= DEFAULT_MAX_CONTENT) content_.clear();   // bounded, degrades to "inject"
+        }
+        content_[contentKey(frame, len)] = now;
+    }
+
+    // A frame arrived from the radio and is about to be injected. False means
+    // it is a copy of a frame that originated on this unit's own wire.
+    bool shouldInject(const uint8_t* frame, std::size_t len, time_point now) {
+        if (len < 14) return true;
+        auto it = content_.find(contentKey(frame, len));
+        if (it == content_.end()) return true;
+        if (now - it->second > DEFAULT_CONTENT_WINDOW) { content_.erase(it); return true; }
+        ++local_copies_;
+        return false;
+    }
+
     void expire(time_point now) {
         for (auto it = seen_.begin(); it != seen_.end(); ) {
             if (now - it->second > ttl_) it = seen_.erase(it); else ++it;
         }
+        expireContent(now);
     }
 
-    std::size_t size()      const { return seen_.size(); }
-    uint64_t    suppressed() const { return suppressed_; }
-    void        countSuppressed()  { ++suppressed_; }
+    std::size_t size()        const { return seen_.size(); }
+    std::size_t contentSize() const { return content_.size(); }
+    uint64_t    suppressed()  const { return suppressed_; }
+    uint64_t    localCopies() const { return local_copies_; }
+    void        countSuppressed()   { ++suppressed_; }
 
 private:
     // The SOURCE address identifies the station; the destination does not, so
@@ -104,6 +152,21 @@ private:
         return true;
     }
 
+    // FNV-1a over the whole frame plus its length. 64-bit: a collision would
+    // drop one legitimate frame from the far side, at odds of 2^-64 per pair.
+    static uint64_t contentKey(const uint8_t* f, std::size_t len) {
+        uint64_t h = 1469598103934665603ULL;
+        for (std::size_t i = 0; i < len; ++i) { h ^= f[i]; h *= 1099511628211ULL; }
+        h ^= len; h *= 1099511628211ULL;
+        return h;
+    }
+
+    void expireContent(time_point now) {
+        for (auto it = content_.begin(); it != content_.end(); ) {
+            if (now - it->second > DEFAULT_CONTENT_WINDOW) it = content_.erase(it); else ++it;
+        }
+    }
+
     void evictOldest() {
         auto oldest = seen_.begin();
         for (auto it = seen_.begin(); it != seen_.end(); ++it)
@@ -112,9 +175,11 @@ private:
     }
 
     std::unordered_map<uint64_t, time_point> seen_;
+    std::unordered_map<uint64_t, time_point> content_;
     std::chrono::seconds ttl_;
     std::size_t          max_entries_;
     uint64_t             suppressed_ = 0;
+    uint64_t             local_copies_ = 0;
 };
 
 } // namespace sdr

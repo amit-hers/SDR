@@ -122,7 +122,7 @@ Order matters, and every step below was established by measurement.
 
 ```bash
 # receive
-fpga/scripts/rx_framed.sh 17280000
+fpga/scripts/rx_framed.sh 17280000 1 434000000 4000000 slow_attack
 
 # transmit from a byte stream through the fabric modulator
 fpga/scripts/tx_fabric.sh 17280000 434000000 1

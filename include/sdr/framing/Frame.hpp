@@ -10,7 +10,14 @@ static constexpr uint32_t FRAME_SYNC   = 0xC0FFEE77U;
 static constexpr uint8_t  FRAME_VER    = 0x03;
 static constexpr size_t   HEADER_SIZE  = 18;   // sync+ver+flags+mod+bw+nodeid+seq+len
 static constexpr size_t   CRC_SIZE     = 4;
-static constexpr size_t   MAX_PAYLOAD  = 1400; // bytes (sets TAP MTU = 1400-14 = 1386)
+// A whole standard Ethernet frame: 1500-byte MTU plus the 14-byte header.
+// It was 1400, which in raw-eth mode silently dropped every full-size TCP
+// segment from an attached host with a normal MTU (1500 -> 1514-byte frames):
+// pings passed, SSH hung at the first large packet, and the only trace was the
+// bridge's oversize counter. Attached hosts must not need to know an SDR is in
+// the path, so the limit is what the wire carries. In TUN mode (no L2 header)
+// the usable MTU is this value; in raw-eth mode it is this minus 14.
+static constexpr size_t   MAX_PAYLOAD  = 1514; // bytes
 static constexpr size_t   FRAME_OVERHEAD = HEADER_SIZE + CRC_SIZE; // 22 bytes
 
 // ── Preamble ──────────────────────────────────────────────────────────────

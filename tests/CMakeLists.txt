@@ -99,7 +99,15 @@ add_test(NAME sdrctl_atomic
 # The production diagnostics surface must fail closed: every endpoint requires
 # authentication, mutation methods are rejected, and loose token permissions
 # prevent the service from starting.
-add_test(NAME diagnostics_api
-         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/diagnostics_api_test.sh
-                 $<TARGET_FILE:sdr-diagnostics-api>)
-set_tests_properties(diagnostics_api PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME sdr_agent
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/sdr_agent_test.sh
+                 $<TARGET_FILE:sdr-agent>)
+set_tests_properties(sdr_agent PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME diagnostics_collector
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/diagnostics_collector_test.py
+                 ${CMAKE_SOURCE_DIR}/scripts/collect-diagnostics.py)
+# The bridge.conf schema: the radio parameters moved out of the bring-up scripts
+# must be validated, required, and migrated with the values a unit was running.
+add_test(NAME config_schema
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/config_schema_test.sh
+                 ${CMAKE_SOURCE_DIR}/release/appliance/config_schema.sh)

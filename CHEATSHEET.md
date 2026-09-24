@@ -257,8 +257,8 @@ Bring-up — order matters:
 # on the board
 sh watchdog_relax.sh 120          # stock is a 10 s timeout; a big scp outruns it
 sh fpga_abi_check.sh 3 3          # refuses if the bitstream is incompatible
-sh rx_framed.sh 17280000          # receive
-sh tx_fabric.sh 17280000 434000000 1   # transmit from a byte stream
+sh rx_framed.sh 17280000 1 434000000 4000000 slow_attack   # receive: fs diff rx_lo rf_bw gain_mode
+sh tx_fabric.sh 17280000 434000000 1 4000000 0            # transmit: fs tx_lo diff rf_bw atten_dB
 sh tx_feed.sh /tmp/stream.bytes
 ```
 

@@ -9,6 +9,7 @@
 # lock, so the radio is keyed permanently. Measured on one channel: zero bytes
 # delivered in either direction. Measured 10 MHz apart with both units
 # transmitting: 0.00% and 0.06% PER.
+CONFIG_VERSION=2
 MODE=raw-eth
 IFACE=eth0
 SAMPLE_RATE=15360000       # 6.96 Mbit/s payload measured at this rate
@@ -21,3 +22,14 @@ RX_FREQUENCY=444000000     # THIS unit listens here = the PEER's FREQUENCY
 NODE_ID=1
 DIFF_MODE=1
 STATS_S=30
+# Radio parameters (schema 2). These were hard-coded in the bring-up scripts;
+# now this file is the only place they are set, and appliance_start.sh reads
+# every one back from the AD9363 before forwarding. Validated ranges:
+#   TX_RF_BANDWIDTH / RX_RF_BANDWIDTH  200000..20000000 Hz, not above SAMPLE_RATE
+#   TX_ATTENUATION_DB                  0..89.75 in 0.25 dB steps (0 = full output)
+#   RX_GAIN_MODE                       manual | fast_attack | slow_attack | hybrid
+#   RX_GAIN_DB                         0..73, required only with RX_GAIN_MODE=manual
+TX_RF_BANDWIDTH=4000000
+RX_RF_BANDWIDTH=4000000
+TX_ATTENUATION_DB=0
+RX_GAIN_MODE=slow_attack

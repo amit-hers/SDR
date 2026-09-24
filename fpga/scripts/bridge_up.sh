@@ -36,8 +36,11 @@ sh "$DIR/free_capture_dev.sh" || {
     exit 2
 }
 
-sh "$DIR/tx_fabric.sh" "$FS" "$LO" 1 || exit 1
-sh "$DIR/rx_framed.sh" "$FS"        || exit 1
+# Explicit radio parameters: the bring-up scripts no longer have defaults
+# (production values live in bridge.conf; this legacy TUN path has no config
+# of its own, so it states them here where they can be seen).
+sh "$DIR/tx_fabric.sh" "$FS" "$LO" 1 4000000 0                  || exit 1
+sh "$DIR/rx_framed.sh" "$FS" 1 "$LO" 4000000 slow_attack        || exit 1
 
 # Transmit buffer, then DMA source -- in that order, per the note above.
 DB=0x79024000

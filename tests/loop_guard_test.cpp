@@ -105,6 +105,34 @@ int main() {
         check(cap.size() <= 64, "table bounded under a 500-source flood");
     }
 
+    // ── Second rule: a copy of a locally originated frame is never injected ──
+    //
+    // The shared-switch case the source rule cannot cover: the PC is on THIS
+    // wire, so its frames are legitimately forwarded, and the peer's copy of the
+    // very same frame returns over the radio. Injecting it teaches the switch
+    // that the PC lives behind the peer's port.
+    {
+        LoopGuard g;
+        uint8_t H[6] = {0x98, 0xee, 0xcb, 0xd7, 0x2d, 0xd4};
+        auto syn = frame(OTHER, H, 0x0800);
+        check(g.shouldInject(syn.data(), syn.size(), t0), "unknown content from the radio is injected");
+        g.noteForwarded(syn.data(), syn.size(), t0);
+        check(!g.shouldInject(syn.data(), syn.size(), t0 + std::chrono::milliseconds(150)),
+              "the same frame returning over the radio 150 ms later is NOT injected");
+        check(g.localCopies() == 1, "the copy is counted");
+        auto other = frame(OTHER, H, 0x0800); other.back() ^= 1;
+        check(g.shouldInject(other.data(), other.size(), t0 + std::chrono::milliseconds(150)),
+              "a frame differing in one byte is injected");
+        check(g.shouldInject(syn.data(), syn.size(), t0 + std::chrono::milliseconds(3500)),
+              "after the content window the same content is injected again");
+        // Bounded under a flood of distinct forwarded frames.
+        for (int i = 0; i < 20000; ++i) {
+            auto ff = frame(OTHER, H, 0x0800); ff[20] = uint8_t(i); ff[21] = uint8_t(i >> 8);
+            g.noteForwarded(ff.data(), ff.size(), t0 + std::chrono::milliseconds(i));
+        }
+        check(g.contentSize() <= LoopGuard::DEFAULT_MAX_CONTENT, "content table bounded under a 20000-frame flood");
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

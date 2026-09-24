@@ -79,8 +79,8 @@ configure() {
       done
       sleep 2
       sh /mnt/jffs2/tools/watchdog_relax.sh >/dev/null 2>&1
-      sh /mnt/jffs2/tools/tx_fabric.sh $FS $LO $DIFF >/dev/null 2>&1
-      sh /mnt/jffs2/tools/rx_framed.sh $FS $DIFF     >/dev/null 2>&1
+      sh /mnt/jffs2/tools/tx_fabric.sh $FS $LO $DIFF 4000000 0 >/dev/null 2>&1
+      sh /mnt/jffs2/tools/rx_framed.sh $FS $DIFF $LO 4000000 slow_attack >/dev/null 2>&1
       devmem 0x43C10020 32 $DIFF
       devmem 0x43C00028 32 $DIFF
       echo $TXATT > /sys/bus/iio/devices/iio:device0/out_voltage0_hardwaregain"

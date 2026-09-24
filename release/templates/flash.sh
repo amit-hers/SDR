@@ -207,6 +207,33 @@ else
   echo "                  but will not carry IP."
 fi
 
+step 81 "Installing the management daemon"
+# sdr-agent is the authenticated, read-only HTTP management API. It is a
+# dynamically linked C binary (~22 KB) precisely so that it fits here; its
+# static predecessor did not and was never persistent. The bearer token is
+# generated ONCE per unit and kept: a token that rotated on every flash would
+# invalidate every host-side copy, and this token is the only access control.
+# Host copies live in a 0700 directory keyed by the board's serial, mode 0600.
+if [[ -f "$BUNDLE/software/sdr-agent" ]]; then
+  put "$BUNDLE/software/sdr-agent" /mnt/jffs2/sdr-agent || die "Could not install sdr-agent."
+  ssh_d 'chmod 700 /mnt/jffs2/sdr-agent' >/dev/null 2>&1
+  TOKDIR="${SDR_TOKEN_DIR:-$HOME/.config/sdr/tokens}"
+  SERIAL=$(ssh_d 'cat /mnt/jffs2/serial.txt 2>/dev/null || cat /etc/serial' 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+  mkdir -p "$TOKDIR" && chmod 700 "$TOKDIR"
+  if ssh_d 'test -s /mnt/jffs2/agent.token' >/dev/null 2>&1; then
+    echo "         keeping the unit's existing token"
+  else
+    TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    printf '%s\n' "$TOKEN" | ssh_d 'umask 077; cat > /mnt/jffs2/agent.token' \
+      || die "Could not install the agent token."
+  fi
+  ssh_d 'chmod 600 /mnt/jffs2/agent.token' >/dev/null 2>&1
+  ( umask 077; ssh_d 'cat /mnt/jffs2/agent.token' > "$TOKDIR/${SERIAL:-$DEV}.token" ) 2>/dev/null \
+    && echo "         token copy: $TOKDIR/${SERIAL:-$DEV}.token (mode 0600)"
+else
+  echo "         WARNING: this bundle has no sdr-agent; no management API on this unit."
+fi
+
 step 82 "Installing configuration"
 put "$BUNDLE/config/ad936x.conf" /mnt/jffs2/ad936x.conf || die "Could not install ad936x.conf."
 echo "$REL" | ssh_d 'cat > /mnt/jffs2/sdr-release' || die "Could not record the release version."
@@ -254,12 +281,63 @@ case "\$WANT_IP" in
     fi ;;
 esac
 
+# eth0 has the same fault and, unlike usb0, no other path to a configuration.
+# The documented "edit config.txt on the USB drive and eject" mechanism does
+# not exist on this firmware: nothing starts /sbin/update.sh, and the
+# mass-storage LUN has no backing image (the host sees a 0 B "File-Stor
+# Gadget"). /opt/config.txt is WRITTEN by S40network from the env at boot and
+# never read, so editing it changes nothing. The only place ipaddr_eth lives
+# is the u-boot env:
+#     fw_setenv ipaddr_eth 192.168.1.20; fw_setenv netmask_eth 255.255.255.0
+#     fw_setenv gateway_eth 192.168.1.1      # optional; -1 arg clears
+# and because S40network cannot read the env at boot, eth0 is brought up as
+# DHCP on a segment with no DHCP server and ends up with no address at all.
+# Apply the env here, and rewrite the eth0 stanza in /etc/network/interfaces
+# so a later ifup (ifplugd on link change) re-applies the same address instead
+# of DHCP. The address survives the bridge's own "ip link set eth0 down/up".
+ETH_IP=\$(fw_printenv -n ipaddr_eth 2>/dev/null)
+ETH_NM=\$(fw_printenv -n netmask_eth 2>/dev/null); [ -n "\$ETH_NM" ] || ETH_NM=255.255.255.0
+ETH_GW=\$(fw_printenv -n gateway_eth 2>/dev/null)
+case "\$ETH_IP" in
+  *.*.*.*)
+    for p in \$(pidof udhcpc); do
+      grep -q eth0 /proc/\$p/cmdline 2>/dev/null && kill \$p 2>/dev/null
+    done
+    ETH_MAC=\$(cat /sys/class/net/eth0/address 2>/dev/null)
+    sed -i '/^auto eth0/,/^\$/d' /etc/network/interfaces
+    {
+      printf 'auto eth0\\niface eth0 inet static\\n\\taddress %s\\n\\tnetmask %s\\n' "\$ETH_IP" "\$ETH_NM"
+      [ -n "\$ETH_GW" ] && printf '\\tgateway %s\\n' "\$ETH_GW"
+      [ -n "\$ETH_MAC" ] && printf '\\thwaddress ether %s\\n' "\$ETH_MAC"
+      printf '\\n'
+    } >> /etc/network/interfaces
+    ip addr flush dev eth0
+    ifconfig eth0 "\$ETH_IP" netmask "\$ETH_NM" up
+    [ -n "\$ETH_GW" ] && ip route replace default via "\$ETH_GW" dev eth0
+    # Keep the report file honest: config.txt is CRLF, so preserve the CR.
+    CR=\$(printf '\\r')
+    sed -i -e "s/^ipaddr_eth = .*/ipaddr_eth = \$ETH_IP\$CR/" \\
+           -e "s/^netmask_eth = .*/netmask_eth = \$ETH_NM\$CR/" \\
+           -e "s/^gateway_eth = .*/gateway_eth = \$ETH_GW\$CR/" /opt/config.txt
+    echo "autorun: eth0 set to \$ETH_IP/\$ETH_NM\${ETH_GW:+ gw \$ETH_GW} (from u-boot env)"
+    ;;
+esac
+
 # Restore the supporting tools from jffs2. /root is rebuilt from the ramdisk
 # every boot, so without this a rebooted radio has none of them.
 [ -d /mnt/jffs2/tools ] && {
   mkdir -p /root/sdr-tools
   cp /mnt/jffs2/tools/*.sh /root/sdr-tools/ 2>/dev/null
   chmod +x /root/sdr-tools/*.sh 2>/dev/null
+}
+
+# Management API, on the USB management address only (docs/diagnostics-api.md:
+# plaintext HTTP, so never the RF/user Ethernet). usb0 was corrected above, so
+# read the address it actually has rather than the one the env asked for.
+[ -x /mnt/jffs2/sdr-agent ] && [ -s /mnt/jffs2/agent.token ] && {
+  AGENT_IP=\$(ip -4 addr show usb0 2>/dev/null | grep -o 'inet [0-9.]*' | awk '{print \$2}')
+  [ -n "\$AGENT_IP" ] && /mnt/jffs2/sdr-agent --bind "\$AGENT_IP" --port 8088 \
+      > /tmp/sdr-agent.log 2>&1 &
 }
 
 # The IP bridge starts at boot ONLY if an operator has written bridge.conf.

@@ -26,6 +26,17 @@ log() { printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)s" "$*" >> "$LOG"; }
 # every frame the other sent.
 SCHEMA=/mnt/jffs2/config_schema.sh
 if [ -x "$SCHEMA" ]; then
+    # A config written for an OLDER schema is migrated in place first. The
+    # migration only adds keys whose values are exactly what this unit was
+    # already running (schema 2: the radio parameters the bring-up scripts
+    # used to hard-code), atomically, so it cannot change behaviour; refusing
+    # to forward after a software update because the file predates it would.
+    _cur=$(sed -n 's/^CONFIG_VERSION=//p' "$CONF" | head -1)
+    _want=$(sed -n 's/^SCHEMA_VERSION=//p' "$SCHEMA" | head -1)
+    if [ -n "$_want" ] && [ "${_cur:-0}" -lt "$_want" ] 2>/dev/null; then
+        if _mig=$("$SCHEMA" migrate "$CONF" 2>&1); then log "config: $_mig"
+        else log "config migration failed: $_mig"; fi
+    fi
     if ! _cfgerr=$("$SCHEMA" validate "$CONF" 2>&1); then
         log "CONFIGURATION REJECTED -- not forwarding:"
         echo "$_cfgerr" | while IFS= read -r _l; do log "  $_l"; done
@@ -110,9 +121,18 @@ for d in /proc/[0-9]*; do
     esac
 done
 
-log "bring-up: fs=$SAMPLE_RATE tx_lo=$FREQUENCY rx_lo=$RX_FREQUENCY diff=$DIFF_MODE"
-sh "$TOOLS/tx_fabric.sh" "$SAMPLE_RATE" "$FREQUENCY" "$DIFF_MODE" >>"$LOG" 2>&1
-sh "$TOOLS/rx_framed.sh" "$SAMPLE_RATE" "$DIFF_MODE" "$RX_FREQUENCY" >>"$LOG" 2>&1
+# Radio parameters come from bridge.conf and nowhere else. They are required
+# by the schema (validated above), so an empty value here means the schema was
+# bypassed -- refuse rather than invent a number.
+for _k in TX_RF_BANDWIDTH RX_RF_BANDWIDTH TX_ATTENUATION_DB RX_GAIN_MODE; do
+    eval "_v=\${$_k:-}"
+    [ -n "$_v" ] || { log "$_k is not set in $CONF; refusing to bring the radio up on a guess"; exit 1; }
+done
+log "bring-up: fs=$SAMPLE_RATE tx_lo=$FREQUENCY rx_lo=$RX_FREQUENCY diff=$DIFF_MODE tx_bw=$TX_RF_BANDWIDTH rx_bw=$RX_RF_BANDWIDTH tx_att=$TX_ATTENUATION_DB rx_gain=$RX_GAIN_MODE${RX_GAIN_DB:+/$RX_GAIN_DB}"
+sh "$TOOLS/tx_fabric.sh" "$SAMPLE_RATE" "$FREQUENCY" "$DIFF_MODE" "$TX_RF_BANDWIDTH" "$TX_ATTENUATION_DB" >>"$LOG" 2>&1 \
+    || { log "tx_fabric.sh failed; refusing to start the bridge"; exit 1; }
+sh "$TOOLS/rx_framed.sh" "$SAMPLE_RATE" "$DIFF_MODE" "$RX_FREQUENCY" "$RX_RF_BANDWIDTH" "$RX_GAIN_MODE" ${RX_GAIN_DB:+"$RX_GAIN_DB"} >>"$LOG" 2>&1 \
+    || { log "rx_framed.sh failed; refusing to start the bridge"; exit 1; }
 
 # Verify the fabric actually came up before handing over, so a failure is
 # reported here rather than as unexplained bridge errors later.
@@ -177,6 +197,34 @@ if [ -d "/sys/class/net/$IFACE" ]; then
         || log "PREFLIGHT WARN: $IFACE has no carrier; forwarding will start but carry nothing"
 else
     pf_fail "interface $IFACE does not exist"
+fi
+
+# 8. Requested vs actual RF. Every value written to the AD9363 is read back
+#    and compared, because the driver clamps or rejects out-of-range values
+#    silently and a link debugged from what was ASKED for is a link debugged
+#    from fiction. LOs are allowed the PLL's quantisation (444000000 reads
+#    back 443999998).
+_phy=""
+for _d in /sys/bus/iio/devices/iio:device*; do
+    [ "$(cat "$_d/name" 2>/dev/null)" = ad9361-phy ] && { _phy=$_d; break; }
+done
+if [ -n "$_phy" ]; then
+    rb() { cat "$_phy/$1" 2>/dev/null | cut -d' ' -f1; }
+    near() { _a=$1; _b=$2; _t=$3; _dd=$((_a > _b ? _a - _b : _b - _a)); [ "$_dd" -le "$_t" ]; }
+    _v=$(rb out_altvoltage1_TX_LO_frequency); near "${_v:-0}" "$FREQUENCY" 1000    || pf_fail "TX LO reads $_v, requested $FREQUENCY"
+    _v=$(rb out_altvoltage0_RX_LO_frequency); near "${_v:-0}" "$RX_FREQUENCY" 1000 || pf_fail "RX LO reads $_v, requested $RX_FREQUENCY"
+    _v=$(rb in_voltage_sampling_frequency);   near "${_v:-0}" "$SAMPLE_RATE" 1000  || pf_fail "sample rate reads $_v, requested $SAMPLE_RATE"
+    _v=$(rb out_voltage_rf_bandwidth); [ "$_v" = "$TX_RF_BANDWIDTH" ] || pf_fail "TX RF bandwidth reads $_v, requested $TX_RF_BANDWIDTH"
+    _v=$(rb in_voltage_rf_bandwidth);  [ "$_v" = "$RX_RF_BANDWIDTH" ] || pf_fail "RX RF bandwidth reads $_v, requested $RX_RF_BANDWIDTH"
+    _v=$(rb in_voltage0_gain_control_mode); [ "$_v" = "$RX_GAIN_MODE" ] || pf_fail "RX gain mode reads $_v, requested $RX_GAIN_MODE"
+    _v=$(rb ensm_mode); [ "$_v" = fdd ] || pf_fail "ensm_mode reads $_v, expected fdd"
+    _v=$(rb out_altvoltage1_TX_LO_powerdown); [ "${_v:-0}" = 0 ] || pf_fail "TX LO is powered down (out_altvoltage1_TX_LO_powerdown=$_v)"
+    # hardwaregain reads "-10.000000 dB": attenuation, negated. Compare numerically.
+    _v=$(rb out_voltage0_hardwaregain)
+    awk -v g="${_v:-999}" -v a="$TX_ATTENUATION_DB" 'BEGIN { d = (-g) - a; exit (d < 0.01 && d > -0.01) ? 0 : 1 }' \
+        || pf_fail "TX attenuation reads $_v dB, requested -$TX_ATTENUATION_DB"
+else
+    pf_fail "ad9361-phy IIO device not found for readback"
 fi
 
 # 7. Packet size. The bridge reads PKT_BYTES-sized blocks and sizes its IIO

@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "Frame.hpp"
+
 namespace sdr {
 
 // A DMA block is the aggregate container. Entries retain the existing RF
@@ -59,7 +61,17 @@ private:
         b.data_packets = data_packets_;
         b.payload_bytes = payload_bytes_;
         b.padding_bytes = block_size_ - bytes_.size();
-        bytes_.resize(block_size_, 0);
+        // Pad with the preamble byte, NOT zero. The link is differentially
+        // encoded: a zero dibit is "no phase change", so a zero tail goes on
+        // the air as an unmodulated tone and the receiver's timing loop has
+        // nothing to track until the next block. Measured: 88% loss of dense
+        // 1200-byte UDP while sparse pings passed -- each data block's zero
+        // tail derailed the demodulator for the next block's first frames,
+        // and idle blocks (all keepalives, no padding) never showed it.
+        // 0xAA is a constant rotation every symbol, the same training pattern
+        // the frame preamble uses, so the tail keeps the loops fed instead.
+        // The deframer hunts for the sync word and never parses padding.
+        bytes_.resize(block_size_, PREAMBLE_BYTE);
         b.bytes = std::move(bytes_);
         bytes_.clear();
         bytes_.reserve(block_size_);

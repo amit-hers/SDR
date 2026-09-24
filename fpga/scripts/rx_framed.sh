@@ -1,14 +1,20 @@
 #!/bin/sh
-# Continuous framed reception at 434 MHz. Run after every PL reload.
-#   usage: rx_framed.sh [sample_rate_Hz] [diff_mode] [rx_lo_Hz]
-FS=${1:-7680000}
-# diff_mode must MATCH the transmitter. tx_fabric.sh takes it as an argument, so
-# hardcoding 1 here meant `tx_fabric.sh <fs> <lo> 0` silently produced
-# mod=0 / dem=1 -- a combination the demodulator cannot decode, while every
-# register still reads healthy and the signal level looks fine. Observed in
-# practice: strong signal, balanced symbol statistics, and not one frame.
-DIFF=${2:-1}
-RXLO=${3:-434000000}
+# Continuous framed reception. Run after every PL reload.
+#   usage: rx_framed.sh <sample_rate_Hz> <diff_mode> <rx_lo_Hz> <rf_bandwidth_Hz> <gain_mode> [gain_dB]
+#
+# EVERY ARGUMENT IS REQUIRED (gain_dB only with gain_mode=manual). This script
+# used to default to 7.68 MS/s while tx_fabric.sh defaulted to 17.28 MS/s, and
+# both defaulted the LO to 434 MHz, so run bare they built a link that could
+# not work while every register read healthy. diff_mode must MATCH the
+# transmitter: hardcoding 1 here once produced mod=0 / dem=1 -- strong signal,
+# balanced symbol statistics, and not one frame. The RF bandwidth and gain mode
+# were hard-coded here; they now come from bridge.conf via appliance_start.sh.
+usage() { echo "usage: $0 <sample_rate_Hz> <diff_mode 0|1> <rx_lo_Hz> <rf_bandwidth_Hz> <manual|fast_attack|slow_attack|hybrid> [gain_dB]" >&2; exit 2; }
+[ $# -eq 5 ] || [ $# -eq 6 ] || usage
+FS=$1; DIFF=$2; RXLO=$3; BW=$4; GAINMODE=$5; GAINDB=${6:-}
+for _n in "$FS" "$RXLO" "$BW"; do case "$_n" in ''|*[!0-9]*) usage ;; esac; done
+case "$DIFF" in 0|1) ;; *) usage ;; esac
+case "$GAINMODE" in manual) [ -n "$GAINDB" ] || usage ;; fast_attack|slow_attack|hybrid) ;; *) usage ;; esac
 # A MISSING iio_lookup.sh is not a loud failure on busybox: `.` prints "can't
 # open" and CARRIES ON, leaving the device paths empty. `dd if= of=cap.bin`
 # then reads STDIN and blocks forever, which reads as a dead receiver -- it
@@ -23,7 +29,7 @@ echo 0 > $R/buffer/enable 2>/dev/null
 devmem 0x79020040 32 0x3            # ADC core out of reset: it gates all of l_clk
 devmem 0x7C400080 32 0              # DMA IRQ unmask -- re-masked by every PL reload
 echo "$FS" > $P/in_voltage_sampling_frequency
-echo 4000000 > $P/in_voltage_rf_bandwidth
+echo "$BW" > $P/in_voltage_rf_bandwidth
 # RX LO is a parameter, not a constant.
 #
 # Hardcoding it forced TX and RX onto one frequency, and the bridge transmits
@@ -33,7 +39,8 @@ echo 4000000 > $P/in_voltage_rf_bandwidth
 # CRC failures and delivered nothing -- it was demodulating itself. Frequency
 # division needs A to listen where B transmits, which this could not express.
 echo "$RXLO" > $P/out_altvoltage0_RX_LO_frequency
-echo slow_attack > $P/in_voltage0_gain_control_mode
+echo "$GAINMODE" > $P/in_voltage0_gain_control_mode
+[ "$GAINMODE" = manual ] && echo "$GAINDB" > $P/in_voltage0_hardwaregain
 # MODEM CORES FIRST, ADC CHANNELS SECOND. The other order latches the sticky
 # overflow flag on the first sample -- the adapter has a stream sink that is not
 # yet draining and an ADC that cannot be told to wait -- and it never clears.
@@ -88,4 +95,4 @@ echo 16384 > $R/buffer/length
 # against a raw read that never returned.
 echo 0 > $R/buffer/enable 2>/dev/null || true
 sleep 1
-echo "# rx_lo=$(cat $P/out_altvoltage0_RX_LO_frequency) fs=$(cat $P/in_voltage_sampling_frequency) l_clk=$(devmem 0x79020054 32) rssi=$(cat $P/in_voltage0_rssi) gain=$(cat $P/in_voltage0_hardwaregain) diff=$(devmem $((D+0x28)) 32) ap=$(devmem $((D+0x00)) 32) up=$(cut -d. -f1 /proc/uptime)s"
+echo "# rx_lo=$(cat $P/out_altvoltage0_RX_LO_frequency) fs=$(cat $P/in_voltage_sampling_frequency) bw=$(cat $P/in_voltage_rf_bandwidth) agc=$(cat $P/in_voltage0_gain_control_mode) l_clk=$(devmem 0x79020054 32) rssi=$(cat $P/in_voltage0_rssi) gain=$(cat $P/in_voltage0_hardwaregain) diff=$(devmem $((D+0x28)) 32) ap=$(devmem $((D+0x00)) 32) up=$(cut -d. -f1 /proc/uptime)s"

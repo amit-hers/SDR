@@ -7,6 +7,23 @@ nobody logs in, and no SDR software runs on either end.
 
 ---
 
+## Radio parameters live in bridge.conf (schema 2)
+
+`TX_RF_BANDWIDTH`, `RX_RF_BANDWIDTH`, `TX_ATTENUATION_DB`, `RX_GAIN_MODE` (and
+`RX_GAIN_DB` for manual gain) are **required** keys since schema 2. They used
+to be hard-coded in `tx_fabric.sh` / `rx_framed.sh`, which also had
+*different* default sample rates (17.28 vs 7.68 MS/s) and the same default LO
+-- run bare, they built a link that could not work. Both scripts now require
+every argument, and `appliance_start.sh` is the only caller in production.
+
+A unit with a schema-1 file is migrated **in place at boot**: `config_schema.sh
+migrate` writes the values the scripts used to hard-code, so behaviour does not
+change and the values become visible in the file. After bring-up, preflight
+check 8 reads every value back from the AD9363 (LOs within 1 kHz, sample rate,
+both bandwidths, gain mode, `ensm_mode=fdd`, TX LO not powered down, attenuation)
+and refuses to forward on any mismatch. The same comparison is served live by
+the agent at `GET /api/v1/radio`.
+
 ## 1. How it fits together
 
 ```
@@ -55,8 +72,8 @@ S98autostart
   └─ /mnt/jffs2/autorun.sh          (loads the FPGA bitstream, relaxes the watchdog)
        └─ /mnt/jffs2/appliance_start.sh   &
             ├─ wait for IIO devices BY NAME (up to 60 s)
-            ├─ tools/tx_fabric.sh   <rate> <freq> <diff>
-            ├─ tools/rx_framed.sh   <rate>
+            ├─ tools/tx_fabric.sh   <rate> <freq> <diff> <tx_bw> <tx_att>
+            ├─ tools/rx_framed.sh   <rate> <diff> <rx_freq> <rx_bw> <gain_mode> [gain_dB]
             ├─ assert mod_en and dem_en are both 1
             └─ exec sdr_bridge --raw-eth eth0 --stats 30
 ```
@@ -167,8 +184,8 @@ Power-cycle and read `/tmp/appliance.log`.
 ## 6. Running it by hand
 
 ```bash
-/mnt/jffs2/tools/tx_fabric.sh 3840000 434000000 1
-/mnt/jffs2/tools/rx_framed.sh 3840000
+/mnt/jffs2/tools/tx_fabric.sh 3840000 434000000 1 4000000 0
+/mnt/jffs2/tools/rx_framed.sh 3840000 1 444000000 4000000 slow_attack
 /mnt/jffs2/sdr_bridge --raw-eth eth0 --stats 30
 ```
 

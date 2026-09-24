@@ -49,6 +49,8 @@
 #include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <csignal>
@@ -103,7 +105,12 @@ struct Opts {
     uint64_t    link_bps       = 6960000;   // measured payload goodput
     unsigned    ctrl_budget_ms = 10;
     unsigned    bulk_budget_ms = 100;
-    int         mtu     = 1400;        // == MAX_PAYLOAD; TUN carries no L2 header
+    // The largest FRAME the radio carries (== MAX_PAYLOAD). In TUN mode that is
+    // the interface MTU directly; in raw-eth mode the interface MTU is this
+    // minus the 14-byte Ethernet header, i.e. a standard 1500.
+    int         mtu     = static_cast<int>(MAX_PAYLOAD);
+    int         tx_kbufs = 2;          // direct-IIO TX kernel buffers in flight
+    int         tx_pipe_blocks = 4;    // iio_writedev pipe depth, in DMA blocks
     int         pkt     = 32768;       // PKT_BYTES in axis_packetizer.v
     int         tx_block = 0;          // direct-IIO TX bytes; 0 uses pkt
     int         tx_qlen = 32;          // bound bulk backlog without dropping interactive traffic
@@ -128,7 +135,12 @@ void usage() {
       "  --direct-iio-tx  synchronous single-buffer libiio TX (experimental)\n"
       "  --direct-iio-rx  synchronous single-buffer libiio RX (experimental)\n"
       "  --node-id N      this node's id; frames carrying it are ignored\n"
-      "  --mtu N          default 1400, the framing layer's MAX_PAYLOAD\n"
+      "  --mtu N          largest frame carried (default 1514 == MAX_PAYLOAD);\n"
+      "                   raw-eth sets the link MTU to N-14, TUN to N\n"
+      "  --tx-kbufs N     direct-IIO TX kernel buffers (default 2). Each is one\n"
+      "                   block of airtime queued ahead of a new packet\n"
+      "  --tx-pipe-blocks N  iio_writedev pipe depth in DMA blocks (default 4).\n"
+      "                   Fewer = lower latency, less margin against a TX stall\n"
       "  --pkt N          DMA packet size, must equal PKT_BYTES (default 32768)\n"
       "  --tx-block N     direct-IIO TX block bytes (default: same as --pkt)\n"
       "  --tx-qlen N      TUN transmit queue length in packets (default 32)\n"
@@ -204,17 +216,24 @@ int runCmd(const std::string& c) {
 static pid_t g_tx_pid = -1, g_rx_pid = -1;
 
 // Spawn a child with one end of a pipe as its stdin (to_child) or stdout.
-static int spawnIio(const char* const argv[], bool to_child, pid_t* pid_out) {
+static int spawnIio(const char* const argv[], bool to_child, pid_t* pid_out,
+                    int dma_block_bytes) {
     int fds[2];
     if (::pipe(fds) < 0) { std::perror("pipe"); return -1; }
     // Do not let continuous keepalive blocks build a deep queue in front of a
-    // newly arrived data packet.  One DMA block already takes about 120 ms at
-    // the product's 3.84 MS/s setting; a multi-block pipe turns that into
-    // user-visible latency in each direction.  RX is unaffected: its pipe must
-    // retain the kernel default so a brief decode delay does not discard data.
+    // newly arrived data packet: the link transmits idle fill continuously, so
+    // every byte of pipe is always full and a new packet waits behind all of
+    // it. The pipe is sized in DMA blocks (--tx-pipe-blocks), whatever the
+    // block size is; it was a hard-coded 32768 from when blocks were 32 KiB.
+    // At 8192-byte blocks each block of pipe is ~8.8 ms of queue per direction
+    // (measured: 160 ms ping RTT at four blocks). iio_writedev adds its own
+    // four kernel buffers behind this and offers no option to shrink them.
+    // The depth is also the margin against a stall in this process: if the
+    // pipe drains, the DAC underruns and the far demodulator loses lock.
+    // RX is unaffected: its pipe must retain the kernel default so a brief
+    // decode delay does not discard data.
 #ifdef F_SETPIPE_SZ
     if (to_child) {
-        const int dma_block_bytes = 32768;
         (void)::fcntl(fds[1], F_SETPIPE_SZ, dma_block_bytes);
     }
 #endif
@@ -257,6 +276,7 @@ class DirectIioTx {
     using DestroyBuffer = void (*)(iio_buffer*);
     using BufferPtr = void* (*)(const iio_buffer*);
     using BufferPush = ssize_t (*)(iio_buffer*);
+    using SetKernelBuffers = int (*)(const iio_device*, unsigned);
 
     DestroyContext destroy_context_ = nullptr;
     DestroyBuffer destroy_buffer_ = nullptr;
@@ -278,7 +298,7 @@ public:
         if (so_) ::dlclose(so_);
     }
 
-    bool open(size_t samples, size_t expected_bytes) {
+    bool open(size_t samples, size_t expected_bytes, int kernel_buffers) {
         so_ = ::dlopen("libiio.so.0", RTLD_NOW | RTLD_LOCAL);
         if (!so_) {
             std::fprintf(stderr, "bridge: dlopen(libiio.so.0): %s\n", ::dlerror());
@@ -309,6 +329,22 @@ public:
         if (!ch0 || !ch1) { std::fprintf(stderr, "bridge: TX IIO channels not found\n"); return false; }
         enable_channel(ch0);
         enable_channel(ch1);
+        // Queue depth IS latency here. The link transmits continuously (idle
+        // fill), so every kernel buffer is always full and a newly arrived
+        // packet waits behind all of them: at 8192 B/block and ~8.8 ms of air
+        // per block, libiio's default of 4 was ~35 ms per direction before the
+        // packet even reached the modulator. Two is the minimum that keeps the
+        // DAC fed while one is being filled. Optional symbol: an older libiio
+        // without it keeps its default rather than failing to start.
+        auto set_kernel_buffers = reinterpret_cast<SetKernelBuffers>(
+            ::dlsym(so_, "iio_device_set_kernel_buffers_count"));
+        if (set_kernel_buffers) {
+            if (set_kernel_buffers(dev, static_cast<unsigned>(kernel_buffers)) != 0)
+                std::fprintf(stderr, "bridge: WARNING could not set %d TX kernel buffers; using libiio default\n",
+                             kernel_buffers);
+        } else {
+            std::fprintf(stderr, "bridge: WARNING libiio lacks iio_device_set_kernel_buffers_count; TX queue depth is the default\n");
+        }
         buf_ = create_buffer(dev, samples, false);
         if (!buf_) {
             std::fprintf(stderr, "bridge: cannot create direct TX IIO buffer: %s\n",
@@ -571,7 +607,24 @@ static bool demodSoftResetDrained() {
 // including ones the host stack will also process. That is deliberate: the
 // radio is a wire, not an endpoint, and filtering here would silently drop
 // protocols someone later depends on.
-static int packetOpen(const std::string& iface, int mtu) {
+// The capture interface's own MAC. Frames addressed TO it are for this unit's
+// stack (its SSH, its ARP) and never cross the radio; frames arriving from the
+// radio that carry it, as source or destination, are echoes and are never
+// injected. Measured on one switch without this: a PC's ARP to unit B's own
+// address looped B -> RF -> A -> switch -> B at 1,800 frames/s, because the
+// source (the PC) is legitimately local and the copy returns on the WIRE,
+// where neither the source rule nor the content rule can see it.
+static uint8_t g_own_mac[6] = {0, 0, 0, 0, 0, 0};
+static bool    g_own_mac_ok = false;
+static std::atomic<uint64_t> g_to_self{0}, g_from_self{0};
+
+static int packetOpen(const std::string& iface, int frame_max) {
+    // The link MTU counts IP bytes; the frame the radio carries adds the
+    // 14-byte Ethernet header. Setting the MTU to the frame limit itself (as
+    // this once did, 1400) told attached hosts they could send 1414-byte
+    // frames, which were then dropped as oversize -- TCP stalled while ping
+    // worked. The MTU an attached host sees must be what actually fits.
+    const int mtu = frame_max - 14;
     int fd = ::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) { std::fprintf(stderr, "bridge: socket(AF_PACKET): %s\n", std::strerror(errno)); return -1; }
 
@@ -583,6 +636,18 @@ static int packetOpen(const std::string& iface, int mtu) {
         ::close(fd); return -1;
     }
     const int ifindex = ifr.ifr_ifindex;
+    {
+        struct ifreq hw;
+        std::memset(&hw, 0, sizeof hw);
+        std::strncpy(hw.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+        if (::ioctl(fd, SIOCGIFHWADDR, &hw) == 0) {
+            std::memcpy(g_own_mac, hw.ifr_hwaddr.sa_data, 6);
+            g_own_mac_ok = true;
+        } else {
+            std::fprintf(stderr, "bridge: WARNING cannot read %s MAC: %s; frames to this unit will cross the radio\n",
+                         iface.c_str(), std::strerror(errno));
+        }
+    }
 
     struct sockaddr_ll sll;
     std::memset(&sll, 0, sizeof sll);
@@ -628,6 +693,30 @@ static int packetOpen(const std::string& iface, int mtu) {
                              "bridge:         (needs kernel 4.20+) -- injected frames will loop\n",
                      iface.c_str(), std::strerror(errno));
 
+    // Turn OFF generic receive offload on the capture interface. GRO merges
+    // consecutive TCP (and on 6.12, UDP) segments into one large skb BEFORE
+    // packet taps see it, so this socket received "frames" of several KB from
+    // hosts that never sent anything over 1514 bytes. They were counted
+    // oversize and dropped, silently, and only TCP was affected: ping worked,
+    // SSH hung at the key exchange, TCP throughput collapsed to 52 kbit/s.
+    // The board has no ethtool, so the ioctl is issued here, every start.
+    {
+        struct ifreq gr;
+        std::memset(&gr, 0, sizeof gr);
+        std::strncpy(gr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+        struct ethtool_value ev;
+        ev.cmd = ETHTOOL_SGRO; ev.data = 0;
+        gr.ifr_data = reinterpret_cast<char*>(&ev);
+        int cs = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (cs < 0 || ::ioctl(cs, SIOCETHTOOL, &gr) < 0)
+            std::fprintf(stderr, "bridge: WARNING could not disable GRO on %s: %s\n"
+                                 "bridge:         coalesced TCP frames will be dropped as oversize\n",
+                         iface.c_str(), std::strerror(errno));
+        else
+            std::fprintf(stderr, "bridge: GRO disabled on %s\n", iface.c_str());
+        if (cs >= 0) ::close(cs);
+    }
+
     // Bring the link up. No address: this is a wire, not a host.
     //
     // The MTU has to be set with the link DOWN. macb rejects SIOCSIFMTU on a
@@ -661,9 +750,9 @@ static int packetOpen(const std::string& iface, int mtu) {
                  iface.c_str(), ifindex, actual_mtu);
     if (actual_mtu > mtu)
         std::fprintf(stderr,
-                     "bridge: WARNING %s mtu is %d but the radio carries %d; frames larger\n"
-                     "bridge:         than that will be counted oversize and dropped\n",
-                     iface.c_str(), actual_mtu, mtu);
+                     "bridge: WARNING %s mtu is %d but the radio carries %d-byte frames (mtu %d);\n"
+                     "bridge:         larger frames will be counted oversize and dropped\n",
+                     iface.c_str(), actual_mtu, frame_max, mtu);
     return fd;
 }
 
@@ -781,7 +870,7 @@ struct Stats {
     std::atomic<uint64_t> tun_tx_drop{0}, tun_rx_drop{0};
     // Frames too large for the framing layer, dropped rather than truncated.
     std::atomic<uint64_t> tx_oversize{0};
-    std::atomic<uint64_t> loop_suppressed{0};
+    std::atomic<uint64_t> loop_suppressed{0}, loop_local_copies{0};
     std::atomic<uint64_t> rx_inject_err{0};
     std::atomic<uint64_t> q_ctrl_depth{0}, q_bulk_depth{0};
     std::atomic<uint64_t> q_ctrl_drop{0},  q_bulk_drop{0};
@@ -996,6 +1085,10 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
             // network, not ours. Only meaningful in raw-eth mode; a TUN carries
             // no Ethernet header to learn from.
             if (o.raw_eth) {
+                if (g_own_mac_ok && n >= 14 && std::memcmp(pkt.data(), g_own_mac, 6) == 0) {
+                    g_to_self.fetch_add(1);      // for this unit's own stack
+                    continue;
+                }
                 bool fwd;
                 {
                     std::lock_guard<std::mutex> lk(g_loop_mx);
@@ -1003,6 +1096,11 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
                               pkt.data(), static_cast<size_t>(n), std::chrono::steady_clock::now());
                 }
                 if (!fwd) { g_stats.loop_suppressed.fetch_add(1); continue; }
+                {
+                    std::lock_guard<std::mutex> lk(g_loop_mx);
+                    g_loop_guard.noteForwarded(pkt.data(), static_cast<size_t>(n),
+                                               std::chrono::steady_clock::now());
+                }
             }
             // QUEUE, do not transmit yet.
             //
@@ -1184,11 +1282,23 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
             if (f.payload.empty()) continue;
 
             // Learn the source BEFORE injecting: the echo can come back around
-            // the switch faster than the next statistics tick.
+            // the switch faster than the next statistics tick. And do not
+            // inject a copy of a frame that originated on our own wire at all
+            // -- see LoopGuard.hpp, the second rule.
             if (o.raw_eth) {
+                if (g_own_mac_ok && f.payload.size() >= 14 &&
+                    (std::memcmp(f.payload.data(), g_own_mac, 6) == 0 ||
+                     std::memcmp(f.payload.data() + 6, g_own_mac, 6) == 0)) {
+                    g_from_self.fetch_add(1);    // our own address came back over the air
+                    continue;
+                }
                 std::lock_guard<std::mutex> lk(g_loop_mx);
-                g_loop_guard.learnFromRadio(f.payload.data(), f.payload.size(),
-                                            std::chrono::steady_clock::now());
+                const auto now = std::chrono::steady_clock::now();
+                if (!g_loop_guard.shouldInject(f.payload.data(), f.payload.size(), now)) {
+                    g_stats.loop_local_copies.fetch_add(1);
+                    continue;
+                }
+                g_loop_guard.learnFromRadio(f.payload.data(), f.payload.size(), now);
             }
             // A FAILED INJECTION MUST BE VISIBLE. This previously did nothing
             // on w <= 0: no counter, no message. A bridge decoding frames
@@ -1234,6 +1344,8 @@ int main(int argc, char** argv) {
         else if (a == "--direct-iio-rx") o.direct_iio_rx = true;
         else if (a == "--node-id") o.node_id = static_cast<uint32_t>(std::strtoul(next("--node-id").c_str(), nullptr, 0));
         else if (a == "--mtu")     o.mtu     = std::atoi(next("--mtu").c_str());
+        else if (a == "--tx-kbufs") o.tx_kbufs = std::atoi(next("--tx-kbufs").c_str());
+        else if (a == "--tx-pipe-blocks") o.tx_pipe_blocks = std::atoi(next("--tx-pipe-blocks").c_str());
         else if (a == "--pkt")     o.pkt     = std::atoi(next("--pkt").c_str());
         else if (a == "--tx-block") o.tx_block = std::atoi(next("--tx-block").c_str());
         else if (a == "--tx-qlen") o.tx_qlen = std::atoi(next("--tx-qlen").c_str());
@@ -1255,6 +1367,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "bridge: mtu %d exceeds MAX_PAYLOAD %zu; a packet that "
                              "large cannot be framed and would be dropped silently\n",
                      o.mtu, MAX_PAYLOAD);
+        return 2;
+    }
+    if (o.tx_pipe_blocks < 1 || o.tx_pipe_blocks > 16) {
+        std::fprintf(stderr, "bridge: --tx-pipe-blocks must be between 1 and 16\n");
+        return 2;
+    }
+    if (o.tx_kbufs < 2 || o.tx_kbufs > 16) {
+        std::fprintf(stderr, "bridge: --tx-kbufs must be between 2 and 16\n");
         return 2;
     }
     if (o.batch_us < 0 || o.batch_us > 1000000) {
@@ -1324,11 +1444,11 @@ int main(int argc, char** argv) {
     if (o.direct_iio_tx) {
         direct_tx.reset(new DirectIioTx);
         if (!direct_tx->open(static_cast<size_t>(tx_bytes / 4),
-                             static_cast<size_t>(tx_bytes))) return 1;
+                             static_cast<size_t>(tx_bytes), o.tx_kbufs)) return 1;
     } else {
         const char* tx_argv[] = { "iio_writedev", "-b", nbuf,
                                   "cf-ad9361-dds-core-lpc", "voltage0", "voltage1", nullptr };
-        tx_fd = spawnIio(tx_argv, true, &g_tx_pid);
+        tx_fd = spawnIio(tx_argv, true, &g_tx_pid, o.pkt * o.tx_pipe_blocks);
         if (tx_fd < 0) { std::fprintf(stderr, "bridge: could not start iio_writedev\n"); return 1; }
     }
 
@@ -1341,8 +1461,8 @@ int main(int argc, char** argv) {
     ::usleep(3000 * 1000);
     selectDmaSource();
     if (direct_tx)
-        std::fprintf(stderr, "bridge: direct single-buffer libiio TX, buffer=%s samples/%d bytes (RX deferred)\n",
-                     tx_nbuf, tx_bytes);
+        std::fprintf(stderr, "bridge: direct libiio TX, buffer=%s samples/%d bytes, %d kernel buffers (RX deferred)\n",
+                     tx_nbuf, tx_bytes, o.tx_kbufs);
     else
         std::fprintf(stderr, "bridge: iio_writedev pid=%d buffer=%s samples (RX deferred)\n",
                      (int)g_tx_pid, nbuf);
@@ -1392,7 +1512,7 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
         } else {
             const char* rx_argv[] = { "iio_readdev", "-b", nbuf,
                                       "cf-ad9361-lpc", "voltage0", "voltage1", nullptr };
-            rx_fd = spawnIio(rx_argv, false, &g_rx_pid);
+            rx_fd = spawnIio(rx_argv, false, &g_rx_pid, o.pkt);
             if (rx_fd < 0) {
                 std::fprintf(stderr, "bridge: could not start deferred iio_readdev\n");
                 g_run.store(false);
@@ -1644,7 +1764,7 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
                     "\"self\":%llu,\"inject_err\":%llu},"
                     "\"queues\":{\"control_depth\":%llu,\"bulk_depth\":%llu,"
                     "\"control_drops\":%llu,\"bulk_drops\":%llu,\"drain_ms\":%llu},"
-                    "\"loop_guard\":{\"suppressed\":%llu},"
+                    "\"loop_guard\":{\"suppressed\":%llu,\"local_copies\":%llu,\"to_self\":%llu,\"from_self\":%llu},"
                     "\"recoveries\":%llu,\"cpu_decode_pct\":%.1f,"
                     "\"peer\":{\"compatibility\":\"%s\",\"hellos\":%llu,\"reasons\":\"%s\"}}\n",
                     o.iface.c_str(), o.node_id,
@@ -1668,6 +1788,9 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
                     (unsigned long long)g_stats.q_bulk_drop.load(),
                     (unsigned long long)g_stats.q_drain_ms.load(),
                     (unsigned long long)g_stats.loop_suppressed.load(),
+                    (unsigned long long)g_stats.loop_local_copies.load(),
+                    (unsigned long long)g_to_self.load(),
+                    (unsigned long long)g_from_self.load(),
                     (unsigned long long)g_stats.recoveries.load(),
                     busy_win,
                     peer_state,

@@ -24,7 +24,9 @@ target_include_directories(sdrctl PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(sdrctl PRIVATE sdr_core)
 install(TARGETS sdrctl DESTINATION bin)
 
-# Small authenticated, read-only HTTP sidecar for on-board diagnostics.  It is
-# dependency-free so the same source can be cross-built statically for Pluto+.
-add_executable(sdr-diagnostics-api ../../fpga/tools/diagnostics_api.cpp)
-install(TARGETS sdr-diagnostics-api DESTINATION bin)
+# sdr-agent: the on-board management daemon (authenticated, read-only HTTP).
+# Plain C with no dependencies beyond libc, so the release cross-builds it
+# DYNAMICALLY against the board's shared glibc: ~45 KiB, which fits the jffs2
+# partition. Its static C++ predecessor was ~810 KiB and never persisted.
+add_executable(sdr-agent ../../fpga/tools/sdr_agent.c)
+install(TARGETS sdr-agent DESTINATION bin)

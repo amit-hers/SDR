@@ -1,6 +1,13 @@
 #!/bin/sh
 # Bring up the FABRIC modulator for live byte streaming. Run ON the Pluto.
-#   usage: tx_fabric.sh [sample_rate_Hz] [tx_lo_Hz] [diff_mode]
+#   usage: tx_fabric.sh <sample_rate_Hz> <tx_lo_Hz> <diff_mode> <rf_bandwidth_Hz> <tx_attenuation_dB>
+#
+# EVERY ARGUMENT IS REQUIRED. This script used to default to 17.28 MS/s while
+# rx_framed.sh defaulted to 7.68 MS/s, and both defaulted the LO to 434 MHz:
+# run bare during a debugging session they produced a receiver at a different
+# rate from the transmitter, on the same frequency, with every register reading
+# healthy. The RF bandwidth and attenuation were hard-coded here; they now come
+# from bridge.conf through appliance_start.sh, and nowhere else.
 #
 # This is the path that makes real payload streaming possible at all. Replaying
 # pre-modulated IQ from the host needs 4 bytes per sample -- 69 MB/s at
@@ -23,9 +30,12 @@
 #  * The modem cores must run before ADC channels are enabled, or the sticky
 #    overflow latch fires on the first sample and never clears.
 set -e
-FS=${1:-17280000}
-LO=${2:-434000000}
-DIFF=${3:-1}
+usage() { echo "usage: $0 <sample_rate_Hz> <tx_lo_Hz> <diff_mode 0|1> <rf_bandwidth_Hz> <tx_attenuation_dB>" >&2; exit 2; }
+[ $# -eq 5 ] || usage
+FS=$1; LO=$2; DIFF=$3; BW=$4; ATT=$5
+for _n in "$FS" "$LO" "$BW"; do case "$_n" in ''|*[!0-9]*) usage ;; esac; done
+case "$DIFF" in 0|1) ;; *) usage ;; esac
+case "$ATT" in ''|*[!0-9.]*) usage ;; esac
 # A MISSING iio_lookup.sh is not a loud failure on busybox: `.` prints "can't
 # open" and CARRIES ON, leaving the device paths empty. `dd if= of=cap.bin`
 # then reads STDIN and blocks forever, which reads as a dead receiver -- it
@@ -42,9 +52,14 @@ DDS=$IIO_TX
 echo "$FS" > $PHY/in_voltage_sampling_frequency
 echo "$FS" > $PHY/out_voltage_sampling_frequency
 echo "$LO" > $PHY/out_altvoltage1_TX_LO_frequency
-echo 4000000 > $PHY/out_voltage_rf_bandwidth
-echo 0 > $PHY/out_voltage0_hardwaregain
+echo "$BW" > $PHY/out_voltage_rf_bandwidth
+# hardwaregain is signed: -ATT dB. 0 is full output.
+echo "-$ATT" > $PHY/out_voltage0_hardwaregain
 echo fdd > $PHY/ensm_mode
+# The stock tezuka scripts write TX_LO_powerdown=1 whenever they see
+# ensm_mode=rx, and a powered-down LO transmits nothing while every other
+# register reads correct. Force it on, every time.
+echo 0 > $PHY/out_altvoltage1_TX_LO_powerdown 2>/dev/null || true
 
 devmem $((AB+0x40)) 32 0x3           # ADC core out of reset: it gates all of l_clk
 devmem $((DB+0x40)) 32 0x3           # DAC core out of reset
@@ -61,7 +76,7 @@ for a in out_altvoltage0_TX1_I_F1 out_altvoltage1_TX1_I_F2 out_altvoltage2_TX1_Q
   echo 0 > $DDS/${a}_raw 2>/dev/null || true
 done
 
-echo "# fs=$(cat $PHY/out_voltage_sampling_frequency) lo=$(cat $PHY/out_altvoltage1_TX_LO_frequency)"
+echo "# fs=$(cat $PHY/out_voltage_sampling_frequency) lo=$(cat $PHY/out_altvoltage1_TX_LO_frequency) bw=$(cat $PHY/out_voltage_rf_bandwidth) gain=$(cat $PHY/out_voltage0_hardwaregain) lo_pd=$(cat $PHY/out_altvoltage1_TX_LO_powerdown 2>/dev/null)"
 echo "# l_clk_mon=$(devmem $((AB+0x54)) 32) datarate=$(devmem $((DB+0x4C)) 32)"
 echo "# mod ap=$(devmem $((MOD+0x00)) 32) en=$(devmem $((MOD+0x10)) 32) diff=$(devmem $((MOD+0x20)) 32)"
 echo "# ready for a BYTE stream on $IIO_TX_DEV"

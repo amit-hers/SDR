@@ -209,6 +209,34 @@ else
   echo "           apt-get install g++-arm-linux-gnueabihf" >&2
 fi
 
+# Device-side: the management daemon. DYNAMICALLY linked, deliberately: the
+# board ships a shared glibc (2.41, newer than this toolchain's, so symbol
+# versions resolve) and the jffs2 partition has ~280 KiB free after the bridge.
+# A static build is ~810 KiB and does not fit; this one is ~45 KiB. Plain C,
+# because the board has no libstdc++.
+if command -v arm-linux-gnueabihf-gcc >/dev/null; then
+  if arm-linux-gnueabihf-gcc -O2 -std=c11 -ffunction-sections -fdata-sections \
+       -Wl,--gc-sections -o "$BUNDLE/software/sdr-agent" \
+       "$ROOT/fpga/tools/sdr_agent.c" 2>/dev/null; then
+    arm-linux-gnueabihf-strip "$BUNDLE/software/sdr-agent" 2>/dev/null || true
+    # Refuse a binary that needs anything the board does not have. The only
+    # permitted shared library is libc.so.6; a stray -lm or libstdc++ would
+    # fail at exec time on the board, not here.
+    needed=$(arm-linux-gnueabihf-readelf -d "$BUNDLE/software/sdr-agent" 2>/dev/null \
+             | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+    if [[ "$needed" != "libc.so.6 ld-linux-armhf.so.3 " ]]; then
+      echo "  WARNING: sdr-agent needs '$needed', not only libc.so.6; omitted." >&2
+      rm -f "$BUNDLE/software/sdr-agent"
+    else
+      say "software/sdr-agent" "$(stat -c%s "$BUNDLE/software/sdr-agent") B (ARMv7, shared glibc)"
+    fi
+  else
+    echo "  WARNING: sdr-agent failed to cross-compile; the release has no management API." >&2
+  fi
+else
+  echo "  WARNING: arm-linux-gnueabihf-gcc absent; software/sdr-agent omitted." >&2
+fi
+
 # Device-side: the bring-up and measurement scripts ARE the on-board software.
 cp "$ROOT"/fpga/scripts/*.sh "$BUNDLE/software/supporting-tools/"
 cp "$ROOT/fpga/tools/framed_link_test.cpp" "$BUNDLE/software/supporting-tools/"

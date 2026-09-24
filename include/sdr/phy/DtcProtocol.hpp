@@ -107,8 +107,10 @@ struct __attribute__((packed)) Stats {
 // Largest DTC datagram: header + RxFrame + a maximum payload. Sized so one
 // frame always fits in one datagram -- reassembly on the radio side would be
 // state the fabric does not need to carry.
+// 1400 is DTC's own bound (it must fit the host-side USB path without jumbo
+// frames), NOT sdr::MAX_PAYLOAD -- the RF framing limit is larger (1514).
 static constexpr size_t MAX_MSG =
-    sizeof(Header) + sizeof(RxFrame) + 1400 /* MAX_PAYLOAD */;
+    sizeof(Header) + sizeof(RxFrame) + 1400;
 static_assert(MAX_MSG < 1500 + 64, "a DTC frame should fit a jumbo-free path");
 
 } // namespace sdr::dtc

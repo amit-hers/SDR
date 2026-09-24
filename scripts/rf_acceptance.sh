@@ -73,7 +73,7 @@ cat > "$W/tx.sh" <<'TXS'
 D=/root/sdr-tools
 . $D/iio_lookup.sh
 P=$IIO_PHY; DB=0x79024000
-sh $D/tx_fabric.sh "$1" 434000000 1 >/dev/null 2>&1
+sh $D/tx_fabric.sh "$1" 434000000 1 4000000 0 >/dev/null 2>&1
 echo 1 > $IIO_TX/scan_elements/out_voltage0_en 2>/dev/null
 echo 1 > $IIO_TX/scan_elements/out_voltage1_en 2>/dev/null
 echo 0 > $IIO_TX/scan_elements/out_voltage2_en 2>/dev/null
@@ -93,7 +93,7 @@ cat > "$W/rx.sh" <<'RXS'
 D=/root/sdr-tools
 . $D/iio_lookup.sh
 P=$IIO_PHY
-sh $D/rx_framed.sh "$1" >/dev/null 2>&1
+sh $D/rx_framed.sh "$1" 1 434000000 4000000 slow_attack >/dev/null 2>&1
 echo slow_attack > $P/in_voltage0_gain_control_mode 2>/dev/null
 sleep 2
 timeout 120 iio_readdev -b 8192 -s "$2" cf-ad9361-lpc voltage0 voltage1 > /tmp/cap.bin 2>/tmp/rx.err
