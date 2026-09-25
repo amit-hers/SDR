@@ -150,12 +150,22 @@ PEER_COMPATIBLE
 PEER_INCOMPATIBLE
 PEER_STALE
 DEMOD_RECOVERY
-PREFLIGHT_FAILED
+PREFLIGHT_FAIL
 CONFIG_REJECTED
-BRIDGE_START
+BRIDGE_START        first bridge start in a restart window -- ordinary, at boot
+BRIDGE_RESTART      the supervisor bringing it back up after a crash or hang
 BRIDGE_HUNG
 SUPERVISOR_FAULT
+RF_LOSS             rx.frames stalled for over 120s; RF_LOSS_CLEARED once it resumes
+QUEUE_DROP          a control- or bulk-queue frame was dropped
 ```
+
+Most codes are classified out of a line the bridge or supervisor already
+prints. `RF_LOSS` and `QUEUE_DROP` are the two exceptions -- nothing prints a
+line when those happen, so `sdr-agent` derives them itself by polling
+`bridge_stats.json` about once a second and noticing when `rx.frames` stops
+moving or a drop counter goes up. Both are edge-triggered: one event per
+transition, not one every second for as long as the condition holds.
 
 An empty event list is not automatically a fault. The ring holds only recent
 important events, not ordinary statistics lines.
@@ -235,6 +245,41 @@ curl -sS -N --max-time 30 -H "Authorization: Bearer $TOKEN" \
 Each line is `data: {...}`. At most 4 concurrent subscribers per unit; a 5th
 gets 503. Supervisor state only appears on every 10th sample -- it barely
 changes, so it is not worth sampling at the same rate as the traffic counters.
+
+## What happened before the last reboot
+
+`/api/v1/events` reads `/tmp/appliance.log`, which is on the ramdisk and gone
+after a reboot. This survives it:
+
+```bash
+curl -sS --fail --max-time 5 \
+  -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/fault-history" | python3 -m json.tool
+```
+
+Same shape as `/events`. It only ever holds edge-triggered faults and
+transitions, at most 32 KiB total, never a telemetry dump -- this is flash.
+
+## Diagnostic bundles captured automatically
+
+`sdr-agent` captures a bundle itself, without anyone asking, the moment it
+sees `SUPERVISOR_FAULT`, `PREFLIGHT_FAIL`, `RF_LOSS`, or 3+ `DEMOD_RECOVERY`
+within 5 minutes (`REPEATED_RECOVERY`). At most 5 kept, at most one capture
+per minute even if the fault keeps repeating.
+
+```bash
+curl -sS --fail --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/bundles" | python3 -m json.tool          # list: id, trigger, when
+
+curl -sS --fail --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/bundles/latest" | python3 -m json.tool   # the most recent one, in full
+```
+
+Each one carries config (+ a drift-detection hash), software version, FPGA
+identity, requested-vs-actual radio, bridge counters and peer state,
+supervisor state, and recent structured events -- everything you would
+otherwise have had to SSH in and collect by hand, from the moment the fault
+actually happened rather than whenever you got to it.
 
 ## Test authentication without exposing the token
 
@@ -359,4 +404,8 @@ that needs automatic recovery.
 - No remote write, reset, capture, or configuration endpoints exist yet.
 - Historical graphs and fleet aggregation belong to the upcoming dashboard.
 - The live stream keeps no history; a client that misses a sample has lost
-  it. Use the diagnostic bundle for anything that must be retrievable later.
+  it. Use the diagnostic bundle for a point-in-time snapshot, or
+  `/api/v1/fault-history` for faults and transitions that predate now --
+  it is the one thing here that survives a reboot, but it is bounded to
+  32 KiB of edge-triggered events, not a substitute for real telemetry
+  history.

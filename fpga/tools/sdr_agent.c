@@ -66,8 +66,12 @@ static void on_signal(int sig) { (void)sig; running = 0; }
 
 struct options {
     const char *bind_addr, *token_file, *status_program, *metrics_file,
-               *log_file, *conf_file, *iio_dir;
+               *log_file, *conf_file, *iio_dir, *fault_file, *bundle_dir;
     int port;
+    int rf_loss_threshold_s;   // --rf-loss-threshold-s; test-only override of RF_LOSS_THRESHOLD_S
+    size_t fault_max_bytes;    // --fault-max-bytes; test-only override of FAULT_JOURNAL_MAX_BYTES
+    int bundle_cooldown_s;     // --bundle-cooldown-s; test-only override of BUNDLE_CAPTURE_COOLDOWN_S
+    int recovery_window_s;     // --recovery-window-s; test-only override of RECOVERY_WINDOW_S
 };
 
 /* ── bounded string builder ──────────────────────────────────────────────── */
@@ -313,6 +317,14 @@ static void json_number_field(const char *s, size_t n, const char *key, char *ou
 
 /* ── structured events ───────────────────────────────────────────────────── */
 struct event { const char *sev, *sub, *code; char ts[24], peer[24]; const char *line; size_t len; };
+// Defined with the rest of the fault journal, below; forward-declared here so
+// the incremental log scanner (which needs classify(), just above it) can
+// call it without the two being reordered relative to their natural grouping.
+static void journal_append(const struct event *e);
+// Defined with the rest of the automatic diagnostic bundle, below; forward-
+// declared for the same reason journal_append is.
+static void note_event_for_capture(const struct event *e);
+static void maybe_capture_bundle(const struct options *o, const char *trigger, const char *detail);
 
 static void parenthesized_node(const char *line, size_t len, char *out, size_t cap) {
     strncpy(out, "null", cap);
@@ -325,6 +337,21 @@ static void parenthesized_node(const char *line, size_t len, char *out, size_t c
     memcpy(out, p, (size_t)(e - p)); out[e - p] = 0;
 }
 static int has(const char *line, size_t len, const char *needle) { return memmem(line, len, needle, strlen(needle)) != NULL; }
+
+/* First integer found starting right after `needle`, or -1 if `needle` is
+ * absent or is not immediately followed by a digit. Used to tell a bridge's
+ * FIRST start ("attempt 1 of 5") from a RESTART following a crash or hang
+ * ("attempt 2 of 5") -- the same log line either way, distinguished only by
+ * this number, and an operator cares very differently about the two. */
+static int number_after(const char *line, size_t len, const char *needle) {
+    const char *p = memmem(line, len, needle, strlen(needle));
+    if (!p) return -1;
+    p += strlen(needle);
+    const char *end = line + len;
+    int v = 0, any = 0;
+    while (p < end && isdigit((unsigned char)*p)) { v = v * 10 + (*p - '0'); ++p; any = 1; }
+    return any ? v : -1;
+}
 
 static void classify(struct event *e, const char *line, size_t len) {
     e->sev = "info"; e->sub = "appliance"; e->code = "APPLIANCE_EVENT";
@@ -341,11 +368,288 @@ static void classify(struct event *e, const char *line, size_t len) {
     else if (has(line, len, "PEER_INCOMPATIBLE")) { e->code = "PEER_INCOMPATIBLE"; e->sev = "error"; parenthesized_node(line, len, e->peer, sizeof e->peer); }
     else if (has(line, len, "PEER_STALE")) { e->code = "PEER_STALE"; e->sev = "warning"; }
     else if (has(line, len, "RECOVERY")) { e->code = "DEMOD_RECOVERY"; e->sev = "warning"; }
-    else if (has(line, len, "PREFLIGHT FAIL")) { e->code = "PREFLIGHT_FAILED"; e->sev = "error"; }
+    else if (has(line, len, "PREFLIGHT FAIL")) { e->code = "PREFLIGHT_FAIL"; e->sev = "error"; }
     else if (has(line, len, "CONFIGURATION REJECTED")) { e->code = "CONFIG_REJECTED"; e->sev = "error"; e->sub = "configuration"; }
     else if (has(line, len, "SUPERVISOR FAULT")) { e->code = "SUPERVISOR_FAULT"; e->sev = "critical"; }
     else if (has(line, len, "SUPERVISOR HUNG") || has(line, len, "HUNG:")) { e->code = "BRIDGE_HUNG"; e->sev = "error"; e->sub = "supervisor"; }
-    else if (has(line, len, "SUPERVISOR starting bridge")) e->code = "BRIDGE_START";
+    else if (has(line, len, "SUPERVISOR starting bridge")) {
+        /* attempt > 1 in the SAME restart window means the previous instance
+         * died or hung and the supervisor is bringing it back up -- a very
+         * different signal from the ordinary start at boot. */
+        if (number_after(line, len, "attempt ") > 1) { e->code = "BRIDGE_RESTART"; e->sev = "warning"; }
+        else e->code = "BRIDGE_START";
+    }
+}
+
+/* Is this line one classify() actually turns into a named event, rather than
+ * an "APPLIANCE_EVENT" fallback? Shared by events_json's full-ring rescan and
+ * the incremental persistence scan below, so the two can never disagree about
+ * which lines are worth keeping. */
+static int is_classifiable(const char *line, size_t len) {
+    return has(line, len, "PEER_") || has(line, len, "RECOVERY") || has(line, len, "SUPERVISOR") ||
+           has(line, len, "PREFLIGHT") || has(line, len, "FAULT") || has(line, len, "HUNG");
+}
+
+/* Incrementally tail the SAME log file LogRing displays, classify each line
+ * exactly ONCE as it completes, and persist it. A fresh full-ring rescan
+ * (what events_json does for a live request) cannot drive this: it has no
+ * memory of which lines it already reported, so the same historical line
+ * would be journalled again on every single poll for as long as it stays
+ * inside the 64 KiB RAM ring. This keeps its own independent read position --
+ * deliberately NOT sharing state with struct logring, which exists to serve
+ * a bounded RAM VIEW, a different job from noticing NEW lines exactly once. */
+struct fault_scanner { const char *path; ino_t inode; off_t offset; char carry[512]; size_t carry_n; };
+
+static void journal_scan(struct fault_scanner *fs) {
+    struct stat st;
+    if (stat(fs->path, &st) != 0 || !S_ISREG(st.st_mode)) return;
+    // A rotation (LogRing's own truncate-in-place, or anything else) looks
+    // identical either way: start over from the top of whatever is there now.
+    if (fs->inode != st.st_ino || st.st_size < fs->offset) { fs->inode = st.st_ino; fs->offset = 0; fs->carry_n = 0; }
+    int fd = open(fs->path, O_RDONLY);
+    if (fd < 0) return;
+    if (lseek(fd, fs->offset, SEEK_SET) < 0) { close(fd); return; }
+
+    char buf[4096];
+    ssize_t got;
+    while ((got = read(fd, buf, sizeof buf)) > 0) {
+        fs->offset += got;
+        // Prepend the incomplete tail carried over from the last read, so a
+        // line split across two 4096-byte reads is still seen whole.
+        char joined[sizeof fs->carry + sizeof buf];
+        size_t total = fs->carry_n;
+        memcpy(joined, fs->carry, total);
+        memcpy(joined + total, buf, (size_t)got);
+        total += (size_t)got;
+
+        size_t start = 0;
+        for (size_t i = 0; i < total; ++i) {
+            if (joined[i] != '\n') continue;
+            size_t len = i - start;
+            const char *line = joined + start;
+            if (is_classifiable(line, len)) {
+                struct event e;
+                classify(&e, line, len);
+                journal_append(&e);
+                note_event_for_capture(&e);
+            }
+            start = i + 1;
+        }
+        // Whatever is left after the last newline becomes next call's carry.
+        // A single "line" longer than the carry buffer cannot happen from
+        // this producer (every log line is one bounded printf), but bound it
+        // defensively anyway rather than trust that forever.
+        size_t leftover = total - start;
+        if (leftover > sizeof fs->carry) leftover = sizeof fs->carry;
+        memcpy(fs->carry, joined + (total - leftover), leftover);
+        fs->carry_n = leftover;
+    }
+    close(fd);
+}
+
+/* Seconds since the BOARD booted (/proc/uptime), not since this process
+ * started. Log-derived event timestamps already mean this (each producer's
+ * `log()` helper stamps `cut -d. -f1 /proc/uptime`); a counter-derived event
+ * has no such line to borrow a timestamp from, so it must compute the same
+ * quantity itself -- CLOCK_MONOTONIC would instead read as seconds since
+ * sdr-agent last (re)started, which is a different, misleading number on a
+ * unit whose agent was updated more recently than it last rebooted. */
+static long long board_uptime_s(void) {
+    FILE *f = fopen("/proc/uptime", "r");
+    if (!f) return -1;
+    double up = -1;
+    int got = fscanf(f, "%lf", &up);
+    fclose(f);
+    return got == 1 ? (long long)up : -1;
+}
+
+/* A depth-1 field, but from an ARBITRARY object substring rather than only
+ * the top-level document -- json_member is already this general; this just
+ * adds parsing the result as an integer, for fields json_number_field cannot
+ * reach because they are nested (bridge_stats.json's rx.frames,
+ * queues.control_drops, queues.bulk_drops). -1 for absent or non-numeric. */
+static long long json_num(const char *s, size_t n, const char *key) {
+    const char *v; size_t vn;
+    if (!json_member(s, n, key, &v, &vn) || vn == 0) return -1;
+    long long r = 0;
+    for (size_t i = 0; i < vn; ++i) {
+        if (!isdigit((unsigned char)v[i])) return -1;
+        r = r * 10 + (v[i] - '0');
+    }
+    return r;
+}
+
+/* ── Persistent bounded fault journal ───────────────────────────────────────
+ * /tmp/appliance.log lives on the ramdisk and is gone at the next boot, so
+ * "what went wrong before the reboot" is currently unanswerable. This mirrors
+ * every event this process already recognises -- both log-classified and
+ * counter-derived -- into one small file on jffs2, the one thing on this
+ * board that outlives a power cycle. It is a FAULT JOURNAL, not telemetry:
+ * only edge-triggered transitions ever reach it (the same handful per hour at
+ * most that push_synth/journal_scan below produce), never a per-second
+ * counter dump, because this flash has finite write endurance and no swap to
+ * fall back on if it is exhausted. */
+#define FAULT_JOURNAL_MAX_BYTES (32 * 1024)
+
+// Set once in main() before the accept loop starts; read-only from then on.
+// A plain global rather than threading a struct options* through every
+// function below -- push_synth, four call sites deep in check_counters, has
+// no options parameter of its own, and giving it one only to reach two path
+// strings and a byte count would be a wider change for no real benefit.
+static const struct options *g_opts;
+// Same reasoning as g_opts: the automatic bundle capture below fires from
+// deep inside journal_scan/check_counters, neither of which has (or should
+// gain) a struct logring parameter just to reach recent_events on the rare
+// occasion a fault is captured.
+static const struct logring *g_logs;
+
+/* This unit's own node id, read fresh from the metrics file at the moment an
+ * event is persisted (not cached) -- it does not change while a bridge runs,
+ * but reading it once per RARE event costs nothing and avoids depending on
+ * whatever else in this process last happened to read it. */
+static void current_node_id(char *out, size_t cap) {
+    strncpy(out, "null", cap);
+    if (!g_opts) return;
+    struct sb m; sb_init(&m);
+    if (read_tail(g_opts->metrics_file, MAX_METRICS, &m) && !blank(m.p ? m.p : "", m.n))
+        json_number_field(m.p, m.n, "node_id", out, cap);
+    sb_free(&m);
+}
+
+static void journal_append(const struct event *e) {
+    if (!g_opts || !g_opts->fault_file || !*g_opts->fault_file) return;
+    char node[24]; current_node_id(node, sizeof node);
+    struct sb line; sb_init(&line);
+    sb_putf(&line, "{\"timestamp_monotonic_s\":%s,\"severity\":\"%s\",\"subsystem\":\"%s\",\"code\":\"%s\",\"node_id\":%s,\"peer_id\":%s,\"message\":",
+            e->ts, e->sev, e->sub, e->code, node, e->peer);
+    sb_json_str(&line, e->line, e->len);
+    sb_put(&line, "}\n");
+    if (line.p && !line.overflow) {
+        int fd = open(g_opts->fault_file, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (fd >= 0) { ssize_t w = write(fd, line.p, line.n); (void)w; close(fd); }
+    }
+    sb_free(&line);
+
+    // Bound it: an append-only file with no cap would eventually consume the
+    // whole partition. Kept as whole JSON objects -- truncating at an
+    // arbitrary byte would leave a line that starts mid-object, which is
+    // exactly the "does not even parse" failure this file exists to avoid
+    // handing an operator during an actual fault.
+    struct stat st;
+    if (stat(g_opts->fault_file, &st) == 0 && (size_t)st.st_size > g_opts->fault_max_bytes) {
+        struct sb tail; sb_init(&tail);
+        if (read_tail(g_opts->fault_file, g_opts->fault_max_bytes, &tail) && tail.p) {
+            const char *nl = memchr(tail.p, '\n', tail.n);
+            size_t start = nl ? (size_t)(nl + 1 - tail.p) : 0;
+            int fd = open(g_opts->fault_file, O_WRONLY | O_TRUNC | O_CREAT, 0600);
+            if (fd >= 0) { ssize_t w = write(fd, tail.p + start, tail.n - start); (void)w; close(fd); }
+        }
+        sb_free(&tail);
+    }
+}
+
+/* ── Events synthesised from counters, not classified out of log text ──────
+ * PEER_STALE, DEMOD_RECOVERY and the rest all have a line something already
+ * prints when they happen. Nothing prints a line for "the receiver stopped
+ * making progress" or "a queue just dropped a frame" -- those exist only as
+ * numbers in bridge_stats.json that a human would have to notice moving (or
+ * not moving) between two samples. This turns that noticing into an event,
+ * exactly once per transition, without needing any change to the bridge or
+ * the supervisor: the agent watches the same file every client already can. */
+#define MAX_SYNTH_EVENTS 32
+struct synth_slot { struct event e; char msg[160]; };
+static struct synth_slot g_synth[MAX_SYNTH_EVENTS];
+static size_t g_synth_count = 0, g_synth_head = 0;
+
+static void push_synth(const char *sev, const char *sub, const char *code, const char *fmt, ...) {
+    struct synth_slot *s = &g_synth[(g_synth_head + g_synth_count) % MAX_SYNTH_EVENTS];
+    if (g_synth_count < MAX_SYNTH_EVENTS) ++g_synth_count; else g_synth_head = (g_synth_head + 1) % MAX_SYNTH_EVENTS;
+    va_list ap; va_start(ap, fmt); vsnprintf(s->msg, sizeof s->msg, fmt, ap); va_end(ap);
+    s->e.sev = sev; s->e.sub = sub; s->e.code = code;
+    snprintf(s->e.ts, sizeof s->e.ts, "%lld", board_uptime_s());
+    strcpy(s->e.peer, "null");
+    s->e.line = s->msg; s->e.len = strlen(s->msg);
+    journal_append(&s->e);   // every counter-derived event is a fault-history candidate
+}
+
+/* RF_LOSS: rx.frames has not advanced in over RF_LOSS_THRESHOLD_S. Same
+ * threshold and the same field appliance_status.sh's own progress.verdict
+ * (NO_RX_PROGRESS) already uses, so the two never disagree about what
+ * "stalled" means. Edge-triggered: fires once when the stall is first
+ * noticed, not on every poll for as long as it continues, and again once
+ * when it clears.
+ *
+ * QUEUE_DROP: queues.control_drops or .bulk_drops increased since the last
+ * poll. Also edge-triggered, and the two queues are tracked and reported
+ * independently since a control-queue drop (a lost handshake/keepalive) and
+ * a bulk-queue drop (lost payload under load) mean different things.
+ *
+ * Both need a PREVIOUS sample to compare against, so the very first poll
+ * after the agent starts only establishes a baseline and can never fire --
+ * otherwise a unit that already had, say, a few queue drops in its history
+ * before this agent happened to start would report a phantom event for
+ * numbers that were never new. */
+#define RF_LOSS_THRESHOLD_S 120   // matches appliance_status.sh's NO_RX_PROGRESS; see struct options for the test override
+
+static void check_counters(const struct options *o) {
+    static long long last_poll_ms = 0;
+    static int have_baseline = 0;
+    static long long last_frames = -1, last_progress_s = 0;
+    static long long last_cdrops = -1, last_bdrops = -1;
+    static int rf_loss_active = 0;
+
+    long long now = now_ms();
+    if (now - last_poll_ms < 1000) return;   // this state machine only needs ~1 Hz
+    last_poll_ms = now;
+
+    struct sb m; sb_init(&m);
+    int ok = read_tail(o->metrics_file, MAX_METRICS, &m) && !blank(m.p ? m.p : "", m.n);
+    if (!ok) { sb_free(&m); return; }
+
+    const char *rx_v, *q_v; size_t rx_n, q_n;
+    long long frames = json_member(m.p, m.n, "rx", &rx_v, &rx_n) ? json_num(rx_v, rx_n, "frames") : -1;
+    long long cdrops = -1, bdrops = -1;
+    if (json_member(m.p, m.n, "queues", &q_v, &q_n)) {
+        cdrops = json_num(q_v, q_n, "control_drops");
+        bdrops = json_num(q_v, q_n, "bulk_drops");
+    }
+    sb_free(&m);
+
+    const long long nows = board_uptime_s();
+
+    if (!have_baseline) {
+        last_frames = frames; last_progress_s = nows;
+        last_cdrops = cdrops; last_bdrops = bdrops;
+        have_baseline = 1;
+        return;
+    }
+
+    if (frames >= 0) {
+        if (frames != last_frames) {
+            last_frames = frames; last_progress_s = nows;
+            if (rf_loss_active) {
+                push_synth("info", "demodulator", "RF_LOSS_CLEARED",
+                           "rx.frames advancing again after a stall");
+                rf_loss_active = 0;
+            }
+        } else if (!rf_loss_active && nows - last_progress_s > o->rf_loss_threshold_s) {
+            char detail[96];
+            snprintf(detail, sizeof detail, "rx.frames has not advanced in %llds (threshold %ds)",
+                     nows - last_progress_s, o->rf_loss_threshold_s);
+            push_synth("error", "demodulator", "RF_LOSS", "%s", detail);
+            maybe_capture_bundle(o, "RF_LOSS", detail);
+            rf_loss_active = 1;
+        }
+    }
+
+    if (cdrops >= 0 && last_cdrops >= 0 && cdrops > last_cdrops)
+        push_synth("warning", "bridge", "QUEUE_DROP", "control queue dropped %lld frame(s) (total %lld)",
+                   cdrops - last_cdrops, cdrops);
+    if (bdrops >= 0 && last_bdrops >= 0 && bdrops > last_bdrops)
+        push_synth("warning", "bridge", "QUEUE_DROP", "bulk queue dropped %lld frame(s) (total %lld)",
+                   bdrops - last_bdrops, bdrops);
+    if (cdrops >= 0) last_cdrops = cdrops;
+    if (bdrops >= 0) last_bdrops = bdrops;
 }
 
 static void events_json(const char *log, size_t n, const char *node_id, struct sb *out) {
@@ -357,16 +661,30 @@ static void events_json(const char *log, size_t n, const char *node_id, struct s
         const char *nl = memchr(line, '\n', n - i);
         size_t len = nl ? (size_t)(nl - line) : n - i;
         i += len + (nl ? 1 : 0);
-        if (has(line, len, "PEER_") || has(line, len, "RECOVERY") || has(line, len, "SUPERVISOR") ||
-            has(line, len, "PREFLIGHT") || has(line, len, "FAULT") || has(line, len, "HUNG")) {
+        if (is_classifiable(line, len)) {
             classify(&ring[(head + count) % MAX_EVENTS], line, len);
             if (count < MAX_EVENTS) ++count; else head = (head + 1) % MAX_EVENTS;
         }
     }
     sb_put(out, "{\"events\":[");
+    int first = 1;
     for (size_t k = 0; k < count; ++k) {
         const struct event *e = &ring[(head + k) % MAX_EVENTS];
-        if (k) sb_put(out, ",");
+        if (!first) sb_put(out, ",");
+        first = 0;
+        sb_putf(out, "{\"timestamp_monotonic_s\":%s,\"severity\":\"%s\",\"subsystem\":\"%s\",\"code\":\"%s\",\"node_id\":%s,\"peer_id\":%s,\"message\":",
+                e->ts, e->sev, e->sub, e->code, node_id, e->peer);
+        sb_json_str(out, e->line, e->len);
+        sb_put(out, "}");
+    }
+    // Counter-derived events (RF_LOSS, QUEUE_DROP, ...): a second source with
+    // no line in the log to have been scanned above. Appended after, in the
+    // order they were noticed; each carries its own timestamp, so a caller
+    // that wants one strict chronological list can still sort by it.
+    for (size_t k = 0; k < g_synth_count; ++k) {
+        const struct event *e = &g_synth[(g_synth_head + k) % MAX_SYNTH_EVENTS].e;
+        if (!first) sb_put(out, ",");
+        first = 0;
         sb_putf(out, "{\"timestamp_monotonic_s\":%s,\"severity\":\"%s\",\"subsystem\":\"%s\",\"code\":\"%s\",\"node_id\":%s,\"peer_id\":%s,\"message\":",
                 e->ts, e->sev, e->sub, e->code, node_id, e->peer);
         sb_json_str(out, e->line, e->len);
@@ -480,6 +798,184 @@ static void radio_json(const struct options *o, struct sb *b) {
     sb_put(b, ",\"rx_lo\":");     put_match(b, o->conf_file, "RX_FREQUENCY", rx, have && rx > 0, 1000);
     sb_put(b, ",\"sample_rate\":"); put_match(b, o->conf_file, "SAMPLE_RATE", rate, have && rate > 0, 1000);
     sb_put(b, "}}\n");
+}
+
+/* ── Automatic diagnostic bundle ─────────────────────────────────────────────
+ * An operator has to already suspect something is wrong, and be looking at
+ * the right unit at the right moment, for /api/v1/diagnostic-bundle to catch
+ * anything -- by the time someone asks, the transient condition that mattered
+ * may be long gone. This captures the SAME kind of snapshot itself, the
+ * moment it recognises a fault, and keeps a bounded few of them on jffs2 so
+ * they are still there whenever someone does look: config (+ a drift-
+ * detection hash), software version, FPGA identity, IIO readbacks, bridge
+ * counters and peer state, supervisor state, and recent structured events --
+ * everything the roadmap named.
+ *
+ * Deliberately its OWN format, not diagnostic-bundle's: that one embeds the
+ * WHOLE 256 KiB status document and the FULL 64 KiB log ring verbatim, sized
+ * for a single on-demand pull an operator asked for. Every field here comes
+ * from a specific section (fpga, supervisor) or the already-structured
+ * events, never raw text, so a handful of these can live on flash at once
+ * without approaching what one full diagnostic-bundle already costs alone. */
+#define BUNDLE_CAPTURE_COOLDOWN_S 60      // a flapping fault must not spam captures
+#define RECOVERY_WINDOW_S         300     // "repeated recovery": N recoveries within this window
+#define RECOVERY_WINDOW_THRESHOLD 3
+#define MAX_BUNDLES               5
+#define MAX_CONF_BYTES            (4 * 1024)
+
+/* FNV-1a: a drift-detection hash for the config, not a security one -- the
+ * same reasoning and the same algorithm LoopGuard.hpp uses elsewhere in this
+ * project for exactly this "notice if this changed" purpose, nothing more. */
+static uint64_t fnv1a(const char *s, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; ++i) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+static void auto_bundle_json(const struct options *o, const struct logring *logs,
+                             const char *trigger, const char *detail, struct sb *out) {
+    sb_put(out, "{\"bundle_version\":1,\"trigger\":");
+    sb_json_str(out, trigger, strlen(trigger));
+    sb_put(out, ",\"detail\":");
+    sb_json_str(out, detail ? detail : "", detail ? strlen(detail) : 0);
+    sb_putf(out, ",\"captured_at_uptime_s\":%lld", board_uptime_s());
+
+    char rel[64] = "";
+    read_small("/mnt/jffs2/sdr-release", rel, sizeof rel);
+    sb_put(out, ",\"software_version\":"); sb_json_str(out, rel, strlen(rel));
+
+    struct sb conf; sb_init(&conf);
+    int conf_ok = read_tail(o->conf_file, MAX_CONF_BYTES, &conf) && conf.p && conf.n && !conf.overflow;
+    sb_put(out, ",\"config\":");
+    if (conf_ok) sb_json_str(out, conf.p, conf.n); else sb_put(out, "null");
+    sb_put(out, ",\"config_fnv1a\":");
+    if (conf_ok) sb_putf(out, "\"%016llx\"", (unsigned long long)fnv1a(conf.p, conf.n));
+    else sb_put(out, "null");
+    sb_free(&conf);
+
+    // FPGA identity and supervisor state, pulled out of the same status
+    // document /api/v1/fpga and /api/v1/supervisor already read a section of
+    // -- one fork covers both rather than one each.
+    struct sb status; sb_init(&status);
+    int status_ok = run_program(o->status_program, MAX_STATUS, &status);
+    const char *v; size_t vn;
+    sb_put(out, ",\"fpga\":");
+    if (status_ok && json_member(status.p, status.n, "fpga", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
+    sb_put(out, ",\"supervisor\":");
+    if (status_ok && json_member(status.p, status.n, "supervisor", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
+    sb_free(&status);
+
+    sb_put(out, ",\"radio\":");
+    { struct sb r; sb_init(&r); radio_json(o, &r); if (r.p) { rtrim(r.p); sb_put(out, r.p); } else sb_put(out, "null"); sb_free(&r); }
+
+    struct sb metrics; sb_init(&metrics);
+    int mok = read_tail(o->metrics_file, MAX_METRICS, &metrics) && !blank(metrics.p ? metrics.p : "", metrics.n);
+    sb_put(out, ",\"bridge\":");
+    char node[24] = "null";
+    if (mok) {
+        size_t n = metrics.n; while (n && (metrics.p[n-1] == '\n' || metrics.p[n-1] == '\r')) --n;
+        sb_putn(out, metrics.p, n);
+        json_number_field(metrics.p, metrics.n, "node_id", node, sizeof node);
+    } else sb_put(out, "null");
+    sb_free(&metrics);
+
+    // Structured events, not the raw log: the distillation is what a
+    // snapshot needs, and it costs a small, bounded fraction of what the raw
+    // text would.
+    sb_put(out, ",\"recent_events\":");
+    if (logs && logs->available) events_json(logs->ring, logs->n, node, out); else sb_put(out, "{\"events\":[]}");
+    sb_put(out, "}");
+}
+
+/* Existing bundle files are named "<sequence>.json"; the sequence is only
+ * ever read back from the directory itself (not kept in a variable across
+ * calls), so it survives this process restarting without a persisted
+ * counter of its own. */
+static long next_bundle_number(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return 1;
+    long max_n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        char *end; long v = strtol(e->d_name, &end, 10);
+        if (end != e->d_name && strcmp(end, ".json") == 0 && v > max_n) max_n = v;
+    }
+    closedir(d);
+    return max_n + 1;
+}
+
+static void prune_bundles(const char *dir, int keep) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    long nums[256]; int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < 256) {
+        char *end; long v = strtol(e->d_name, &end, 10);
+        if (end != e->d_name && strcmp(end, ".json") == 0) nums[n++] = v;
+    }
+    closedir(d);
+    for (int i = 1; i < n; ++i) {   // n is at most a few dozen in practice; insertion sort is plenty
+        long k = nums[i]; int j = i - 1;
+        while (j >= 0 && nums[j] > k) { nums[j+1] = nums[j]; --j; }
+        nums[j+1] = k;
+    }
+    for (int i = 0; i < n - keep; ++i) {
+        char path[600]; snprintf(path, sizeof path, "%s/%ld.json", dir, nums[i]);
+        unlink(path);
+    }
+}
+
+static long long g_last_bundle_s = -1000000;   // far enough in the past that the first real trigger is never blocked
+
+static void maybe_capture_bundle(const struct options *o, const char *trigger, const char *detail) {
+    if (!o->bundle_dir || !*o->bundle_dir) return;
+    long long now = board_uptime_s();
+    if (now - g_last_bundle_s < o->bundle_cooldown_s) return;
+    g_last_bundle_s = now;
+
+    mkdir(o->bundle_dir, 0700);   // ignore EEXIST (and anything else -- the write below fails visibly if this genuinely did not work)
+    long num = next_bundle_number(o->bundle_dir);
+    struct sb b; sb_init(&b);
+    auto_bundle_json(o, g_logs, trigger, detail, &b);
+    if (b.p && !b.overflow) {
+        char path[600]; snprintf(path, sizeof path, "%s/%ld.json", o->bundle_dir, num);
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) { ssize_t w = write(fd, b.p, b.n); (void)w; close(fd); }
+    }
+    sb_free(&b);
+    prune_bundles(o->bundle_dir, MAX_BUNDLES);
+}
+
+/* SUPERVISOR_FAULT and PREFLIGHT_FAIL are each, on their own, exactly the
+ * "FAULT" the roadmap names -- one occurrence is enough to capture. DEMOD_
+ * RECOVERY is not: a single soft reset is the modem doing its job, and
+ * capturing on every one would defeat the cooldown's whole purpose the first
+ * time a marginal link recovers a few times in a row. "Repeated recovery" is
+ * RECOVERY_WINDOW_THRESHOLD-or-more within RECOVERY_WINDOW_S. */
+static void note_event_for_capture(const struct event *e) {
+    if (!strcmp(e->code, "SUPERVISOR_FAULT") || !strcmp(e->code, "PREFLIGHT_FAIL")) {
+        char detail[200]; size_t n = e->len < sizeof detail - 1 ? e->len : sizeof detail - 1;
+        memcpy(detail, e->line, n); detail[n] = 0;
+        maybe_capture_bundle(g_opts, e->code, detail);
+        return;
+    }
+    if (strcmp(e->code, "DEMOD_RECOVERY") != 0) return;
+
+    static long long times[RECOVERY_WINDOW_THRESHOLD];
+    static int count = 0;
+    long long now = board_uptime_s();
+    int window_s = (g_opts && g_opts->recovery_window_s > 0) ? g_opts->recovery_window_s : RECOVERY_WINDOW_S;
+    // Drop anything that has aged out before adding the new one.
+    int kept = 0;
+    for (int i = 0; i < count; ++i) if (now - times[i] <= window_s) times[kept++] = times[i];
+    count = kept;
+    if (count < RECOVERY_WINDOW_THRESHOLD) times[count++] = now;
+    else { for (int i = 1; i < RECOVERY_WINDOW_THRESHOLD; ++i) times[i-1] = times[i]; times[RECOVERY_WINDOW_THRESHOLD-1] = now; }
+    if (count >= RECOVERY_WINDOW_THRESHOLD) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "%d demodulator recoveries within %ds", count, window_s);
+        maybe_capture_bundle(g_opts, "REPEATED_RECOVERY", detail);
+    }
 }
 
 /* ── HTTP ────────────────────────────────────────────────────────────────── */
@@ -651,6 +1147,103 @@ static void run_stream_child(int fd, int listen_fd, const struct options *o) {
     _exit(0);
 }
 
+/* The journal on disk is JSONL (one object per line, appended without a
+ * wrapping array so a crash mid-write never corrupts anything already
+ * written); every other endpoint here returns one JSON document, so this
+ * wraps it the same way events_json's own output looks: {"events":[...]}. */
+static void fault_history_json(const struct options *o, struct sb *out) {
+    sb_put(out, "{\"events\":[");
+    if (o->fault_file && *o->fault_file) {
+        struct sb raw; sb_init(&raw);
+        // Read generously past the enforced bound: journal_append keeps the
+        // file at or under fault_max_bytes after every write, so this should
+        // always capture the whole file; the generous margin is only a guard
+        // against an external actor having grown it some other way.
+        if (read_tail(o->fault_file, o->fault_max_bytes * 2, &raw) && raw.p && raw.n) {
+            size_t start = 0;
+            // A read that came back exactly at its limit may have been cut
+            // mid-line; a real line always starts with '{'. Drop a partial
+            // leading line rather than hand the caller unparseable JSON.
+            if (raw.n >= o->fault_max_bytes * 2 && raw.p[0] != '{') {
+                const char *nl = memchr(raw.p, '\n', raw.n);
+                start = nl ? (size_t)(nl + 1 - raw.p) : raw.n;
+            }
+            int first = 1;
+            while (start < raw.n) {
+                const char *line = raw.p + start;
+                const char *nl = memchr(line, '\n', raw.n - start);
+                size_t len = nl ? (size_t)(nl - line) : raw.n - start;
+                start += len + (nl ? 1 : 0);
+                if (len == 0) continue;
+                if (!first) sb_put(out, ",");
+                first = 0;
+                sb_putn(out, line, len);
+            }
+        }
+        sb_free(&raw);
+    }
+    sb_put(out, "]}");
+}
+
+/* A directory listing that happens to be readable as JSON, not a browsable
+ * one -- filenames are our own "<N>.json" sequence numbers, and each list
+ * entry is a small summary pulled out of the file's own trigger/detail/
+ * captured_at fields, not the whole bundle (fetch it by number for that). */
+static void bundles_list_json(const struct options *o, struct sb *out) {
+    sb_put(out, "{\"bundles\":[");
+    if (!o->bundle_dir || !*o->bundle_dir) { sb_put(out, "]}"); return; }
+    DIR *d = opendir(o->bundle_dir);
+    if (!d) { sb_put(out, "]}"); return; }
+    long nums[MAX_BUNDLES]; int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < MAX_BUNDLES) {
+        char *end; long v = strtol(e->d_name, &end, 10);
+        if (end != e->d_name && strcmp(end, ".json") == 0) nums[n++] = v;
+    }
+    closedir(d);
+    for (int i = 1; i < n; ++i) { long k = nums[i]; int j = i - 1; while (j >= 0 && nums[j] > k) { nums[j+1] = nums[j]; --j; } nums[j+1] = k; }
+    for (int i = 0; i < n; ++i) {
+        char path[600]; snprintf(path, sizeof path, "%s/%ld.json", o->bundle_dir, nums[i]);
+        struct sb one; sb_init(&one);
+        if (!read_tail(path, MAX_BODY, &one) || !one.p) { sb_free(&one); continue; }
+        const char *v; size_t vn;
+        if (i) sb_put(out, ",");
+        sb_putf(out, "{\"id\":%ld,\"trigger\":", nums[i]);
+        if (json_member(one.p, one.n, "trigger", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
+        sb_put(out, ",\"detail\":");
+        if (json_member(one.p, one.n, "detail", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
+        sb_put(out, ",\"captured_at_uptime_s\":");
+        if (json_member(one.p, one.n, "captured_at_uptime_s", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
+        sb_put(out, "}");
+        sb_free(&one);
+    }
+    sb_put(out, "]}");
+}
+
+/* Serve one bundle by id, or the most recently captured one. `id_str` is
+ * whatever followed "/api/v1/bundles/" in the request path -- untrusted, and
+ * validated as a plain non-negative integer (or the literal "latest") before
+ * it ever reaches a filename, never passed through. */
+static void reply_bundle(int fd, const struct options *o, const char *id_str) {
+    if (!o->bundle_dir || !*o->bundle_dir) { unavailable(fd, "bundles"); return; }
+    long id;
+    if (!strcmp(id_str, "latest")) {
+        id = next_bundle_number(o->bundle_dir) - 1;
+        if (id < 1) { unavailable(fd, "bundles"); return; }
+    } else {
+        if (!*id_str) { reply_json(fd, 404, "Not Found", "{\"error\":\"not found\"}\n"); return; }
+        char *end; id = strtol(id_str, &end, 10);
+        if (*end || id < 1) { reply_json(fd, 404, "Not Found", "{\"error\":\"not found\"}\n"); return; }
+    }
+    char path[600]; snprintf(path, sizeof path, "%s/%ld.json", o->bundle_dir, id);
+    struct stat st;
+    if (stat(path, &st) != 0) { reply_json(fd, 404, "Not Found", "{\"error\":\"not found\"}\n"); return; }
+    struct sb b; sb_init(&b);
+    if (!read_tail(path, MAX_BODY, &b) || !b.p || !b.n) { sb_free(&b); unavailable(fd, "bundle"); return; }
+    reply_sb(fd, &b, "application/json");
+    sb_free(&b);
+}
+
 static void serve(int fd, int listen_fd, const struct options *o, const char *token, const struct logring *logs) {
     struct timeval tv = { 2, 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -737,6 +1330,12 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
         // headers and owns the connection from this point on.
     } else if (strcmp(path, "/api/v1/diagnostic-bundle") == 0) {
         struct sb b; sb_init(&b); bundle_json(o, logs, &b); reply_sb(fd, &b, "application/json"); sb_free(&b);
+    } else if (strcmp(path, "/api/v1/fault-history") == 0) {
+        struct sb b; sb_init(&b); fault_history_json(o, &b); reply_sb(fd, &b, "application/json"); sb_free(&b);
+    } else if (strcmp(path, "/api/v1/bundles") == 0) {
+        struct sb b; sb_init(&b); bundles_list_json(o, &b); reply_sb(fd, &b, "application/json"); sb_free(&b);
+    } else if (!strncmp(path, "/api/v1/bundles/", 16)) {
+        reply_bundle(fd, o, path + 16);
     } else {
         reply_json(fd, 404, "Not Found", "{\"error\":\"not found\"}\n");
     }
@@ -744,7 +1343,9 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
 
 static int usage(void) {
     fprintf(stderr, "usage: sdr-agent [--bind IP] [--port N] [--token-file PATH] [--status-program PATH]\n"
-                    "                 [--metrics-file PATH] [--log-file PATH] [--conf PATH] [--iio-dir PATH]\n");
+                    "                 [--metrics-file PATH] [--log-file PATH] [--conf PATH] [--iio-dir PATH]\n"
+                    "                 [--fault-file PATH] [--bundle-dir PATH] [--rf-loss-threshold-s N]\n"
+                    "                 [--fault-max-bytes N] [--bundle-cooldown-s N] [--recovery-window-s N]\n");
     return 2;
 }
 
@@ -752,7 +1353,9 @@ int main(int argc, char **argv) {
     struct options o = {
         "127.0.0.1", "/mnt/jffs2/agent.token", "/mnt/jffs2/appliance_status.sh",
         "/tmp/bridge_stats.json", "/tmp/appliance.log", "/mnt/jffs2/bridge.conf",
-        "/sys/bus/iio/devices", 8088
+        "/sys/bus/iio/devices", "/mnt/jffs2/fault_history.jsonl", "/mnt/jffs2/bundles",
+        8088, RF_LOSS_THRESHOLD_S, FAULT_JOURNAL_MAX_BYTES,
+        BUNDLE_CAPTURE_COOLDOWN_S, RECOVERY_WINDOW_S
     };
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
@@ -766,9 +1369,26 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--log-file")) o.log_file = v;
         else if (!strcmp(a, "--conf")) o.conf_file = v;
         else if (!strcmp(a, "--iio-dir")) o.iio_dir = v;
+        else if (!strcmp(a, "--fault-file")) o.fault_file = v;
+        else if (!strcmp(a, "--bundle-dir")) o.bundle_dir = v;
+        // Production has no reason to change any of these from their
+        // defaults -- they exist so a test can see RF_LOSS fire in seconds
+        // instead of the real 120s threshold, see the journal actually get
+        // truncated without first writing 32 KiB of real entries to it, and
+        // see a bundle get captured without waiting 60s between triggers or
+        // manufacturing 300s of real recovery history.
+        else if (!strcmp(a, "--rf-loss-threshold-s")) o.rf_loss_threshold_s = atoi(v);
+        else if (!strcmp(a, "--fault-max-bytes")) o.fault_max_bytes = (size_t)atol(v);
+        else if (!strcmp(a, "--bundle-cooldown-s")) o.bundle_cooldown_s = atoi(v);
+        else if (!strcmp(a, "--recovery-window-s")) o.recovery_window_s = atoi(v);
         else return usage();
     }
     if (o.port < 1 || o.port > 65535) { fprintf(stderr, "invalid port\n"); return 2; }
+    if (o.rf_loss_threshold_s < 1) { fprintf(stderr, "invalid --rf-loss-threshold-s\n"); return 2; }
+    if (o.fault_max_bytes < 1024) { fprintf(stderr, "invalid --fault-max-bytes\n"); return 2; }
+    if (o.bundle_cooldown_s < 0) { fprintf(stderr, "invalid --bundle-cooldown-s\n"); return 2; }
+    if (o.recovery_window_s < 1) { fprintf(stderr, "invalid --recovery-window-s\n"); return 2; }
+    g_opts = &o;
     char token[300]; const char *err = NULL;
     if (!load_token(o.token_file, token, sizeof token, &err)) { fprintf(stderr, "sdr-agent: %s\n", err); return 1; }
 
@@ -786,10 +1406,18 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     static struct logring logs; memset(&logs, 0, sizeof logs); logs.path = o.log_file;
+    g_logs = &logs;
+    static struct fault_scanner fscan; memset(&fscan, 0, sizeof fscan); fscan.path = o.log_file;
     ring_refresh(&logs);
     while (running) {
+        // Scan for new log-classifiable events BEFORE LogRing's own refresh,
+        // which can truncate the source at MAX_SOURCE_LOG: on the one
+        // iteration that happens on, this ordering is what lets the scanner
+        // see the last pre-truncation bytes at all.
+        journal_scan(&fscan);
         ring_refresh(&logs);
         reap_streams();
+        check_counters(&o);
         struct pollfd p = { s, POLLIN, 0 };
         int pr = poll(&p, 1, 250);
         if (pr <= 0) continue;
