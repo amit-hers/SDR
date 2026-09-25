@@ -24,6 +24,26 @@ public:
     void reset();
 
     uint64_t crcErrors()  const { return crc_errors_; }
+
+    // Was a frame partly consumed when the input ran out? Its sync and length
+    // were accepted but its payload is incomplete, so at the end of a DMA
+    // packet this means the frame straddles the boundary -- the only case
+    // worth re-decoding across the cut.
+    bool inFrame() const { return state_ != State::HUNT; }
+
+    // A frame can straddle even with no sync completed: HUNT may hold the
+    // first 1..3 bytes of a sync word whose remainder is in the next packet.
+    // Missing this case would drop ~4 in 1584 of the straddling frames.
+    bool syncPending() const {
+        if (state_ != State::HUNT) return false;
+        for (int have = 1; have <= 3; ++have) {
+            const uint32_t mask = (1u << (8 * have)) - 1u;
+            const uint32_t shift = 8u * static_cast<unsigned>(4 - have);
+            if ((shift_ & mask) == ((FRAME_SYNC  >> shift) & mask)) return true;
+            if ((shift_ & mask) == ((~FRAME_SYNC >> shift) & mask)) return true;
+        }
+        return false;
+    }
     // Frames that failed CRC on arrival and were repaired by Reed-Solomon.
     // Counts only genuine rescues: the corrected payload is re-encoded and
     // its CRC re-checked, so this cannot be inflated by frames that were

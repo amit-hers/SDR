@@ -140,7 +140,6 @@ ad_connect axi_ad9361/adc_enable_i0 iq_to_axis/adc_enable_i
 ad_connect axi_ad9361/adc_enable_q0 iq_to_axis/adc_enable_q
 ad_connect axi_ad9361/adc_data_i0   iq_to_axis/adc_data_i
 ad_connect axi_ad9361/adc_data_q0   iq_to_axis/adc_data_q
-ad_connect qpsk_demod_0/m_axis_bits rx_packetizer/s_axis
 
 # ── TX: DMA -> modulator -> adapter -> radio ─────────────────────────────
 # Modulator first, then anything touching IQ: pulse shaping PRODUCES IQ.
@@ -330,6 +329,40 @@ ad_connect axi_ad9361_dac_dma/m_axis tx_narrow/S_AXIS
 # one 23-sample (~1.4 byte) starvation. The stream RESYNCHRONISED after it, so
 # no bytes were lost -- it is a timing gap, not a data defect.
 #
+# ── Byte-stream elasticity between the demodulator and the RX DMA ────────
+# The RX chain had no buffering at all: qpsk_demod -> rx_packetizer -> DMA,
+# with nothing to absorb the dead time while axi_ad9361_adc_dma re-arms
+# between S2MM transfers. The demodulator emits bytes continuously and cannot
+# be told to wait, so whatever it produces during that re-arm window is lost --
+# not counted, not flagged, simply gone. Because rx_packetizer's TLAST falls
+# on a fixed PKT_BYTES boundary and the loss is at a fixed point in that cycle,
+# a frame that happens to straddle the cut is lost EVERY time a demodulator
+# session holds that lock, and never when it does not: measured on hardware as
+# full-size (1514 B) pings alternating between 0% and 100% loss across
+# reboots, with every FPGA and software counter reading healthy. The software
+# workaround (OffsetDeframer's boundary-recovery window, see
+# include/sdr/framing/OffsetDeframer.hpp) re-decodes each packet's tail joined
+# to the next packet's head; it recovers the frame but re-runs the offset
+# search across every cut, which cost 12 points of decode CPU on hardware
+# (41% -> 53%) against the fabric's ~1.9x margin at 17.28 MS/s.
+#
+# This FIFO removes the loss at its source instead of recovering after it: the
+# demodulator's byte stream becomes continuous across the DMA re-arm gap, so
+# the packet cut no longer coincides with real data loss and the software's
+# boundary-recovery path degrades to a no-op it can eventually drop. 4096
+# bytes matches the proven, timing-clean configuration built and closed on
+# hardware (Vivado 2025.1, WNS +0.630 ns, all constraints met) at PKT_BYTES
+# 4096 in an earlier candidate; kept unchanged here at the deployed PKT_BYTES
+# 8192, since the required runway is set by the DMA re-arm latency, not by the
+# packet size. Mirrors tx_byte_fifo below in every particular except which
+# side of the demodulator it sits on.
+ad_ip_instance axis_data_fifo rx_byte_fifo [list \
+  TDATA_NUM_BYTES 1 FIFO_DEPTH 4096 HAS_TLAST 1 HAS_TKEEP 1 IS_ACLK_ASYNC 0]
+ad_connect $modem_clk  rx_byte_fifo/s_axis_aclk
+ad_connect $modem_rstn rx_byte_fifo/s_axis_aresetn
+ad_connect qpsk_demod_0/m_axis_bits rx_byte_fifo/S_AXIS
+ad_connect rx_byte_fifo/M_AXIS      rx_packetizer/s_axis
+
 # This FIFO absorbs that gap. It sits in the byte transport, upstream of
 # qpsk_mod, so the verified modem and IQ clock-converter path is untouched.
 # 2048 bytes is ~4 ms of runway at 480 kB/s, far more than any observed gap.

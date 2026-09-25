@@ -13,6 +13,7 @@ add_executable(sdr-tests
     test_offsets.cpp
     test_packetreader.cpp
     test_dma_aggregation.cpp
+    test_offset_boundary.cpp
 )
 
 target_include_directories(sdr-tests PRIVATE
@@ -38,6 +39,7 @@ add_test(NAME telemetry COMMAND sdr-tests telemetry)
 add_test(NAME offsets COMMAND sdr-tests offsets)
 add_test(NAME packetreader COMMAND sdr-tests packetreader)
 add_test(NAME dma_aggregation COMMAND sdr-tests dma_aggregation)
+add_test(NAME offset_boundary COMMAND sdr-tests offset_boundary)
 
 find_program(IVERILOG_EXECUTABLE iverilog)
 if(IVERILOG_EXECUTABLE)

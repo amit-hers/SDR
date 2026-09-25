@@ -221,6 +221,21 @@ watch -n 2 "curl -sS --max-time 2 \
 
 Do not use a sub-second interval; diagnostics must not become load traffic.
 
+## Live telemetry stream
+
+The above polls; this is pushed, roughly once a second, for as long as the
+connection stays open (Server-Sent Events -- a browser dashboard would use
+`EventSource`, this is the same thing from a terminal):
+
+```bash
+curl -sS -N --max-time 30 -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/stream"
+```
+
+Each line is `data: {...}`. At most 4 concurrent subscribers per unit; a 5th
+gets 503. Supervisor state only appears on every 10th sample -- it barely
+changes, so it is not worth sampling at the same rate as the traffic counters.
+
 ## Test authentication without exposing the token
 
 Missing token should return 401:
@@ -340,8 +355,8 @@ that needs automatic recovery.
 
 ## Current limitations
 
-- API is temporary and runs only on UNIT-B until the binary is incorporated
-  into the next rootfs image.
 - API transport is plaintext HTTP. Use only the isolated USB management link.
 - No remote write, reset, capture, or configuration endpoints exist yet.
 - Historical graphs and fleet aggregation belong to the upcoming dashboard.
+- The live stream keeps no history; a client that misses a sample has lost
+  it. Use the diagnostic bundle for anything that must be retrievable later.

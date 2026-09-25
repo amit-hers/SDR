@@ -54,6 +54,8 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <csignal>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -110,6 +112,7 @@ struct Opts {
     // minus the 14-byte Ethernet header, i.e. a standard 1500.
     int         mtu     = static_cast<int>(MAX_PAYLOAD);
     int         tx_kbufs = 2;          // direct-IIO TX kernel buffers in flight
+    int         tx_rt_prio = 0;        // SCHED_FIFO priority for the TX thread, 0 = off
     int         tx_pipe_blocks = 4;    // iio_writedev pipe depth, in DMA blocks
     int         pkt     = 32768;       // PKT_BYTES in axis_packetizer.v
     int         tx_block = 0;          // direct-IIO TX bytes; 0 uses pkt
@@ -141,6 +144,10 @@ void usage() {
       "                   block of airtime queued ahead of a new packet\n"
       "  --tx-pipe-blocks N  iio_writedev pipe depth in DMA blocks (default 4).\n"
       "                   Fewer = lower latency, less margin against a TX stall\n"
+      "  --tx-rt N        run the TX thread at SCHED_FIFO priority N (1..90, 0=off).\n"
+      "                   Required with a shallow TX queue: a late block starves\n"
+      "                   the modulator, which emits ZERO samples, and the peer\n"
+      "                   loses carrier/timing lock (not just that block's data)\n"
       "  --pkt N          DMA packet size, must equal PKT_BYTES (default 32768)\n"
       "  --tx-block N     direct-IIO TX block bytes (default: same as --pkt)\n"
       "  --tx-qlen N      TUN transmit queue length in packets (default 32)\n"
@@ -871,6 +878,10 @@ struct Stats {
     // Frames too large for the framing layer, dropped rather than truncated.
     std::atomic<uint64_t> tx_oversize{0};
     std::atomic<uint64_t> loop_suppressed{0}, loop_local_copies{0};
+    // Frames that existed only across an RX DMA packet boundary. Before the
+    // boundary window these were lost with NO counter moving at all, which
+    // is why full-size frames failed silently and episodically.
+    std::atomic<uint64_t> rx_boundary{0};
     std::atomic<uint64_t> rx_inject_err{0};
     std::atomic<uint64_t> q_ctrl_depth{0}, q_bulk_depth{0};
     std::atomic<uint64_t> q_ctrl_drop{0},  q_bulk_drop{0};
@@ -935,6 +946,36 @@ static std::mutex        g_peer_mx;
 static std::mutex     g_loop_mx;
 
 static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o) {
+    // REAL-TIME PRIORITY, when asked for.
+    //
+    // The transmitter has a hard deadline the receiver does not: the DAC
+    // consumes samples at a fixed rate, and if the next block is late the
+    // modulator emits ZERO IQ samples (qpsk_mod.cpp: `if (s_axis_bits.empty())
+    // goto rrc_out`). Zero is not a gap in the data, it is a gap in the
+    // CARRIER, so the peer's AGC, timing and Costas loops all lose lock and
+    // the outage lasts far longer than the missed block. Measured with a
+    // shallow queue and no priority: 2048-byte blocks (2.1 ms each) gave
+    // 25-32 ms RTT -- the target -- at 50% packet loss, because the decode
+    // thread's CPU bursts (up to 8 ms per packet) made the TX thread late.
+    //
+    // Deep queues are the alternative and cost latency directly: the default
+    // 8192-byte blocks, 4 in the pipe plus libiio's 4, are ~77 ms per
+    // direction and measure 160 ms RTT. Priority buys the shallow queue
+    // instead. The thread blocks on poll() and on the DAC write, so it yields
+    // whenever it has nothing to do and cannot monopolise a core.
+    if (o.tx_rt_prio > 0) {
+        struct sched_param sp;
+        std::memset(&sp, 0, sizeof sp);
+        sp.sched_priority = o.tx_rt_prio;
+        const int rc = ::pthread_setschedparam(::pthread_self(), SCHED_FIFO, &sp);
+        if (rc != 0)
+            std::fprintf(stderr, "bridge: WARNING could not set TX thread SCHED_FIFO %d: %s\n"
+                                 "bridge:         a shallow TX queue will starve the modulator\n",
+                         o.tx_rt_prio, std::strerror(rc));
+        else
+            std::fprintf(stderr, "bridge: TX thread at SCHED_FIFO %d\n", o.tx_rt_prio);
+    }
+
     // Depth is a TIME budget, not a packet count: 256 frames of 1270 B at
     // 6.96 Mbit/s is 373 ms of queue, 37x a 10 ms target. The budget follows
     // the configured link rate so the bound moves with the radio.
@@ -1218,6 +1259,7 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
         g_stats.rx_rejected.fetch_add(c - crc_seen);
         crc_seen = c;
         g_stats.rx_dup.fetch_add(d - dup_seen);    dup_seen = d;
+        g_stats.rx_boundary.store(deframer.boundaryRecovered());
         for (int i = 0; i < 4; ++i) g_stats.off_hits[i].store(deframer.offsetHits(i));
 
         for (auto& f : frames) {
@@ -1346,6 +1388,7 @@ int main(int argc, char** argv) {
         else if (a == "--mtu")     o.mtu     = std::atoi(next("--mtu").c_str());
         else if (a == "--tx-kbufs") o.tx_kbufs = std::atoi(next("--tx-kbufs").c_str());
         else if (a == "--tx-pipe-blocks") o.tx_pipe_blocks = std::atoi(next("--tx-pipe-blocks").c_str());
+        else if (a == "--tx-rt")   o.tx_rt_prio = std::atoi(next("--tx-rt").c_str());
         else if (a == "--pkt")     o.pkt     = std::atoi(next("--pkt").c_str());
         else if (a == "--tx-block") o.tx_block = std::atoi(next("--tx-block").c_str());
         else if (a == "--tx-qlen") o.tx_qlen = std::atoi(next("--tx-qlen").c_str());
@@ -1367,6 +1410,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "bridge: mtu %d exceeds MAX_PAYLOAD %zu; a packet that "
                              "large cannot be framed and would be dropped silently\n",
                      o.mtu, MAX_PAYLOAD);
+        return 2;
+    }
+    if (o.tx_rt_prio < 0 || o.tx_rt_prio > 90) {
+        std::fprintf(stderr, "bridge: --tx-rt must be between 0 and 90\n");
         return 2;
     }
     if (o.tx_pipe_blocks < 1 || o.tx_pipe_blocks > 16) {
@@ -1761,6 +1808,7 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
                     "\"errors\":%llu,\"oversize\":%llu,\"stall_ms\":%llu},"
                     "\"rx\":{\"dma\":%llu,\"frames\":%llu,\"bytes\":%llu,"
                     "\"crc_errors\":%llu,\"duplicates\":%llu,\"control\":%llu,"
+                    "\"boundary_recovered\":%llu,"
                     "\"self\":%llu,\"inject_err\":%llu},"
                     "\"queues\":{\"control_depth\":%llu,\"bulk_depth\":%llu,"
                     "\"control_drops\":%llu,\"bulk_drops\":%llu,\"drain_ms\":%llu},"
@@ -1780,6 +1828,7 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
                     (unsigned long long)g_stats.rx_crcerr.load(),
                     (unsigned long long)g_stats.rx_dup.load(),
                     (unsigned long long)g_stats.rx_ctrl.load(),
+                    (unsigned long long)g_stats.rx_boundary.load(),
                     (unsigned long long)g_stats.rx_self.load(),
                     (unsigned long long)g_stats.rx_inject_err.load(),
                     (unsigned long long)g_stats.q_ctrl_depth.load(),

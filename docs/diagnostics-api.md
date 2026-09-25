@@ -22,6 +22,7 @@ All endpoints require `Authorization: Bearer <token>`.
 | `GET /api/v1/events` | Bounded selection of important appliance events |
 | `GET /api/v1/logs` | Last 64 KiB of the appliance log |
 | `GET /api/v1/diagnostic-bundle` | Status, metrics, radio, events, and recent log in one bounded JSON document (`bundle_version` 2) |
+| `GET /api/v1/stream` | Live telemetry, one JSON object per line every ~1 s, [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) |
 
 Unknown routes return 404. Any method other than GET returns 405. Missing or
 incorrect authentication returns 401. A section that the source document does
@@ -29,13 +30,46 @@ not contain returns 503, never an empty object.
 
 `/api/v1/radio` exists because debugging from what software asked for is how a
 link was once chased while the LO sat at the previous frequency. `requested`
-comes from `bridge.conf` (`FREQUENCY`, `RX_FREQUENCY`, `SAMPLE_RATE`, and the
-not-yet-schema'd `TX_RF_BANDWIDTH`, `RX_RF_BANDWIDTH`, `TX_ATTENUATION_DB`,
-`RX_GAIN_MODE`, null until they exist); `actual` is read live from the
-`ad9361-phy` IIO device (LOs, sample rate, RF bandwidths, `ensm_mode`, TX
-attenuation, TX LO powerdown, RX gain mode and gain, RSSI, die temperature).
-`match` compares LOs and sample rate within `tolerance_hz`, because the PLL
-quantises (444000000 requested reads back 443999998).
+comes from `bridge.conf` (`FREQUENCY`, `RX_FREQUENCY`, `SAMPLE_RATE`,
+`TX_RF_BANDWIDTH`, `RX_RF_BANDWIDTH`, `TX_ATTENUATION_DB`, `RX_GAIN_MODE` --
+required by the schema since schema 2, null only on an older config);
+`actual` is read live from the `ad9361-phy` IIO device (LOs, sample rate, RF
+bandwidths, `ensm_mode`, TX attenuation, TX LO powerdown, RX gain mode and
+gain, RSSI, die temperature). `match` compares LOs and sample rate within
+`tolerance_hz`, because the PLL quantises (444000000 requested reads back
+443999998).
+
+### `/api/v1/stream`: live telemetry
+
+A polling dashboard means every viewer re-runs the diagnostics bundle's full
+cost (a status-script fork plus a metrics-file read) on its own schedule, and
+"roughly continuous" visibility competes with every other client for the same
+one-request-at-a-time budget every other route in this API uses. This route
+is the exception: the connection stays open, and the server pushes one JSON
+object per line, framed as `data: {...}\n\n` (plain [SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events);
+a browser's `EventSource` consumes it directly, and `curl -N` shows it raw).
+
+```json
+data: {"t":1758790000123,"rssi_db":69.25,"rx_gain_db":47.000000,"bridge":{"tx":{...},"rx":{...},"queues":{...},"peer":{...},"cpu_decode_pct":43.6,"recoveries":0},"supervisor":{"bridges_running":1,"supervisors":1}}
+```
+
+`bridge` is `/tmp/bridge_stats.json` embedded verbatim -- it already carries
+everything the roadmap named except RSSI/gain (frames, delivered bytes, CRC
+errors, duplicates, `rx.self`, DMA progress, queue depths, peer state, CPU,
+recoveries), so nothing here re-derives those fields. RSSI and gain come from
+two direct IIO sysfs reads. `supervisor` is resampled every 10th tick, not
+every tick -- it changes only on a bridge restart or fault, so paying its
+`/proc` scan at the same rate as the traffic counters would be pure overhead
+against every connected subscriber.
+
+The connection forks: accepting it and then blocking on it for as long as the
+client stays subscribed would stop this single-threaded daemon from serving
+anyone else at all. The parent returns to `accept()` immediately; the child
+owns the socket until a write to it fails (the client disconnected) or a
+bounded ~4-hour session limit is reached (a live viewer's `EventSource`
+reconnects on its own). At most **4** concurrent subscribers; a 5th gets 503
+rather than being queued. Same bearer-token check as every other route,
+applied before the fork.
 
 ## Security contract
 

@@ -49,6 +49,18 @@
 #define IO_TIMEOUT_MS   2000
 #define SERVICE_VERSION 2
 
+// Live telemetry (SSE). Bounded on every axis: a fixed number of concurrent
+// subscribers, a fixed sample period, and a fixed maximum session length so a
+// client that never disconnects does not pin a slot forever -- it just
+// reconnects, which a browser's EventSource does automatically.
+#define STREAM_MAX_CLIENTS 4
+#define STREAM_PERIOD_MS   1000
+#define STREAM_MAX_TICKS   (4 * 3600)      // ~4 hours at 1 Hz
+#define SUPERVISOR_EVERY_N_TICKS 10        // supervisor state changes rarely;
+                                            // sampling it less often keeps a
+                                            // 1 Hz stream cheap even with
+                                            // STREAM_MAX_CLIENTS subscribers
+
 static volatile sig_atomic_t running = 1;
 static void on_signal(int sig) { (void)sig; running = 0; }
 
@@ -524,7 +536,122 @@ static void bundle_json(const struct options *o, const struct logring *logs, str
     sb_free(&status); sb_free(&metrics);
 }
 
-static void serve(int fd, const struct options *o, const char *token, const struct logring *logs) {
+/* ── Supervisor state, direct: no shell, no status-script fork ──────────────
+ * appliance_status.sh derives this by scanning /proc for a process whose
+ * /exe is sdr_bridge and one whose /cmdline names appliance_supervise. That
+ * is cheap enough to redo directly here without spawning anything, which
+ * matters because the streaming endpoint below wants it at least this often
+ * for up to STREAM_MAX_CLIENTS concurrent long-lived connections -- forking
+ * the whole status script that often would be the expensive path for no
+ * benefit, since this is the only section of it the stream needs. */
+static void supervisor_json(struct sb *b) {
+    int bridges = 0, supervisors = 0;
+    DIR *d = opendir("/proc");
+    if (!d) { sb_put(b, "null"); return; }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char path[288], link[256];
+        snprintf(path, sizeof path, "/proc/%s/exe", e->d_name);
+        ssize_t n = readlink(path, link, sizeof link - 1);
+        if (n > 0) { link[n] = 0; if (strstr(link, "/sdr_bridge")) ++bridges; }
+        snprintf(path, sizeof path, "/proc/%s/cmdline", e->d_name);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            char cmd[256]; size_t got = fread(cmd, 1, sizeof cmd - 1, f); fclose(f);
+            cmd[got] = 0;
+            for (size_t i = 0; i < got; ++i) if (cmd[i] == 0) cmd[i] = ' ';
+            if (strstr(cmd, "appliance_supervise")) ++supervisors;
+        }
+    }
+    closedir(d);
+    sb_putf(b, "{\"bridges_running\":%d,\"supervisors\":%d}", bridges, supervisors);
+}
+
+/* ── Live telemetry (SSE) ────────────────────────────────────────────────
+ * An accepted connection that streams forever defeats the anti-DoS pattern
+ * every other route in this file uses (one bounded request, one reply, move
+ * on): the socket would never be released back to the single-threaded accept
+ * loop. So this path forks. The parent returns immediately -- the caller's
+ * accept loop keeps serving everyone else -- and the child owns the
+ * connection for as long as the client stays subscribed, exiting on the
+ * first failed write (the client is gone; this connection never receives
+ * anything FROM the browser after its initial GET, so recv() would just
+ * block for the connection's lifetime instead) or the bounded tick count.
+ *
+ * Forking rather than threading keeps every other codepath in this file free
+ * of the concurrency review a log ring and token shared across threads would
+ * need, at the cost of re-reading each source fresh every tick instead of
+ * sharing the parent's cache -- cheap here (one metrics-file tail, two IIO
+ * sysfs reads, one /proc scan), so that cost is the right one to pay. */
+static pid_t g_stream_pids[STREAM_MAX_CLIENTS];
+
+static void reap_streams(void) {
+    for (int i = 0; i < STREAM_MAX_CLIENTS; ++i) {
+        if (g_stream_pids[i] <= 0) continue;
+        int status;
+        if (waitpid(g_stream_pids[i], &status, WNOHANG) > 0) g_stream_pids[i] = 0;
+    }
+}
+
+static int stream_slot_free(void) {
+    reap_streams();
+    for (int i = 0; i < STREAM_MAX_CLIENTS; ++i) if (g_stream_pids[i] <= 0) return i;
+    return -1;
+}
+
+/* One sample: everything the roadmap named that lives in bridge_stats.json
+ * already (frames, delivered bytes, CRC errors, duplicates, rx_self, queue
+ * depths, peer state, CPU, recoveries) embedded verbatim, plus RSSI and gain
+ * read directly from IIO since the bridge does not publish those, plus
+ * supervisor state on a slower cadence because it changes far less often
+ * than the traffic counters do. */
+static void stream_tick(const struct options *o, int tick, struct sb *out) {
+    char dev[512] = "";
+    int have = find_phy(o->iio_dir, dev, sizeof dev);
+    struct sb metrics; sb_init(&metrics);
+    int mok = read_tail(o->metrics_file, MAX_METRICS, &metrics) && !blank(metrics.p ? metrics.p : "", metrics.n);
+
+    sb_putf(out, "{\"t\":%lld", now_ms());
+    sb_put(out, ",\"rssi_db\":");    put_attr_number(out, have ? dev : "", "in_voltage0_rssi", NULL);
+    sb_put(out, ",\"rx_gain_db\":"); put_attr_number(out, have ? dev : "", "in_voltage0_hardwaregain", NULL);
+    sb_put(out, ",\"bridge\":");
+    if (mok) { size_t n = metrics.n; while (n && (metrics.p[n-1] == '\n' || metrics.p[n-1] == '\r')) --n;
+               sb_putn(out, metrics.p, n); }
+    else sb_put(out, "null");
+    if (tick % SUPERVISOR_EVERY_N_TICKS == 0) {
+        sb_put(out, ",\"supervisor\":");
+        supervisor_json(out);
+    }
+    sb_put(out, "}");
+    sb_free(&metrics);
+}
+
+static void run_stream_child(int fd, int listen_fd, const struct options *o) {
+    close(listen_fd);   // this connection's job, not a spare handle on the socket everyone else accepts on
+    static const char hdr[] =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+        "Connection: keep-alive\r\n\r\n";
+    send_all(fd, hdr, sizeof hdr - 1);
+    for (int tick = 0; tick < STREAM_MAX_TICKS && running; ++tick) {
+        struct sb ev; sb_init(&ev);
+        stream_tick(o, tick, &ev);
+        struct sb frame; sb_init(&frame);
+        sb_put(&frame, "data: ");
+        sb_putn(&frame, ev.p ? ev.p : "", ev.n);
+        sb_put(&frame, "\n\n");
+        ssize_t w = send(fd, frame.p ? frame.p : "", frame.n, MSG_NOSIGNAL);
+        sb_free(&ev); sb_free(&frame);
+        if (w < 0) break;
+        struct timespec ts = { STREAM_PERIOD_MS / 1000, (long)(STREAM_PERIOD_MS % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    close(fd);
+    _exit(0);
+}
+
+static void serve(int fd, int listen_fd, const struct options *o, const char *token, const struct logring *logs) {
     struct timeval tv = { 2, 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     char req[MAX_REQUEST + 1]; size_t n = 0;
@@ -599,6 +726,15 @@ static void serve(int fd, const struct options *o, const char *token, const stru
         char node[24]; json_number_field(mok ? m.p : "", mok ? m.n : 0, "node_id", node, sizeof node);
         struct sb b; sb_init(&b); events_json(logs->ring, logs->n, node, &b);
         reply_sb(fd, &b, "application/json"); sb_free(&b); sb_free(&m);
+    } else if (strcmp(path, "/api/v1/stream") == 0) {
+        int slot = stream_slot_free();
+        if (slot < 0) { reply_json(fd, 503, "Service Unavailable", "{\"error\":\"too many stream subscribers\"}\n"); return; }
+        pid_t pid = fork();
+        if (pid < 0) { reply_json(fd, 503, "Service Unavailable", "{\"error\":\"cannot start stream\"}\n"); return; }
+        if (pid == 0) { run_stream_child(fd, listen_fd, o); }   // never returns
+        g_stream_pids[slot] = pid;
+        // Deliberately no reply here: the child already sent the response
+        // headers and owns the connection from this point on.
     } else if (strcmp(path, "/api/v1/diagnostic-bundle") == 0) {
         struct sb b; sb_init(&b); bundle_json(o, logs, &b); reply_sb(fd, &b, "application/json"); sb_free(&b);
     } else {
@@ -653,15 +789,18 @@ int main(int argc, char **argv) {
     ring_refresh(&logs);
     while (running) {
         ring_refresh(&logs);
+        reap_streams();
         struct pollfd p = { s, POLLIN, 0 };
         int pr = poll(&p, 1, 250);
         if (pr <= 0) continue;
         int c = accept(s, NULL, NULL);
         if (c < 0) continue;
         ring_refresh(&logs);
-        serve(c, &o, token, &logs);
+        serve(c, s, &o, token, &logs);
         close(c);
     }
+    for (int i = 0; i < STREAM_MAX_CLIENTS; ++i)
+        if (g_stream_pids[i] > 0) kill(g_stream_pids[i], SIGTERM);
     close(s);
     return 0;
 }

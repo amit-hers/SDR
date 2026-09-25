@@ -104,6 +104,78 @@ sleep 1
 ring_bytes=$(req "http://127.0.0.1:$PORT/api/v1/logs" | wc -c)
 [ "$ring_bytes" -le 65536 ] || { echo "RAM log ring exceeded 64 KiB"; exit 1; }
 
+# Live telemetry (SSE). A streaming connection must not block the
+# single-threaded accept loop from serving anyone else -- it forks -- and
+# must stay within its concurrent-subscriber cap.
+code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/stream")
+[ "$code" = 401 ] || { echo "unauthenticated stream request was not rejected"; exit 1; }
+
+timeout 3.5 curl -sS -N -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/stream" > "$W/stream.out" 2>/dev/null || true
+events=$(grep -c '^data: ' "$W/stream.out")
+[ "$events" -ge 2 ] || { echo "stream produced fewer than 2 events in 3.5s: got $events"; exit 1; }
+first=$(grep '^data: ' "$W/stream.out" | head -1 | sed 's/^data: //')
+echo "$first" | grep -q '"rssi_db"'   || { echo "stream event missing rssi_db"; exit 1; }
+echo "$first" | grep -q '"bridge":{'  || { echo "stream event missing bridge"; exit 1; }
+echo "$first" | grep -q '"packets":7' || { echo "stream event's bridge section did not embed the metrics file"; exit 1; }
+echo "$first" | grep -q '"supervisor":' || { echo "first stream tick is missing supervisor state"; exit 1; }
+second=$(grep '^data: ' "$W/stream.out" | sed -n '2p' | sed 's/^data: //')
+echo "$second" | grep -qv '"supervisor":' \
+  && echo "$second" | grep -q '"rssi_db"' \
+  || { echo "second tick unexpectedly carried supervisor state (or lost rssi_db)"; exit 1; }
+# Poll for that connection's slot to clear rather than guess a fixed delay --
+# see the identical wait further below for why a fixed sleep was flaky here.
+w=0
+while [ "$w" -lt 40 ]; do
+  [ -z "$(ps --ppid "$PID" -o pid= 2>/dev/null)" ] && break
+  w=$((w+1)); sleep 0.1
+done
+
+# While a stream is open, an ordinary request must still be served promptly --
+# this is the whole reason streaming forks instead of blocking the accept loop.
+timeout 3 curl -sS -N -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:$PORT/api/v1/stream" > /dev/null 2>&1 &
+open_pid=$!
+sleep 0.3
+code=$(timeout 2 curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/health")
+[ "$code" = 200 ] || { echo "a normal request was not served while a stream was open"; exit 1; }
+kill "$open_pid" 2>/dev/null; wait "$open_pid" 2>/dev/null || true
+# A subscriber slot frees only once the daemon's forked child notices the
+# closed socket -- up to a full ~1 Hz tick after the client is gone -- and the
+# parent reaps it on its next ~250 ms poll. A fixed sleep here was flaky (the
+# worst case is close to the full budget); poll for the slot to actually
+# clear instead, bounded so a real leak still fails the test rather than
+# hanging it.
+w=0
+while [ "$w" -lt 40 ]; do
+  [ -z "$(ps --ppid "$PID" -o pid= 2>/dev/null)" ] && break
+  w=$((w+1)); sleep 0.1
+done
+[ -z "$(ps --ppid "$PID" -o pid= 2>/dev/null)" ] || { echo "a stream child did not exit after its client disconnected"; exit 1; }
+
+# Concurrent-subscriber cap (4): a 5th stream must be refused, not queued.
+# Waited on by explicit PID, not a bare `wait` -- this script has already
+# backgrounded and reaped jobs above, and a plain `wait` here proved to hang
+# rather than return once those five clients (which do all exit on their own
+# via `timeout 4`) were done.
+rm -f "$W"/cap*.out
+cap_pids=""
+for i in 1 2 3 4 5; do
+  timeout 4 curl -sS -N -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:$PORT/api/v1/stream" > "$W/cap$i.out" 2>/dev/null &
+  cap_pids="$cap_pids $!"
+done
+for p in $cap_pids; do wait "$p" 2>/dev/null || true; done
+refused=0
+for i in 1 2 3 4 5; do
+  head -c 1 "$W/cap$i.out" 2>/dev/null | grep -q '{' && refused=$((refused+1))
+done
+[ "$refused" -eq 1 ] || { echo "expected exactly 1 of 5 concurrent streams refused (503), got $refused"; exit 1; }
+sleep 1.5
+
+echo "sdr-agent live telemetry stream: PASS"
+
 kill "$PID"; wait "$PID" || true; PID=""
 chmod 644 "$W/token"
 if "$API" --bind 127.0.0.1 --port "$PORT" --token-file "$W/token" \
