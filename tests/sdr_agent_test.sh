@@ -554,6 +554,158 @@ echo "$events" | grep -q '"code":"DEMOD_RESET_REQUESTED"' || { echo "reset_demod
 kill "$PID"; wait "$PID" || true; PID=""
 echo "sdr-agent safe remote control API: PASS"
 
+# ── Safe configuration API ──────────────────────────────────────────────
+# The REAL config_schema.sh (release/appliance/config_schema.sh) is used
+# here, not a fixture -- its `validate` command is pure POSIX shell with no
+# board dependency, and running it for real is what actually proves sdr-
+# agent's validate-gate calls it correctly and surfaces its real error text.
+# appliance_start.sh IS faked: the real one depends on devmem, real IIO
+# hardware, and the real bridge/supervisor binaries. The fixture instead (a)
+# re-sources whatever bridge.conf it's given, (b) writes those values into
+# the fixture IIO tree -- standing in for the AD9363 actually converging --
+# and (c) starts a process whose /proc/*/exe genuinely resolves to a path
+# containing "/sdr_bridge" (a copy of /bin/sleep by that name, run directly
+# rather than via a shell, so the identity match sdr-agent uses for the real
+# bridge applies here too), so signal_by_identity finds a real match.
+SCHEMA=$(cd "$(dirname "$0")/.." && pwd)/release/appliance/config_schema.sh
+[ -r "$SCHEMA" ] || { echo "cannot find release/appliance/config_schema.sh at $SCHEMA"; exit 1; }
+cp "$(command -v sleep)" "$W/sdr_bridge"
+printf 'CONFIG_VERSION=2\nMODE=raw-eth\nIFACE=eth0\nSAMPLE_RATE=15360000\nFREQUENCY=444000000\nRX_FREQUENCY=434000000\nNODE_ID=1\nTX_RF_BANDWIDTH=4000000\nRX_RF_BANDWIDTH=4000000\nTX_ATTENUATION_DB=0\nRX_GAIN_MODE=slow_attack\n' > "$W/bridge2.conf"
+mkdir -p "$W/iio2/iio:device1"; echo ad9361-phy > "$W/iio2/iio:device1/name"
+
+cat > "$W/appliance_start_ok.sh" <<EOF
+#!/bin/sh
+. "$W/bridge2.conf"
+[ -n "\$FREQUENCY" ]    && echo "\$FREQUENCY"    > "$W/iio2/iio:device1/out_altvoltage1_TX_LO_frequency"
+[ -n "\$RX_FREQUENCY" ] && echo "\$RX_FREQUENCY" > "$W/iio2/iio:device1/out_altvoltage0_RX_LO_frequency"
+[ -n "\$SAMPLE_RATE" ]  && echo "\$SAMPLE_RATE"  > "$W/iio2/iio:device1/in_voltage_sampling_frequency"
+setsid "$W/sdr_bridge" 300 >/dev/null 2>&1 &
+EOF
+chmod 700 "$W/appliance_start_ok.sh"
+# The failure fixture deliberately starts nothing: config-apply's verify
+# step must then time out and roll back on its own.
+cat > "$W/appliance_start_fail.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 700 "$W/appliance_start_fail.sh"
+
+"$API" --bind 127.0.0.1 --port "$PORT" --token-file "$W/token" \
+  --status-program "$W/status" --metrics-file "$W/metrics" --log-file "$W/log" \
+  --conf "$W/bridge2.conf" --iio-dir "$W/iio2" --fault-file "$W/faults5.jsonl" \
+  --config-schema-script "$SCHEMA" --start-script "$W/appliance_start_ok.sh" \
+  --config-verify-timeout-s 5 \
+  >"$W/api7.out" 2>"$W/api7.err" &
+PID=$!
+i=0
+while [ "$i" -lt 30 ]; do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/health" 2>/dev/null || true)
+  [ "$code" = 401 ] && break
+  i=$((i+1)); sleep 0.1
+done
+[ "${code:-}" = 401 ] || { echo "config-API instance did not start"; cat "$W/api7.err"; exit 1; }
+
+# GET /api/v1/config/raw: the full current file, not the section summary
+# /api/v1/config already gives -- a client needs this to build a candidate
+# from the config actually running, not guess it.
+raw=$(req "http://127.0.0.1:$PORT/api/v1/config/raw")
+echo "$raw" | grep -q 'NODE_ID=1' || { echo "config/raw did not return the current file"; exit 1; }
+
+# POST without confirm=yes must never touch bridge.conf, on this route same
+# as the control actions.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" \
+  --data-binary 'NODE_ID=2' "http://127.0.0.1:$PORT/api/v1/config")
+[ "$code" = 400 ] || { echo "config apply without confirm=yes was not rejected"; exit 1; }
+grep -q 'NODE_ID=1' "$W/bridge2.conf" || { echo "bridge.conf changed despite missing confirm=yes"; exit 1; }
+
+# An invalid candidate (missing everything but MODE) must be rejected by the
+# REAL validator, and bridge.conf must be untouched -- still NODE_ID=1.
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  --data-binary 'MODE=raw-eth' "http://127.0.0.1:$PORT/api/v1/config?confirm=yes")
+echo "$out" | grep -q '"validated":false' || { echo "invalid candidate was not rejected"; exit 1; }
+echo "$out" | grep -q 'CONFIG INVALID' || { echo "validator's own error text was not surfaced"; exit 1; }
+grep -q '^NODE_ID=1$' "$W/bridge2.conf" || { echo "bridge.conf changed despite an invalid candidate"; exit 1; }
+[ -e "$W/bridge2.conf.candidate" ] && { echo "candidate file was left behind after rejection"; exit 1; }
+
+# A valid candidate, real appliance re-launch, real verify: NODE_ID and
+# FREQUENCY both change, the fixture "radio" converges on the new
+# FREQUENCY, and a real "bridge" process (by /proc identity) comes up --
+# so this must report applied AND verified, with no rollback.
+CANDIDATE="CONFIG_VERSION=2
+MODE=raw-eth
+IFACE=eth0
+SAMPLE_RATE=15360000
+FREQUENCY=450000000
+RX_FREQUENCY=434000000
+NODE_ID=2
+TX_RF_BANDWIDTH=4000000
+RX_RF_BANDWIDTH=4000000
+TX_ATTENUATION_DB=0
+RX_GAIN_MODE=slow_attack
+"
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  --data-binary "$CANDIDATE" "http://127.0.0.1:$PORT/api/v1/config?confirm=yes")
+echo "$out" | grep -q '"validated":true' || { echo "valid candidate was not accepted"; exit 1; }
+echo "$out" | grep -q '"applied":true' || { echo "valid candidate was not applied"; exit 1; }
+echo "$out" | grep -q '"verified":true' || { echo "apply did not verify against the fixture appliance"; exit 1; }
+echo "$out" | grep -q '"rolled_back":false' || { echo "a verified apply rolled back anyway"; exit 1; }
+grep -q '^NODE_ID=2$' "$W/bridge2.conf" || { echo "bridge.conf was not actually replaced"; exit 1; }
+grep -q '^NODE_ID=1$' "$W/bridge2.conf.prev" || { echo "the pre-apply config was not backed up"; exit 1; }
+
+# Events are this PROCESS's in-memory ring, so the rejection and the
+# successful apply must both be checked on this instance, before it exits.
+events=$(req "http://127.0.0.1:$PORT/api/v1/events")
+echo "$events" | grep -q '"code":"CONFIG_REJECTED"' || { echo "an invalid candidate was not logged"; exit 1; }
+echo "$events" | grep -q '"code":"CONFIG_APPLIED"' || { echo "a config apply was not logged"; exit 1; }
+
+pkill -f "$W/sdr_bridge" 2>/dev/null || true
+
+# Now point the SAME running agent at a start-script that brings nothing
+# back up (config_schema.sh has no way to know that in advance -- this is
+# exactly the class of failure "verify" exists to catch). Restart the
+# instance with the failing fixture and a short verify timeout so the test
+# does not have to wait out the real 20s default.
+kill "$PID"; wait "$PID" || true; PID=""
+"$API" --bind 127.0.0.1 --port "$PORT" --token-file "$W/token" \
+  --status-program "$W/status" --metrics-file "$W/metrics" --log-file "$W/log" \
+  --conf "$W/bridge2.conf" --iio-dir "$W/iio2" --fault-file "$W/faults6.jsonl" \
+  --config-schema-script "$SCHEMA" --start-script "$W/appliance_start_fail.sh" \
+  --config-verify-timeout-s 2 \
+  >"$W/api8.out" 2>"$W/api8.err" &
+PID=$!
+i=0
+while [ "$i" -lt 30 ]; do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/health" 2>/dev/null || true)
+  [ "$code" = 401 ] && break
+  i=$((i+1)); sleep 0.1
+done
+[ "${code:-}" = 401 ] || { echo "config-API rollback instance did not start"; exit 1; }
+
+CANDIDATE2="CONFIG_VERSION=2
+MODE=raw-eth
+IFACE=eth0
+SAMPLE_RATE=15360000
+FREQUENCY=460000000
+RX_FREQUENCY=434000000
+NODE_ID=3
+TX_RF_BANDWIDTH=4000000
+RX_RF_BANDWIDTH=4000000
+TX_ATTENUATION_DB=0
+RX_GAIN_MODE=slow_attack
+"
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  --data-binary "$CANDIDATE2" "http://127.0.0.1:$PORT/api/v1/config?confirm=yes")
+echo "$out" | grep -q '"validated":true' || { echo "second candidate was not even accepted"; exit 1; }
+echo "$out" | grep -q '"verified":false' || { echo "a start script that brought nothing up was reported as verified"; exit 1; }
+echo "$out" | grep -q '"rolled_back":true' || { echo "an unverified apply did not roll back"; exit 1; }
+grep -q '^NODE_ID=2$' "$W/bridge2.conf" || { echo "rollback did not restore the prior configuration"; exit 1; }
+
+events=$(req "http://127.0.0.1:$PORT/api/v1/events")
+echo "$events" | grep -q '"code":"CONFIG_ROLLBACK"' || { echo "a rollback was not logged"; exit 1; }
+
+kill "$PID"; wait "$PID" || true; PID=""
+echo "sdr-agent safe configuration API: PASS"
+
 chmod 644 "$W/token"
 if "$API" --bind 127.0.0.1 --port "$PORT" --token-file "$W/token" \
      --status-program "$W/status" --metrics-file "$W/metrics" --log-file "$W/log" \

@@ -302,6 +302,36 @@ curl -sS --fail -X POST -H "Authorization: Bearer $TOKEN" \
 | `enter_safe_mode` | Kills the supervisor first, then the bridge -- that order so the supervisor cannot notice the bridge died and bring it back before it too is gone. Appliance stays non-forwarding until reboot or manual intervention. |
 | `restart_appliance` | `exec`s `/sbin/reboot -f` directly (never through a shell): plain `reboot` is a documented no-op on this firmware. The response is sent before the fork, so the caller's ack reaches them before the board actually goes down. |
 
+## Safe configuration API
+
+`bridge.conf` is never overwritten with anything that has not already been
+validated. Fetch the current file, edit it, and post it back:
+
+```bash
+curl -sS --fail -H "Authorization: Bearer $TOKEN" "$API/api/v1/config/raw" \
+  | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["config"])' \
+  > candidate.conf
+# edit candidate.conf, then:
+curl -sS --fail -X POST -H "Authorization: Bearer $TOKEN" \
+  --data-binary @candidate.conf "$API/api/v1/config?confirm=yes" | python3 -m json.tool
+```
+
+The response names every stage reached:
+`{"action":"apply_config","validated":true,"applied":true,"verified":true,"rolled_back":false}`.
+Behind that one call: the candidate is validated on disk (never the live
+file) by the same `config_schema.sh` the appliance itself uses at boot; only
+a validated candidate is backed up (`bridge.conf.prev`) and atomically
+installed; the appliance is then killed and relaunched to pick it up
+(restarting just the bridge is not enough -- the supervisor's arguments are
+fixed at the moment it was started); and the AD9363 is polled for up to 20 s
+to actually converge on the new values before this is called `verified`. A
+candidate that fails validation never touches `bridge.conf` at all, and the
+validator's own error text comes back in `validation_output`. An applied
+config that never verifies is rolled back to the one backup this same
+request made, and `CONFIG_APPLIED`/`CONFIG_ROLLBACK` are logged as
+structured events either way -- check `/api/v1/events` if the connection
+itself gets interrupted by the restart it triggered.
+
 ## Test authentication without exposing the token
 
 Missing token should return 401:

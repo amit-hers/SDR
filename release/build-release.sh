@@ -69,7 +69,7 @@ NAME="pluto-datalink-${VERSION}"
 OUT="$ROOT/out"
 BUNDLE="$OUT/$NAME"
 rm -rf "$BUNDLE"
-mkdir -p "$BUNDLE"/{fpga,boot,rootfs,software/supporting-tools,config,scripts}
+mkdir -p "$BUNDLE"/{fpga,boot,rootfs,software/supporting-tools,software/appliance,config,scripts}
 
 say() { printf '  %-34s %s\n' "$1" "$2"; }
 need() { [[ -e "$1" ]] || { echo "ERROR: missing required input: $1" >&2; exit 1; }; }
@@ -242,6 +242,20 @@ cp "$ROOT"/fpga/scripts/*.sh "$BUNDLE/software/supporting-tools/"
 cp "$ROOT/fpga/tools/framed_link_test.cpp" "$BUNDLE/software/supporting-tools/"
 cp "$ROOT/fpga/probe/bit2bin.py" "$BUNDLE/software/supporting-tools/"
 say "software/supporting-tools" "$(ls "$BUNDLE/software/supporting-tools" | wc -l) files"
+
+# Appliance orchestration: modem/AD936x bring-up, supervision, status, and
+# config validation. These used to live only in the source tree -- every
+# board running them got them by hand, outside this pipeline, which is how
+# the safe configuration API (docs/diagnostics-api.md) ended up depending on
+# scripts that flash.sh had never actually installed.
+cp "$ROOT/release/appliance/appliance_start.sh" \
+   "$ROOT/release/appliance/appliance_supervise.sh" \
+   "$ROOT/release/appliance/appliance_status.sh" \
+   "$ROOT/release/appliance/config_schema.sh" \
+   "$ROOT/release/appliance/provision.sh" \
+   "$BUNDLE/software/appliance/"
+cp "$ROOT/release/appliance/bridge.conf.example" "$BUNDLE/config/bridge.conf.example"
+say "software/appliance" "$(ls "$BUNDLE/software/appliance" | wc -l) files"
 
 # ── Config ────────────────────────────────────────────────────────────────
 cp "$ROOT/config.json" "$BUNDLE/config/modem.conf"

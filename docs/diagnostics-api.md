@@ -1,10 +1,12 @@
 # Authenticated diagnostics API (`sdr-agent`)
 
 `sdr-agent` is the on-board management daemon: one small service per unit that
-owns the HTTP diagnostics surface, plus five bounded, authenticated control
-actions. It is intended to replace routine SSH inspection; it does not expose
-a shell, configuration writes, or arbitrary file access -- every reset or
-restart it can perform is one of exactly five fixed, hand-written operations,
+owns the HTTP diagnostics surface, five bounded authenticated control
+actions, and a safe configuration-change workflow. It is intended to replace
+routine SSH inspection; it does not expose a shell or arbitrary file access.
+`bridge.conf` is the one file it ever writes, and only through
+validate -> backup -> atomic replace -> verify -> rollback -- every reset,
+restart, or config write it can perform is a fixed, hand-written operation,
 never a caller-supplied command or path. Source: `fpga/tools/sdr_agent.c`;
 test: `tests/sdr_agent_test.sh`.
 
@@ -28,20 +30,25 @@ All endpoints require `Authorization: Bearer <token>`.
 | `GET /api/v1/fault-history` | The persistent fault journal (`/mnt/jffs2/fault_history.jsonl`), same shape as `/events` -- survives a reboot, `/events` does not |
 | `GET /api/v1/bundles` | List of automatically captured diagnostic bundles (id, trigger, when) |
 | `GET /api/v1/bundles/latest`, `/api/v1/bundles/<id>` | One captured bundle in full |
+| `GET /api/v1/config/raw` | The full current `bridge.conf`, verbatim -- what a candidate for `POST /api/v1/config` should be built from |
+| `POST /api/v1/config?confirm=yes` | Validate, install, apply and verify a candidate `bridge.conf`; rolls back on failure |
 | `POST /api/v1/control/restart_bridge?confirm=yes` | Kill the bridge (and any leftover IIO helpers) by process identity |
 | `POST /api/v1/control/clear_counters?confirm=yes` | Zero the bridge's reporting counters |
 | `POST /api/v1/control/reset_demod?confirm=yes` | Pulse the demodulator's soft-reset register |
 | `POST /api/v1/control/enter_safe_mode?confirm=yes` | Kill the supervisor and the bridge; appliance stays non-forwarding |
 | `POST /api/v1/control/restart_appliance?confirm=yes` | Reboot the appliance (`reboot -f`) |
 
-Unknown routes return 404. Every route above the control actions is GET-only;
-any other method is 405. The control actions are POST-only for the same
-reason in reverse -- a GET must never be able to trigger one -- and
-additionally require the literal query string `confirm=yes`, or 400, as a
-guard against a client that automatically follows or prefetches every link it
-discovers. Missing or incorrect authentication returns 401 on every route,
-control actions included. A section that the source document does not
-contain returns 503, never an empty object.
+Unknown routes return 404. Every route above the control actions and
+`/api/v1/config` is GET-only; any other method is 405. The control actions
+are POST-only for the same reason in reverse -- a GET must never be able to
+trigger one -- and additionally require the literal query string
+`confirm=yes`, or 400, as a guard against a client that automatically
+follows or prefetches every link it discovers. `/api/v1/config` accepts
+both: `GET` reads the section (unchanged from before this existed), `POST`
+installs a candidate and requires the same `confirm=yes` gate. Missing or
+incorrect authentication returns 401 on every route, control and config
+actions included. A section that the source document does not contain
+returns 503, never an empty object.
 
 `/api/v1/radio` exists because debugging from what software asked for is how a
 link was once chased while the LO sat at the previous frequency. `requested`
@@ -216,6 +223,98 @@ fixture script standing in for `reset_demod.sh`, and separately confirms
 Functional verification of a real restart, reset, and reboot is done on
 hardware.
 
+### `/api/v1/config`: safe configuration API
+
+`GET /api/v1/config/raw` returns the full current `bridge.conf` verbatim
+(`{"config": "..."}`), bounded to `MAX_CONF_BYTES` (4 KiB) -- the plain
+`GET /api/v1/config` section view predates this and stays as it was (six
+derived fields from the status document, not the raw file), because it costs
+a status-script fork this route doesn't need to pay for a routine read.
+
+`POST /api/v1/config?confirm=yes`, body the full candidate `bridge.conf`
+(the same `KEY=VALUE` text `config_schema.sh` expects, not JSON), runs the
+whole roadmap in one request: **validate candidate -> apply -> verify ->
+rollback**. `bridge.conf` is never overwritten with anything that has not
+already passed:
+
+1. **Validate.** The candidate is written to `bridge.conf.candidate` --
+   never the live file -- and `config_schema.sh validate` is exec'd directly
+   against it (never through a shell). A candidate that fails is deleted; a
+   `CONFIG_REJECTED` event is logged; the response carries the validator's
+   own error text verbatim (`validation_output`) and `bridge.conf` was never
+   touched.
+2. **Apply.** A validated candidate is only NOW backed up (the config
+   currently in effect is copied to `bridge.conf.prev`) and installed with
+   the same atomic rename `config_schema.sh`'s own `write` command uses,
+   `sync`ed on both sides. Only then is the appliance actually restarted to
+   pick it up: killing just the bridge process is not enough here, because
+   `appliance_supervise.sh` runs with the arguments `appliance_start.sh`
+   built at the moment it exec'd into it -- restarting the bridge alone
+   restarts it with the OLD arguments. So this kills the whole running
+   appliance (bridge, its IIO helpers, and the supervisor OR a still-
+   bringing-up `appliance_start.sh`, by process identity) and launches a
+   fresh `appliance_start.sh`, which re-sources whatever is now on disk.
+3. **Verify.** Polls for up to `CONFIG_VERIFY_TIMEOUT_S` (20 s in
+   production; `--config-verify-timeout-s` test-only override) for a bridge
+   process to exist AND the AD9363 to actually converge on the new
+   requested LO/sample-rate values -- a config that only validates
+   syntactically is not the same as one the radio actually took.
+4. **Rollback.** If verify never succeeds within the timeout, the one
+   backup this same request made is restored the same way, and the
+   appliance is relaunched again against it. This is best-effort and NOT
+   re-verified in turn -- a bad apply cannot recurse into an unbounded retry
+   chain. The response's `rolled_back` field says whether this happened; if
+   no prior config existed to back up, the new (unverified) one is left in
+   place, since there is nothing to roll back to.
+
+The response is one JSON object naming every stage reached:
+`{"action":"apply_config","validated":true,"applied":true,"verified":true,"rolled_back":false}`
+(a rejected candidate stops after `validated:false` and never sets the
+later fields). `CONFIG_APPLIED` and, if it happens, `CONFIG_ROLLBACK` are
+both logged as structured events regardless of how the request itself
+resolves, so what happened to the appliance is on record even if the HTTP
+response never arrives (the connection can be interrupted by the very
+restart this request triggered).
+
+This is the one route in this file that can legitimately take up to
+`CONFIG_VERIFY_TIMEOUT_S` to answer, and deliberately does not fork the way
+`/api/v1/stream` does: applying a config is a rare, operator-initiated
+action that already kills and relaunches the whole appliance, and the
+caller asked for one coherent apply-verify-rollback outcome, not a
+"started" acknowledgment to go poll for separately. The daemon serves no
+other request for that window -- an accepted tradeoff for an action this
+infrequent and already this disruptive.
+
+The automated test (`tests/sdr_agent_test.sh`) runs the REAL
+`config_schema.sh` (its `validate` command has no board dependency), so the
+validate-gate and its real error text are exercised end to end. Only
+`appliance_start.sh` is faked, since the real one needs `devmem`, real IIO
+hardware, and the real bridge/supervisor binaries: the fixture re-sources
+whatever `bridge.conf` it's given, writes those values into a fixture IIO
+tree (standing in for the AD9363 converging), and starts a process whose
+`/proc/*/exe` genuinely resolves to a path containing `/sdr_bridge` -- the
+same identity match the real bridge is found by -- so both the successful
+apply path and, with a fixture that starts nothing, the verify-timeout ->
+rollback path are exercised for real, not mocked. Functional verification
+against the real `appliance_start.sh` and real hardware is done on the
+board itself.
+
+**A pre-existing gap this surfaced, and closed:** `apply`'s relaunch depends
+on `appliance_start.sh` (and `appliance_supervise.sh`, `appliance_status.sh`,
+`config_schema.sh`, `provision.sh`) actually being present at `/mnt/jffs2/`
+on the board. `release/templates/flash.sh`'s generated `autorun.sh` did not
+previously install or invoke any of them -- it started the bridge through an
+older, separate mechanism (`bridge_up.sh` with `BRIDGE_LOCAL`/`BRIDGE_PEER`,
+variables the current config schema does not even set, so that path was
+already dead on a schema-2 config). Earlier tasks' hardware verification
+worked only because these scripts were placed on both units by hand outside
+the release pipeline. `build-release.sh` now bundles all five under
+`software/appliance/` (plus `bridge.conf.example` for reference), and
+`flash.sh` installs and `chmod +x`'s them to `/mnt/jffs2/` and starts
+`appliance_start.sh` from `autorun.sh` in place of the old mechanism --
+`bridge.conf` itself is still deliberately never auto-installed, so a fresh
+flash with no `bridge.conf` still forwards nothing, exactly as before.
+
 ## Security contract
 
 - Bind to the USB management address, never `0.0.0.0`.
@@ -224,11 +323,16 @@ hardware.
   start if group or other permissions are present.
 - HTTP is plaintext. Treat the USB management network as trusted and isolated;
   do not route this port onto the RF/user Ethernet or the public Internet.
-- The status collector and every control action are executed directly with
-  `exec`, never through a shell. Request parameters can select which of the
-  five known control actions to run, never a command or a path.
-- Requests, command runtime, status output, metrics, logs, events, and socket
-  waits all have fixed bounds.
+- The status collector, every control action, and the config validator are
+  executed directly with `exec`, never through a shell. Request parameters
+  can select which of the five known control actions to run, or supply the
+  body of a config candidate, never a command or a path.
+- `bridge.conf` is the only file this service ever writes, and only through
+  validate -> backup -> atomic replace -> verify -> rollback; nothing is
+  overwritten without first passing `config_schema.sh`'s own validation on
+  a candidate file, checked before the live one is touched.
+- Requests, command runtime, status output, metrics, logs, events, config
+  candidates, and socket waits all have fixed bounds.
 
 Structured events include `timestamp_monotonic_s`, `severity`, `subsystem`,
 `code`, `node_id`, `peer_id`, and the original bounded message. The service

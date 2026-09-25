@@ -13,16 +13,22 @@
  * CONTRACT (unchanged from the predecessor except where noted, and tested):
  *   - every endpoint requires "Authorization: Bearer <token>"; the token file
  *     must be a regular file, mode 0600, 32..256 characters;
- *   - GET only, except the five actions under /api/v1/control/, which are
- *     POST-only and each additionally require "?confirm=yes". Every other
- *     method on every other route is 405; unknown routes 404; missing data
- *     503;
- *   - still no shell, no configuration writes, and no arbitrary file access.
- *     The status collector and every control action are exec'd directly
- *     against a fixed program or a fixed, hand-written script; a request can
- *     select WHICH of five known actions to run, never a command, a path or
- *     an argument. There is no sixth action and no way to add one from a
- *     request;
+ *   - GET only, except the five actions under /api/v1/control/ and
+ *     /api/v1/config, which are POST-only (config additionally accepts GET,
+ *     which reads rather than writes) and each additionally require
+ *     "?confirm=yes". Every other method on every other route is 405;
+ *     unknown routes 404; missing data 503;
+ *   - still no shell and no arbitrary file access. bridge.conf is the one
+ *     file this service ever writes, and only through validate -> backup ->
+ *     atomic replace -> verify -> rollback -- never overwritten with
+ *     anything that has not already passed config_schema.sh's own
+ *     validation on a candidate file, on disk, before the live one is
+ *     touched. The status collector, every control action, and the
+ *     validator are all exec'd directly against a fixed program or a fixed,
+ *     hand-written script; a request can select WHICH of five known control
+ *     actions to run, or supply the body of a config candidate, never a
+ *     command, a path or an argument. There is no sixth control action and
+ *     no way to add one from a request;
  *   - every buffer, wait and child process is bounded.
  */
 #define _GNU_SOURCE
@@ -82,12 +88,13 @@ static void on_signal(int sig) { (void)sig; running = 0; }
 struct options {
     const char *bind_addr, *token_file, *status_program, *metrics_file,
                *log_file, *conf_file, *iio_dir, *fault_file, *bundle_dir,
-               *demod_reset_script;
+               *demod_reset_script, *config_schema_script, *start_script;
     int port;
     int rf_loss_threshold_s;   // --rf-loss-threshold-s; test-only override of RF_LOSS_THRESHOLD_S
     size_t fault_max_bytes;    // --fault-max-bytes; test-only override of FAULT_JOURNAL_MAX_BYTES
     int bundle_cooldown_s;     // --bundle-cooldown-s; test-only override of BUNDLE_CAPTURE_COOLDOWN_S
     int recovery_window_s;     // --recovery-window-s; test-only override of RECOVERY_WINDOW_S
+    int config_verify_timeout_s;   // --config-verify-timeout-s; test-only override of CONFIG_VERIFY_TIMEOUT_S
 };
 
 /* ── bounded string builder ──────────────────────────────────────────────── */
@@ -240,18 +247,39 @@ static void ring_refresh(struct logring *r) {
 
 /* ── child process, bounded ──────────────────────────────────────────────── */
 /* Run one fixed executable directly (never through /bin/sh), capture bounded
- * stdout, and kill it if it exceeds the diagnostics deadline. */
-static int run_program(const char *program, size_t limit, struct sb *out, int timeout_ms) {
+ * output, and kill it if it exceeds its deadline.
+ *
+ * `argv` is NULL for every diagnostics caller (a bare program name, no
+ * arguments -- the historical `run_program` contract, preserved exactly by
+ * the wrapper below). Config-apply's validator genuinely needs real
+ * arguments ("validate", a path), so this takes an explicit argv instead of
+ * hardcoding execl(program, program, NULL).
+ *
+ * `capture_stderr` also changes what counts as success: the diagnostics
+ * collectors (status, reset_demod) are expected to produce real stdout, so
+ * blank output there is itself a failure worth reporting as one. The config
+ * validator's useful text is its FAILURE message, written to stderr, and it
+ * prints nothing to stdout at all on that path -- treating blank output as
+ * failure would misreport every validation error as some other kind of
+ * failure. Exit status alone is authoritative there. */
+static int run_program_ex(const char *program, char *const argv[], size_t limit, struct sb *out,
+                           int timeout_ms, int capture_stderr) {
+    char *const bare_argv[] = { (char *)program, NULL };
+    if (!argv) argv = bare_argv;
     int p[2];
     if (pipe(p) != 0) return 0;
     pid_t pid = fork();
     if (pid < 0) { close(p[0]); close(p[1]); return 0; }
     if (pid == 0) {
         dup2(p[1], STDOUT_FILENO);
-        int nul = open("/dev/null", O_WRONLY);
-        if (nul >= 0) dup2(nul, STDERR_FILENO);
+        if (capture_stderr) {
+            dup2(p[1], STDERR_FILENO);
+        } else {
+            int nul = open("/dev/null", O_WRONLY);
+            if (nul >= 0) dup2(nul, STDERR_FILENO);
+        }
         close(p[0]); close(p[1]);
-        execl(program, program, (char *)NULL);
+        execv(program, argv);
         _exit(127);
     }
     close(p[1]);
@@ -277,8 +305,12 @@ static int run_program(const char *program, size_t limit, struct sb *out, int ti
     pid_t done = waitpid(pid, &status, WNOHANG);
     while (done == 0 && now_ms() < deadline) { usleep(1000); done = waitpid(pid, &status, WNOHANG); }
     if (done == 0) { kill(pid, SIGKILL); waitpid(pid, &status, 0); return 0; }
-    return eof && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-           total < limit && !out->overflow && !blank(out->p ? out->p : "", out->n);
+    return eof && WIFEXITED(status) && WEXITSTATUS(status) == 0 && total < limit && !out->overflow &&
+           (capture_stderr || !blank(out->p ? out->p : "", out->n));
+}
+
+static int run_program(const char *program, size_t limit, struct sb *out, int timeout_ms) {
+    return run_program_ex(program, NULL, limit, out, timeout_ms, 0);
 }
 
 /* ── minimal JSON navigation ─────────────────────────────────────────────── */
@@ -780,6 +812,40 @@ static void put_match(struct sb *b, const char *conf, const char *key, double ac
     sb_put(b, diff <= tol ? "true" : "false");
 }
 
+/* Same comparison put_match makes, as a plain boolean rather than a JSON
+ * fragment -- config-apply's verify step needs a yes/no to poll on, not a
+ * document to embed. */
+static int attr_number(const char *dev, const char *attr, double *val) {
+    char path[512], v[64];
+    snprintf(path, sizeof path, "%s/%s", dev, attr);
+    if (!*dev || !read_small(path, v, sizeof v) || !*v) return 0;
+    char *end; double x = strtod(v, &end);
+    if (end == v) return 0;
+    *val = x; return 1;
+}
+static int conf_matches_actual(const char *conf, const char *key, const char *dev, const char *attr, double tol) {
+    char v[64];
+    if (!conf_value(conf, key, v, sizeof v) || !*v) return 1;   // nothing requested, nothing to mismatch
+    char *end; double want = strtod(v, &end);
+    double actual;
+    if (end == v || !attr_number(dev, attr, &actual)) return 0;
+    double diff = want > actual ? want - actual : actual - want;
+    return diff <= tol;
+}
+/* Has the AD9363 actually converged on what the (possibly just-applied)
+ * bridge.conf asks for? Config-apply's verify step polls this rather than
+ * just checking that a bridge process exists: a bridge that came back up
+ * against the OLD RF state (a config that validated syntactically but
+ * whose radio settings never took, e.g. from a driver that silently
+ * clamped something) is not what "apply" was asked to do. */
+static int radio_converged(const struct options *o) {
+    char dev[512] = "";
+    if (!find_phy(o->iio_dir, dev, sizeof dev)) return 0;
+    return conf_matches_actual(o->conf_file, "FREQUENCY", dev, "out_altvoltage1_TX_LO_frequency", 1000) &&
+           conf_matches_actual(o->conf_file, "RX_FREQUENCY", dev, "out_altvoltage0_RX_LO_frequency", 1000) &&
+           conf_matches_actual(o->conf_file, "SAMPLE_RATE", dev, "in_voltage_sampling_frequency", 1000);
+}
+
 static void radio_json(const struct options *o, struct sb *b) {
     char dev[512] = "";
     int have = find_phy(o->iio_dir, dev, sizeof dev);
@@ -838,6 +904,15 @@ static void radio_json(const struct options *o, struct sb *b) {
 #define RECOVERY_WINDOW_THRESHOLD 3
 #define MAX_BUNDLES               5
 #define MAX_CONF_BYTES            (4 * 1024)
+// Applying a config means killing the running appliance and re-exec'ing
+// appliance_start.sh, which re-sources bridge.conf, reconfigures the modem
+// and AD9363, and only then re-execs into a fresh supervisor. On an already-
+// booted board (the only time this ever runs) the IIO devices already exist,
+// so that normally takes low single-digit seconds; 20s is a wide multiple of
+// that, not a value trimmed to the nominal case, on the same standing rule
+// that earned reset_demod's own margin.
+#define CONFIG_VERIFY_TIMEOUT_S   20
+#define CONFIG_VERIFY_POLL_MS     500
 
 /* FNV-1a: a drift-detection hash for the config, not a security one -- the
  * same reasoning and the same algorithm LoopGuard.hpp uses elsewhere in this
@@ -1273,6 +1348,15 @@ static void reply_bundle(int fd, const struct options *o, const char *id_str) {
  * also present in the argv of whatever searches for it, which is exactly
  * the kind of self-match that script's own comment warns about), and by
  * /cmdline substring for the supervisor, which has no distinctive /exe.
+ * PROC_SUPERVISOR matches EITHER appliance_supervise.sh or
+ * appliance_start.sh: appliance_start.sh execs into the supervisor only
+ * after its own preflight (waiting on IIO devices, validating bridge.conf)
+ * succeeds, so a kill aimed at "the supervisor" while that preflight is
+ * still running would miss it under only the narrower match -- the process
+ * would survive, finish bringing itself up moments later, and exec into a
+ * brand new supervisor no kill ever targeted. Config-apply's rollback
+ * depends on this: it kills, waits, and re-launches, and a surviving
+ * straggler from the PREVIOUS launch would race the new one.
  * PROC_BRIDGE_ONLY exists separately from PROC_BRIDGE_AND_HELPERS because
  * clear_counters signals SIGUSR1 -- fine for sdr_bridge, which installs a
  * handler for it, but SIGUSR1's default disposition is to terminate a
@@ -1298,7 +1382,7 @@ static int signal_by_identity(enum proc_family fam, int sig) {
                 size_t got = fread(buf, 1, sizeof buf - 1, f); fclose(f);
                 buf[got] = 0;
                 for (size_t i = 0; i < got; ++i) if (buf[i] == 0) buf[i] = ' ';
-                if (strstr(buf, "appliance_supervise")) matched = 1;
+                if (strstr(buf, "appliance_supervise") || strstr(buf, "appliance_start")) matched = 1;
             }
         } else {
             snprintf(path, sizeof path, "/proc/%s/exe", e->d_name);
@@ -1387,6 +1471,146 @@ static void reply_control(int fd, const struct options *o, const char *action, c
     }
 }
 
+/* ── Safe configuration API ──────────────────────────────────────────────
+ * GET config -> validate candidate -> apply -> verify -> rollback.
+ * bridge.conf is NEVER overwritten with anything that has not already
+ * passed config_schema.sh's own validation, run against a candidate file on
+ * disk, not the live one -- an invalid candidate never touches bridge.conf
+ * at all, and the request fails with the validator's own error text.
+ *
+ * A validated candidate still is not enough: bridge.conf only takes effect
+ * when appliance_start.sh re-sources it, which means killing the running
+ * appliance and re-launching that script from scratch (a plain
+ * restart_bridge is not enough -- see PROC_SUPERVISOR's comment above:
+ * appliance_supervise.sh runs with BRIDGE_ARGS fixed at the moment
+ * appliance_start.sh execs into it, so restarting only the bridge process
+ * restarts it with the OLD arguments). "Verify" polls for a bridge process
+ * AND for the AD9363 actually converging on the new requested values,
+ * because a config that only validates syntactically is not the same as
+ * one the radio actually took. "Rollback" restores the one prior config
+ * this endpoint itself backed up before touching anything, and re-applies
+ * that the same way -- best-effort, not re-verified in turn, so one bad
+ * apply cannot recurse into an unbounded chain of retries. */
+
+/* Kill whatever appliance is currently running -- by IDENTITY, never a
+ * command-line pattern, same reasoning as every other kill in this file --
+ * and launch a fresh appliance_start.sh, detached, so it re-sources
+ * whatever bridge.conf is on disk AT THE MOMENT IT RUNS. Used both to apply
+ * a newly-installed config and, unchanged, to roll one back: the only
+ * difference between the two calls is which file is on disk first. */
+static void relaunch_appliance(const struct options *o) {
+    signal_by_identity(PROC_SUPERVISOR, SIGKILL);
+    signal_by_identity(PROC_BRIDGE_AND_HELPERS, SIGKILL);
+    pid_t pid = fork();
+    if (pid == 0) { setsid(); execl(o->start_script, o->start_script, (char *)NULL); _exit(127); }
+}
+
+/* Poll for the appliance actually coming back up on the config now on disk,
+ * within a bounded window -- see CONFIG_VERIFY_TIMEOUT_S's comment for why
+ * that bound is sized the way it is. */
+static int wait_for_bridge_and_radio(const struct options *o) {
+    long long deadline = now_ms() + (long long)o->config_verify_timeout_s * 1000;
+    do {
+        if (signal_by_identity(PROC_BRIDGE_ONLY, 0) > 0 && radio_converged(o)) return 1;
+        usleep(CONFIG_VERIFY_POLL_MS * 1000);
+    } while (now_ms() < deadline);
+    return 0;
+}
+
+/* This is the one route in this file that can block for a long time (up to
+ * CONFIG_VERIFY_TIMEOUT_S) before replying, and deliberately does not fork
+ * the way /api/v1/stream does: applying a config is a rare, operator-
+ * initiated action that already kills the running appliance, and the
+ * caller explicitly asked for apply-verify-rollback as ONE outcome, not a
+ * "started" acknowledgment they would have to go poll for separately. The
+ * cost is that this daemon serves no other request for the duration -- an
+ * accepted tradeoff for an action this infrequent and already this
+ * disruptive, not an oversight. */
+static void reply_config_apply(int fd, const struct options *o, const char *query, const char *body, size_t body_len) {
+    if (!query_has(query, "confirm", "yes")) {
+        reply_json(fd, 400, "Bad Request", "{\"error\":\"config apply requires ?confirm=yes\"}\n");
+        return;
+    }
+    if (body_len == 0) {
+        reply_json(fd, 400, "Bad Request", "{\"error\":\"empty candidate config\"}\n");
+        return;
+    }
+
+    char candidate[600]; snprintf(candidate, sizeof candidate, "%s.candidate", o->conf_file);
+    int cfd = open(candidate, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (cfd < 0) { reply_json(fd, 500, "Internal Server Error", "{\"error\":\"cannot write candidate\"}\n"); return; }
+    ssize_t w = write(cfd, body, body_len);
+    close(cfd);
+    if (w < 0 || (size_t)w != body_len) {
+        unlink(candidate);
+        reply_json(fd, 500, "Internal Server Error", "{\"error\":\"candidate write incomplete\"}\n");
+        return;
+    }
+
+    // Validate the CANDIDATE on disk, not the live file -- bridge.conf is
+    // not touched at all on this path.
+    struct sb verr; sb_init(&verr);
+    char *argv[] = { (char *)o->config_schema_script, (char *)"validate", candidate, NULL };
+    int valid = run_program_ex(o->config_schema_script, argv, MAX_STATUS, &verr, IO_TIMEOUT_MS, 1);
+    if (!valid) {
+        unlink(candidate);
+        push_synth("warning", "control", "CONFIG_REJECTED", "candidate bridge.conf failed validation");
+        struct sb out; sb_init(&out);
+        sb_put(&out, "{\"action\":\"apply_config\",\"validated\":false,\"applied\":false,"
+                     "\"verified\":false,\"rolled_back\":false,\"validation_output\":");
+        sb_json_str(&out, verr.p ? verr.p : "", verr.n);
+        sb_put(&out, "}\n");
+        reply_sb(fd, &out, "application/json");
+        sb_free(&out); sb_free(&verr);
+        return;
+    }
+    sb_free(&verr);
+
+    // Back up whatever is currently in effect BEFORE it is touched: if the
+    // new config fails to verify, this backup is the only way back.
+    char backup[600]; snprintf(backup, sizeof backup, "%s.prev", o->conf_file);
+    struct sb cur; sb_init(&cur);
+    int have_backup = read_tail(o->conf_file, MAX_CONF_BYTES, &cur) && cur.p && cur.n;
+    if (have_backup) {
+        int bfd = open(backup, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (bfd >= 0) { ssize_t bw = write(bfd, cur.p, cur.n); (void)bw; close(bfd); }
+    }
+    sb_free(&cur);
+
+    // Commit point: rename is atomic on the same filesystem, sync on both
+    // sides so the commit survives a power loss, same shape as
+    // config_schema.sh's own write_atomic.
+    sync();
+    if (rename(candidate, o->conf_file) != 0) {
+        unlink(candidate);
+        reply_json(fd, 500, "Internal Server Error", "{\"error\":\"could not install candidate\"}\n");
+        return;
+    }
+    sync();
+
+    push_synth("warning", "control", "CONFIG_APPLIED",
+               "operator applied a new bridge.conf; restarting the appliance to pick it up");
+    relaunch_appliance(o);
+    int verified = wait_for_bridge_and_radio(o);
+
+    int rolled_back = 0;
+    if (!verified && have_backup) {
+        sync();
+        rename(backup, o->conf_file);
+        sync();
+        push_synth("error", "control", "CONFIG_ROLLBACK",
+                   "new bridge.conf did not verify within the timeout; restored the previous configuration");
+        relaunch_appliance(o);
+        rolled_back = 1;
+    }
+
+    char body_out[400];
+    snprintf(body_out, sizeof body_out,
+             "{\"action\":\"apply_config\",\"validated\":true,\"applied\":true,\"verified\":%s,\"rolled_back\":%s}\n",
+             verified ? "true" : "false", rolled_back ? "true" : "false");
+    reply_json(fd, 200, "OK", body_out);
+}
+
 static void serve(int fd, int listen_fd, const struct options *o, const char *token, const struct logring *logs) {
     struct timeval tv = { 2, 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -1415,7 +1639,7 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
     // ignores it, which just means a stray "?anything" no longer 404s them.
     char *query = strchr(path, '?');
     if (query) *query++ = 0; else query = path + strlen(path);
-    char auth[600] = "";
+    char auth[600] = ""; char *body_start = hdr_end + 4; long content_length = -1;
     for (char *p = line_end ? line_end + 2 : req + strlen(req); p && *p; ) {
         char *e = strstr(p, "\r\n"); if (e) *e = 0;
         char *colon = strchr(p, ':');
@@ -1423,22 +1647,55 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
             *colon = 0;
             if (strcasecmp(ltrim(p), "authorization") == 0) {
                 strncpy(auth, ltrim(colon + 1), sizeof auth - 1); rtrim(auth);
+            } else if (strcasecmp(ltrim(p), "content-length") == 0) {
+                content_length = strtol(ltrim(colon + 1), NULL, 10);
             }
         }
         p = e ? e + 2 : NULL;
     }
     char expected[300]; snprintf(expected, sizeof expected, "Bearer %s", token);
     if (!constant_time_equal(auth, expected)) { reply_json(fd, 401, "Unauthorized", "{\"error\":\"unauthorized\"}\n"); return; }
-    // Every route is GET-only except the control actions, which change
-    // appliance state and so require POST -- a GET (a prefetch, a browser
-    // history revisit, a monitoring crawler) must never be able to trigger
-    // one just by being requested.
+    // Every route is GET-only except the control actions (POST, state-
+    // changing) and /api/v1/config, which accepts both: GET reads the
+    // current section, POST installs a validated candidate. A GET must
+    // never be able to trigger a mutation just by being requested (a
+    // prefetch, a browser history revisit, a monitoring crawler).
     static const char CONTROL_PREFIX[] = "/api/v1/control/";
     int is_control = !strncmp(path, CONTROL_PREFIX, sizeof CONTROL_PREFIX - 1);
-    if (strcmp(method, is_control ? "POST" : "GET") != 0) {
+    int is_config_path = !strcmp(path, "/api/v1/config");
+    int method_ok = is_control ? !strcmp(method, "POST")
+                  : is_config_path ? (!strcmp(method, "GET") || !strcmp(method, "POST"))
+                  : !strcmp(method, "GET");
+    if (!method_ok) {
         reply_json(fd, 405, "Method Not Allowed",
-                   is_control ? "{\"error\":\"control actions require POST\"}\n" : "{\"error\":\"read-only API\"}\n");
+                   is_control ? "{\"error\":\"control actions require POST\"}\n"
+                 : is_config_path ? "{\"error\":\"config accepts GET or POST\"}\n"
+                                  : "{\"error\":\"read-only API\"}\n");
         return;
+    }
+    // Only one route ever has a body. Read it here, once, rather than
+    // unconditionally for every request: a bodyless GET is the overwhelming
+    // majority of traffic, and the initial read loop above already stops at
+    // end-of-headers, so a POST's body may not have fully arrived yet.
+    char *body = NULL; size_t body_len = 0;
+    if (is_config_path && !strcmp(method, "POST")) {
+        if (content_length < 0 || (size_t)content_length > MAX_CONF_BYTES) {
+            reply_json(fd, 413, "Payload Too Large", "{\"error\":\"candidate config missing or too large\"}\n");
+            return;
+        }
+        size_t have = n - (size_t)(body_start - req);
+        long long deadline = now_ms() + IO_TIMEOUT_MS;
+        while (have < (size_t)content_length && n < MAX_REQUEST && now_ms() < deadline) {
+            ssize_t r = recv(fd, req + n, MAX_REQUEST - n, 0);
+            if (r > 0) { n += (size_t)r; have += (size_t)r; }
+            else if (r < 0 && errno == EINTR) continue;
+            else break;
+        }
+        if (have < (size_t)content_length) {
+            reply_json(fd, 400, "Bad Request", "{\"error\":\"candidate config body incomplete\"}\n");
+            return;
+        }
+        body = body_start; body_len = (size_t)content_length;
     }
 
     if (strcmp(path, "/api/v1/health") == 0) {
@@ -1451,11 +1708,20 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
         sb_free(&b);
     } else if (strcmp(path, "/api/v1/fpga") == 0 || strcmp(path, "/api/v1/ethernet") == 0 ||
                strcmp(path, "/api/v1/supervisor") == 0 || strcmp(path, "/api/v1/modem") == 0 ||
-               strcmp(path, "/api/v1/config") == 0 || strcmp(path, "/api/v1/progress") == 0) {
+               (is_config_path && !strcmp(method, "GET")) || strcmp(path, "/api/v1/progress") == 0) {
         struct sb b; sb_init(&b);
         int ok = run_program(o->status_program, MAX_STATUS, &b, IO_TIMEOUT_MS);
         reply_section(fd, &b, ok, path + 8, path + 8);
         sb_free(&b);
+    } else if (is_config_path) {   // the remaining case, method already validated above: POST
+        reply_config_apply(fd, o, query, body, body_len);
+    } else if (strcmp(path, "/api/v1/config/raw") == 0) {
+        struct sb b; sb_init(&b);
+        if (!read_tail(o->conf_file, MAX_CONF_BYTES, &b) || !b.p || !b.n) { unavailable(fd, "config"); sb_free(&b); return; }
+        struct sb out; sb_init(&out);
+        sb_put(&out, "{\"config\":"); sb_json_str(&out, b.p, b.n); sb_put(&out, "}\n");
+        reply_sb(fd, &out, "application/json");
+        sb_free(&out); sb_free(&b);
     } else if (strcmp(path, "/api/v1/metrics") == 0 || strcmp(path, "/metrics") == 0 || strcmp(path, "/api/v1/bridge") == 0) {
         struct sb b; sb_init(&b);
         if (!read_tail(o->metrics_file, MAX_METRICS, &b) || blank(b.p ? b.p : "", b.n)) unavailable(fd, "metrics");
@@ -1506,8 +1772,10 @@ static int usage(void) {
     fprintf(stderr, "usage: sdr-agent [--bind IP] [--port N] [--token-file PATH] [--status-program PATH]\n"
                     "                 [--metrics-file PATH] [--log-file PATH] [--conf PATH] [--iio-dir PATH]\n"
                     "                 [--fault-file PATH] [--bundle-dir PATH] [--demod-reset-script PATH]\n"
+                    "                 [--config-schema-script PATH] [--start-script PATH]\n"
                     "                 [--rf-loss-threshold-s N] [--fault-max-bytes N]\n"
-                    "                 [--bundle-cooldown-s N] [--recovery-window-s N]\n");
+                    "                 [--bundle-cooldown-s N] [--recovery-window-s N]\n"
+                    "                 [--config-verify-timeout-s N]\n");
     return 2;
 }
 
@@ -1517,8 +1785,9 @@ int main(int argc, char **argv) {
         "/tmp/bridge_stats.json", "/tmp/appliance.log", "/mnt/jffs2/bridge.conf",
         "/sys/bus/iio/devices", "/mnt/jffs2/fault_history.jsonl", "/mnt/jffs2/bundles",
         "/mnt/jffs2/tools/reset_demod.sh",
+        "/mnt/jffs2/config_schema.sh", "/mnt/jffs2/appliance_start.sh",
         8088, RF_LOSS_THRESHOLD_S, FAULT_JOURNAL_MAX_BYTES,
-        BUNDLE_CAPTURE_COOLDOWN_S, RECOVERY_WINDOW_S
+        BUNDLE_CAPTURE_COOLDOWN_S, RECOVERY_WINDOW_S, CONFIG_VERIFY_TIMEOUT_S
     };
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
@@ -1535,6 +1804,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--fault-file")) o.fault_file = v;
         else if (!strcmp(a, "--bundle-dir")) o.bundle_dir = v;
         else if (!strcmp(a, "--demod-reset-script")) o.demod_reset_script = v;
+        else if (!strcmp(a, "--config-schema-script")) o.config_schema_script = v;
+        else if (!strcmp(a, "--start-script")) o.start_script = v;
         // Production has no reason to change any of these from their
         // defaults -- they exist so a test can see RF_LOSS fire in seconds
         // instead of the real 120s threshold, see the journal actually get
@@ -1545,6 +1816,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--fault-max-bytes")) o.fault_max_bytes = (size_t)atol(v);
         else if (!strcmp(a, "--bundle-cooldown-s")) o.bundle_cooldown_s = atoi(v);
         else if (!strcmp(a, "--recovery-window-s")) o.recovery_window_s = atoi(v);
+        else if (!strcmp(a, "--config-verify-timeout-s")) o.config_verify_timeout_s = atoi(v);
         else return usage();
     }
     if (o.port < 1 || o.port > 65535) { fprintf(stderr, "invalid port\n"); return 2; }
@@ -1552,6 +1824,7 @@ int main(int argc, char **argv) {
     if (o.fault_max_bytes < 1024) { fprintf(stderr, "invalid --fault-max-bytes\n"); return 2; }
     if (o.bundle_cooldown_s < 0) { fprintf(stderr, "invalid --bundle-cooldown-s\n"); return 2; }
     if (o.recovery_window_s < 1) { fprintf(stderr, "invalid --recovery-window-s\n"); return 2; }
+    if (o.config_verify_timeout_s < 1) { fprintf(stderr, "invalid --config-verify-timeout-s\n"); return 2; }
     g_opts = &o;
     char token[300]; const char *err = NULL;
     if (!load_token(o.token_file, token, sizeof token, &err)) { fprintf(stderr, "sdr-agent: %s\n", err); return 1; }
@@ -1566,7 +1839,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "sdr-agent: listen %s:%d: %s\n", o.bind_addr, o.port, strerror(errno)); return 1;
     }
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
-    printf("sdr-agent: http://%s:%d (authenticated, read-only)\n", o.bind_addr, o.port);
+    printf("sdr-agent: http://%s:%d (authenticated)\n", o.bind_addr, o.port);
     fflush(stdout);
 
     static struct logring logs; memset(&logs, 0, sizeof logs); logs.path = o.log_file;

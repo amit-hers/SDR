@@ -234,6 +234,34 @@ else
   echo "         WARNING: this bundle has no sdr-agent; no management API on this unit."
 fi
 
+step 81 "Installing appliance orchestration scripts"
+# appliance_start.sh brings the modem and AD936x up before the bridge,
+# appliance_supervise.sh restarts the bridge on death/hang within a fault
+# budget, appliance_status.sh is sdr-agent's own --status-program default,
+# and config_schema.sh/provision.sh validate bridge.conf before anything
+# acts on it. These previously lived only in the source tree -- boards ran
+# them only because someone copied them by hand outside this script, which
+# is how the diagnostics API's config-apply and status endpoints ended up
+# depending on files flash.sh had never actually installed. bridge.conf
+# itself stays deliberately NOT installed here: absent it, a freshly flashed
+# board comes up and forwards nothing, which is the whole safety point of
+# arming it explicitly (release/appliance/README.md); bridge.conf.example
+# is installed alongside it purely as an on-board reference to copy from.
+if [[ -d "$BUNDLE/software/appliance" ]]; then
+  for f in "$BUNDLE"/software/appliance/*.sh; do
+    put "$f" "/mnt/jffs2/$(basename "$f")" || die "Could not install $(basename "$f")."
+  done
+  ssh_d 'chmod +x /mnt/jffs2/appliance_start.sh /mnt/jffs2/appliance_supervise.sh \
+                  /mnt/jffs2/appliance_status.sh /mnt/jffs2/config_schema.sh \
+                  /mnt/jffs2/provision.sh 2>/dev/null' >/dev/null 2>&1
+  [[ -f "$BUNDLE/config/bridge.conf.example" ]] && \
+    put "$BUNDLE/config/bridge.conf.example" /mnt/jffs2/bridge.conf.example >/dev/null 2>&1
+  echo "         appliance scripts: $(ls "$BUNDLE"/software/appliance/*.sh | wc -l) installed"
+else
+  echo "         WARNING: this bundle has no software/appliance; the radio will not"
+  echo "                  autostart even with a bridge.conf present."
+fi
+
 step 82 "Installing configuration"
 put "$BUNDLE/config/ad936x.conf" /mnt/jffs2/ad936x.conf || die "Could not install ad936x.conf."
 echo "$REL" | ssh_d 'cat > /mnt/jffs2/sdr-release' || die "Could not record the release version."
@@ -340,20 +368,20 @@ esac
       > /tmp/sdr-agent.log 2>&1 &
 }
 
-# The IP bridge starts at boot ONLY if an operator has written bridge.conf.
-# Deliberately opt-in: the bridge configures an interface and can enable
-# forwarding, and a misconfiguration that runs before anyone can log in would
-# leave the board unreachable with no way back except a serial cable. Absent
-# the file, a flashed board behaves exactly as it did before.
-[ -f /mnt/jffs2/bridge.conf ] && [ -x /mnt/jffs2/sdr_bridge ] && {
-  . /mnt/jffs2/bridge.conf
-  [ -n "\$BRIDGE_LOCAL" ] && [ -n "\$BRIDGE_PEER" ] && {
-    BRIDGE=/mnt/jffs2/sdr_bridge \
-    /root/sdr-tools/bridge_up.sh "\$BRIDGE_LOCAL" "\$BRIDGE_PEER" \
-        "\${BRIDGE_RATE:-3840000}" "\${BRIDGE_LO:-434000000}" \
-        \$BRIDGE_ARGS > /tmp/bridge.log 2>&1 &
-  }
-}
+# The appliance starts at boot ONLY if an operator has written bridge.conf --
+# appliance_start.sh enforces this itself (a missing bridge.conf logs one
+# line and exits 0, doing nothing further), so a freshly flashed board with
+# no bridge.conf behaves exactly as it did before this existed. Deliberately
+# opt-in: the appliance configures an interface and can enable forwarding,
+# and a misconfiguration that ran before anyone could log in would leave the
+# board unreachable with no way back except a serial cable.
+#
+# This replaces an older bridge_up.sh/BRIDGE_LOCAL/BRIDGE_PEER mechanism that
+# predates appliance_start.sh and the current bridge.conf schema (which uses
+# MODE/LOCAL_IP/PEER_IP, not BRIDGE_LOCAL/BRIDGE_PEER) -- that path was
+# already dead on any schema-2 config, silently.
+[ -x /mnt/jffs2/appliance_start.sh ] && \
+  setsid /mnt/jffs2/appliance_start.sh >> /tmp/appliance.log 2>&1 &
 AUTORUN
 
 step 85 "Loading FPGA image"
