@@ -281,6 +281,27 @@ supervisor state, and recent structured events -- everything you would
 otherwise have had to SSH in and collect by hand, from the moment the fault
 actually happened rather than whenever you got to it.
 
+## Safe remote control
+
+Five bounded, authenticated actions -- never a shell, never an arbitrary
+command or path. Each is `POST`-only (a `GET` is 405) and additionally
+requires `?confirm=yes` (missing it is 400), so a prefetch, a monitoring
+crawler, or a browser revisiting history can never trigger one by accident.
+Every invocation is logged as a structured event before it acts.
+
+```bash
+curl -sS --fail -X POST -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/control/restart_bridge?confirm=yes"
+```
+
+| Action | Effect |
+|---|---|
+| `restart_bridge` | Kills `sdr_bridge` and any leftover `iio_readdev`/`iio_writedev` helpers by `/proc` identity, same match `appliance_supervise.sh`'s own `kill_bridges()` uses. Reports `supervisor_present` so you know whether anything will bring it back up. |
+| `clear_counters` | Sends `SIGUSR1` to `sdr_bridge` only (never the IIO helpers, which have no handler for it and would just die). The bridge zeros its REPORTING counters on its own next stats tick -- never the DMA/frame counters a recovery detector reads against, so this cannot itself trigger a spurious demod reset. |
+| `reset_demod` | Runs `reset_demod.sh` (`/mnt/jffs2/tools/reset_demod.sh`): a direct register pulse, no separate drain process, because a running bridge's own `iio_readdev` already drains the RX DMA the reset needs. Do not reuse `rx_framed.sh`'s bring-up reset dance here -- it spawns its own reader and would EBUSY against the bridge's. |
+| `enter_safe_mode` | Kills the supervisor first, then the bridge -- that order so the supervisor cannot notice the bridge died and bring it back before it too is gone. Appliance stays non-forwarding until reboot or manual intervention. |
+| `restart_appliance` | `exec`s `/sbin/reboot -f` directly (never through a shell): plain `reboot` is a documented no-op on this firmware. The response is sent before the fork, so the caller's ack reaches them before the board actually goes down. |
+
 ## Test authentication without exposing the token
 
 Missing token should return 401:

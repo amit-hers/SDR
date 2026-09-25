@@ -901,8 +901,54 @@ struct Stats {
     std::atomic<uint64_t> tx_blocks{0}, tx_data_blocks{0}, tx_dma_bytes{0};
     std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
     std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
+
+    // Zero the REPORTING counters an operator means by "clear counters" --
+    // deliberately NOT every field, and NOT a single whole-struct reset.
+    //
+    // rx_dma, rx_frames, rx_dup, rx_crcerr and recoveries are excluded because
+    // the stats thread's own recovery detector reads them back to compute a
+    // DELTA against local (non-atomic) baselines it keeps between ticks
+    // (last_rx_dma, last_frames). Zeroing the atomic without also resetting
+    // those locals is a 64-bit UNDERFLOW on the very next tick (0 - a large
+    // prior value wraps to a huge positive number), which reads as a runaway
+    // DMA advance and can trigger a demodulator reset THIS ACTION never asked
+    // for. Reaching into the stats thread's local variables from here would
+    // need a lock this hot path does not otherwise want. Simplest safe fix:
+    // never clear what feeds a decision, only what merely gets reported.
+    //
+    // peer_verdict/peer_hellos/peer_last_ms are excluded for a different
+    // reason -- they are CURRENT STATE (what the peer is doing right now),
+    // not an accumulating count, and "clearing" current state to UNKNOWN would
+    // misrepresent a link that never stopped being compatible. It repopulates
+    // within one HELLO interval regardless, so excluding it costs nothing.
+    //
+    // q_ctrl_depth/q_bulk_depth are excluded for the same reason: a live
+    // gauge, not a counter.
+    void clearReportingCounters() {
+        tx_pkts = 0; tx_bytes = 0; tx_idle = 0; tx_err = 0;
+        rx_bytes = 0; rx_ctrl = 0; rx_self = 0;
+        for (auto& h : off_hits) h = 0;
+        decode_us_total = 0; decode_us_max = 0;
+        rx_gap_us_max = 0; tx_stall_us_total = 0; rx_short = 0;
+        // tun_tx_drop/tun_rx_drop deliberately NOT here: the stats loop
+        // recomputes both, every tick, as a delta against a fixed baseline
+        // captured at process start -- clearing them would be undone by that
+        // same tick's own recomputation, before anyone could observe it.
+        tx_oversize = 0;
+        loop_suppressed = 0; loop_local_copies = 0;
+        rx_boundary = 0; rx_inject_err = 0;
+        q_ctrl_drop = 0; q_bulk_drop = 0; q_drain_ms = 0;
+        tx_blocks = 0; tx_data_blocks = 0; tx_dma_bytes = 0;
+        tx_padding = 0; tx_full_flush = 0; tx_timeout_flush = 0;
+        rx_rejected = 0; rx_tun_err = 0;
+    }
 };
 Stats g_stats;
+// Set only from the SIGUSR1 handler (a single atomic store is the entire
+// handler body -- async-signal-safe); acted on from ordinary code in the
+// stats thread's own loop, never from signal context, since
+// clearReportingCounters() and the fprintf below it are not signal-safe.
+std::atomic<bool> g_clear_counters_requested{false};
 std::atomic<bool> g_run{true};
 } // namespace
 
@@ -1459,6 +1505,10 @@ int main(int argc, char** argv) {
 
     // A dead child must not take the bridge down with it.
     ::signal(SIGPIPE, SIG_IGN);
+    // sdr-agent's clear_counters control action sends this. The handler does
+    // the one thing that is actually signal-safe (a lock-free atomic store)
+    // and nothing else; the stats thread notices it on its own next tick.
+    ::signal(SIGUSR1, [](int) { g_clear_counters_requested.store(true); });
 
     int tx_fd = -1, rx_fd = -1;
     std::unique_ptr<DirectIioTx> direct_tx;
@@ -1618,6 +1668,10 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
     const uint64_t base_rx_drop = ifCounter(o.iface, "rx_dropped");
     while (g_run.load() && o.stats_s > 0) {
         std::this_thread::sleep_for(std::chrono::seconds(o.stats_s));
+        if (g_clear_counters_requested.exchange(false)) {
+            g_stats.clearReportingCounters();
+            std::fprintf(stderr, "bridge: reporting counters cleared on request\n");
+        }
         {
             uint64_t t = ifCounter(o.iface, "tx_dropped");
             uint64_t r = ifCounter(o.iface, "rx_dropped");

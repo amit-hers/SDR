@@ -455,6 +455,105 @@ assert ids == sorted(ids), f'ids not monotonic: {ids}'
 echo "sdr-agent automatic diagnostic bundle: PASS"
 kill "$PID"; wait "$PID" || true; PID=""
 
+# ── Safe remote control ─────────────────────────────────────────────────
+# A fixture stands in for the real register-poke script: the real one needs
+# /dev/mem and CAP_SYS_RAWIO, neither available in this sandbox, and the
+# real restart/reboot/signal actions must never actually fire against a
+# shared test box. What IS safe to exercise for real here: the confirm gate,
+# the POST-only method gate, unknown-action handling, and every action's
+# process-identity scan actually running end to end against an empty result
+# -- nothing in this sandbox resolves to /sdr_bridge or appliance_supervise.
+# Same shape as the real script -- two 1-second sleeps before it ever writes
+# a byte -- not an instant echo, so this test would actually have caught the
+# bug where run_program's default 2000 ms budget raced those exact sleeps
+# and reported a working reset as a timeout failure.
+cat > "$W/reset_demod.sh" <<'EOF'
+#!/bin/sh
+sleep 1
+sleep 1
+echo "demod reset pulsed: lock=1 mu_clamped=0"
+EOF
+chmod 700 "$W/reset_demod.sh"
+"$API" --bind 127.0.0.1 --port "$PORT" --token-file "$W/token" \
+  --status-program "$W/status" --metrics-file "$W/metrics" --log-file "$W/log" \
+  --conf "$W/bridge.conf" --iio-dir "$W/iio" --fault-file "$W/faults4.jsonl" \
+  --demod-reset-script "$W/reset_demod.sh" \
+  >"$W/api6.out" 2>"$W/api6.err" &
+PID=$!
+i=0
+while [ "$i" -lt 30 ]; do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/health" 2>/dev/null || true)
+  [ "$code" = 401 ] && break
+  i=$((i+1)); sleep 0.1
+done
+[ "${code:-}" = 401 ] || { echo "control-API instance did not start"; exit 1; }
+
+# GET is read-only everywhere else in this API; a control action must reject
+# it before it ever looks at the action name or the confirm gate.
+code=$(req -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/control/restart_bridge")
+[ "$code" = 405 ] || { echo "GET on a control route was not rejected"; exit 1; }
+
+# POST without confirm=yes must never act, on any of the five actions.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/restart_bridge")
+[ "$code" = 400 ] || { echo "control action without confirm=yes was not rejected"; exit 1; }
+
+# An unrecognised action name is a 404, exactly like any other unknown route
+# -- the dispatcher matches a fixed allowlist, never a pattern an arbitrary
+# string could satisfy.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/delete_everything?confirm=yes")
+[ "$code" = 404 ] || { echo "unknown control action was not rejected"; exit 1; }
+
+# restart_bridge: nothing in this sandbox resolves to /sdr_bridge, so this
+# must report killed:0 -- the real /proc identity scan runs for real, just
+# against an empty result, without ever risking a real process.
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/restart_bridge?confirm=yes")
+echo "$out" | grep -q '"action":"restart_bridge"' || { echo "restart_bridge did not respond"; exit 1; }
+echo "$out" | grep -q '"killed":0' || { echo "restart_bridge matched an unexpected process"; exit 1; }
+
+# clear_counters: same reasoning, signalled:0.
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/clear_counters?confirm=yes")
+echo "$out" | grep -q '"signalled":0' || { echo "clear_counters matched an unexpected process"; exit 1; }
+
+# enter_safe_mode: same reasoning, both counts 0.
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/enter_safe_mode?confirm=yes")
+echo "$out" | grep -q '"supervisor_killed":0' || { echo "enter_safe_mode matched an unexpected supervisor"; exit 1; }
+echo "$out" | grep -q '"bridge_killed":0' || { echo "enter_safe_mode matched an unexpected bridge"; exit 1; }
+
+# reset_demod: this DOES run a real script end to end (the fixture above,
+# never the real register-poke one) -- exec'd directly, its output captured
+# and returned as a JSON string.
+out=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/reset_demod?confirm=yes")
+echo "$out" | grep -q '"ok":true' || { echo "reset_demod fixture script did not report ok"; exit 1; }
+echo "$out" | grep -q 'lock=1 mu_clamped=0' || { echo "reset_demod did not capture script output"; exit 1; }
+
+# restart_appliance is NEVER exercised end to end here: confirming it would
+# fork and exec a real reboot binary, which this suite must not risk no
+# matter how unlikely a stray /sbin/reboot -f is to succeed unprivileged.
+# The shared confirm-gate and method-gate tests above already cover its
+# input validation; only the actual reboot exec is intentionally left
+# untested outside real hardware.
+code=$(req -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/control/restart_appliance")
+[ "$code" = 405 ] || { echo "GET on restart_appliance was not rejected"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/v1/control/restart_appliance")
+[ "$code" = 400 ] || { echo "restart_appliance without confirm=yes was not rejected"; exit 1; }
+
+# Every control invocation above is logged as a structured event.
+events=$(req "http://127.0.0.1:$PORT/api/v1/events")
+echo "$events" | grep -q '"code":"BRIDGE_RESTART_REQUESTED"' || { echo "restart_bridge was not logged"; exit 1; }
+echo "$events" | grep -q '"code":"COUNTERS_CLEARED"' || { echo "clear_counters was not logged"; exit 1; }
+echo "$events" | grep -q '"code":"SAFE_MODE_REQUESTED"' || { echo "enter_safe_mode was not logged"; exit 1; }
+echo "$events" | grep -q '"code":"DEMOD_RESET_REQUESTED"' || { echo "reset_demod was not logged"; exit 1; }
+
+kill "$PID"; wait "$PID" || true; PID=""
+echo "sdr-agent safe remote control API: PASS"
+
 chmod 644 "$W/token"
 if "$API" --bind 127.0.0.1 --port "$PORT" --token-file "$W/token" \
      --status-program "$W/status" --metrics-file "$W/metrics" --log-file "$W/log" \

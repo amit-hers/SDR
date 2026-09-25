@@ -10,12 +10,19 @@
  * shared glibc (2.41) but no libstdc++, so plain C against the shared libc is
  * the configuration that fits -- tens of KiB, not hundreds.
  *
- * CONTRACT (unchanged from the predecessor, and tested):
+ * CONTRACT (unchanged from the predecessor except where noted, and tested):
  *   - every endpoint requires "Authorization: Bearer <token>"; the token file
  *     must be a regular file, mode 0600, 32..256 characters;
- *   - GET only; anything else is 405; unknown routes 404; missing data 503;
- *   - nothing here runs a shell. The status collector is exec'd directly;
- *     request parameters never select a command, a path or an argument;
+ *   - GET only, except the five actions under /api/v1/control/, which are
+ *     POST-only and each additionally require "?confirm=yes". Every other
+ *     method on every other route is 405; unknown routes 404; missing data
+ *     503;
+ *   - still no shell, no configuration writes, and no arbitrary file access.
+ *     The status collector and every control action are exec'd directly
+ *     against a fixed program or a fixed, hand-written script; a request can
+ *     select WHICH of five known actions to run, never a command, a path or
+ *     an argument. There is no sixth action and no way to add one from a
+ *     request;
  *   - every buffer, wait and child process is bounded.
  */
 #define _GNU_SOURCE
@@ -47,6 +54,14 @@
 #define MAX_BODY        (1024 * 1024)
 #define MAX_EVENTS      256
 #define IO_TIMEOUT_MS   2000
+// reset_demod.sh holds the reset pulse for two 1-second sleeps (~2000 ms)
+// before it ever writes a byte of output; run_program only starts counting
+// a program "done" once it has EOF, so IO_TIMEOUT_MS here would race the
+// script's own sleeps and report a working reset as a timeout failure. A
+// generous multiple, not a value trimmed to the nominal 2000 ms, on the
+// standing rule that a threshold worth padding gets real margin rather than
+// a shave to the edge.
+#define DEMOD_RESET_TIMEOUT_MS (IO_TIMEOUT_MS * 4)
 #define SERVICE_VERSION 2
 
 // Live telemetry (SSE). Bounded on every axis: a fixed number of concurrent
@@ -66,7 +81,8 @@ static void on_signal(int sig) { (void)sig; running = 0; }
 
 struct options {
     const char *bind_addr, *token_file, *status_program, *metrics_file,
-               *log_file, *conf_file, *iio_dir, *fault_file, *bundle_dir;
+               *log_file, *conf_file, *iio_dir, *fault_file, *bundle_dir,
+               *demod_reset_script;
     int port;
     int rf_loss_threshold_s;   // --rf-loss-threshold-s; test-only override of RF_LOSS_THRESHOLD_S
     size_t fault_max_bytes;    // --fault-max-bytes; test-only override of FAULT_JOURNAL_MAX_BYTES
@@ -225,7 +241,7 @@ static void ring_refresh(struct logring *r) {
 /* ── child process, bounded ──────────────────────────────────────────────── */
 /* Run one fixed executable directly (never through /bin/sh), capture bounded
  * stdout, and kill it if it exceeds the diagnostics deadline. */
-static int run_program(const char *program, size_t limit, struct sb *out) {
+static int run_program(const char *program, size_t limit, struct sb *out, int timeout_ms) {
     int p[2];
     if (pipe(p) != 0) return 0;
     pid_t pid = fork();
@@ -240,7 +256,7 @@ static int run_program(const char *program, size_t limit, struct sb *out) {
     }
     close(p[1]);
     fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL, 0) | O_NONBLOCK);
-    long long deadline = now_ms() + IO_TIMEOUT_MS;
+    long long deadline = now_ms() + timeout_ms;
     int eof = 0;
     size_t total = 0;
     while (!eof && total < limit && now_ms() < deadline) {
@@ -857,7 +873,7 @@ static void auto_bundle_json(const struct options *o, const struct logring *logs
     // document /api/v1/fpga and /api/v1/supervisor already read a section of
     // -- one fork covers both rather than one each.
     struct sb status; sb_init(&status);
-    int status_ok = run_program(o->status_program, MAX_STATUS, &status);
+    int status_ok = run_program(o->status_program, MAX_STATUS, &status, IO_TIMEOUT_MS);
     const char *v; size_t vn;
     sb_put(out, ",\"fpga\":");
     if (status_ok && json_member(status.p, status.n, "fpga", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
@@ -1015,7 +1031,7 @@ static void reply_section(int fd, const struct sb *src, int src_ok, const char *
 
 static void bundle_json(const struct options *o, const struct logring *logs, struct sb *out) {
     struct sb status, metrics; sb_init(&status); sb_init(&metrics);
-    int status_ok = run_program(o->status_program, MAX_STATUS, &status);
+    int status_ok = run_program(o->status_program, MAX_STATUS, &status, IO_TIMEOUT_MS);
     int metrics_ok = read_tail(o->metrics_file, MAX_METRICS, &metrics) && !blank(metrics.p ? metrics.p : "", metrics.n);
     char node[24]; json_number_field(metrics_ok ? metrics.p : "", metrics_ok ? metrics.n : 0, "node_id", node, sizeof node);
     sb_put(out, "{\"bundle_version\":2,\"status\":");
@@ -1244,6 +1260,133 @@ static void reply_bundle(int fd, const struct options *o, const char *id_str) {
     sb_free(&b);
 }
 
+/* ── Safe remote control ─────────────────────────────────────────────────
+ * Every action below is a fixed, hand-written operation on a fixed process
+ * identity or a fixed script -- never a caller-supplied command or path --
+ * so this cannot become a general remote shell no matter what a request
+ * sends. `<action>` itself is matched against exactly five literal names;
+ * anything else falls through to 404, same as any other unknown route. */
+
+/* Bounded process identification, matched the same way
+ * appliance_supervise.sh's own kill_bridges() does: by resolved /exe
+ * identity for the bridge and its IIO helpers (a command-line pattern is
+ * also present in the argv of whatever searches for it, which is exactly
+ * the kind of self-match that script's own comment warns about), and by
+ * /cmdline substring for the supervisor, which has no distinctive /exe.
+ * PROC_BRIDGE_ONLY exists separately from PROC_BRIDGE_AND_HELPERS because
+ * clear_counters signals SIGUSR1 -- fine for sdr_bridge, which installs a
+ * handler for it, but SIGUSR1's default disposition is to terminate a
+ * process that does not, and iio_readdev/iio_writedev do not. Passing
+ * sig=0 sends nothing (POSIX kill(2)) and just tests whether a match
+ * exists, which is how restart_bridge reports supervisor presence without
+ * disturbing it. */
+enum proc_family { PROC_BRIDGE_ONLY, PROC_BRIDGE_AND_HELPERS, PROC_SUPERVISOR };
+
+static int signal_by_identity(enum proc_family fam, int sig) {
+    int hit = 0;
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char path[288], buf[256];
+        int matched = 0;
+        if (fam == PROC_SUPERVISOR) {
+            snprintf(path, sizeof path, "/proc/%s/cmdline", e->d_name);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                size_t got = fread(buf, 1, sizeof buf - 1, f); fclose(f);
+                buf[got] = 0;
+                for (size_t i = 0; i < got; ++i) if (buf[i] == 0) buf[i] = ' ';
+                if (strstr(buf, "appliance_supervise")) matched = 1;
+            }
+        } else {
+            snprintf(path, sizeof path, "/proc/%s/exe", e->d_name);
+            ssize_t n = readlink(path, buf, sizeof buf - 1);
+            if (n > 0) {
+                buf[n] = 0;
+                if (strstr(buf, "/sdr_bridge")) matched = 1;
+                else if (fam == PROC_BRIDGE_AND_HELPERS &&
+                         (strstr(buf, "/iio_readdev") || strstr(buf, "/iio_writedev")))
+                    matched = 1;
+            }
+        }
+        if (matched) { kill((pid_t)atol(e->d_name), sig); ++hit; }
+    }
+    closedir(d);
+    return hit;
+}
+
+/* Bounded "key=value" lookup over a query string already split off the path
+ * by the caller. No form-decoding: the confirm gate only ever needs one
+ * exact literal match, so decoding would be attack surface for no benefit. */
+static int query_has(const char *query, const char *key, const char *value) {
+    if (!query || !*query) return 0;
+    size_t klen = strlen(key), vlen = strlen(value);
+    for (const char *p = query; *p; ) {
+        const char *amp = strchr(p, '&');
+        size_t seglen = amp ? (size_t)(amp - p) : strlen(p);
+        if (seglen == klen + 1 + vlen && !strncmp(p, key, klen) && p[klen] == '=' &&
+            !strncmp(p + klen + 1, value, vlen))
+            return 1;
+        p += seglen; if (*p == '&') ++p;
+    }
+    return 0;
+}
+
+static void reply_control(int fd, const struct options *o, const char *action, const char *query) {
+    if (!query_has(query, "confirm", "yes")) {
+        reply_json(fd, 400, "Bad Request", "{\"error\":\"control actions require ?confirm=yes\"}\n");
+        return;
+    }
+    char body[512];
+    if (!strcmp(action, "restart_bridge")) {
+        push_synth("warning", "control", "BRIDGE_RESTART_REQUESTED", "operator requested restart_bridge");
+        int killed = signal_by_identity(PROC_BRIDGE_AND_HELPERS, SIGKILL);
+        int supervised = signal_by_identity(PROC_SUPERVISOR, 0) > 0;
+        snprintf(body, sizeof body, "{\"action\":\"restart_bridge\",\"killed\":%d,\"supervisor_present\":%s}\n",
+                 killed, supervised ? "true" : "false");
+        reply_json(fd, 200, "OK", body);
+    } else if (!strcmp(action, "clear_counters")) {
+        push_synth("info", "control", "COUNTERS_CLEARED", "operator requested clear_counters");
+        int signalled = signal_by_identity(PROC_BRIDGE_ONLY, SIGUSR1);
+        snprintf(body, sizeof body, "{\"action\":\"clear_counters\",\"signalled\":%d}\n", signalled);
+        reply_json(fd, 200, "OK", body);
+    } else if (!strcmp(action, "reset_demod")) {
+        push_synth("warning", "control", "DEMOD_RESET_REQUESTED", "operator requested reset_demod");
+        struct sb b; sb_init(&b);
+        int ok = run_program(o->demod_reset_script, MAX_STATUS, &b, DEMOD_RESET_TIMEOUT_MS);
+        struct sb out; sb_init(&out);
+        sb_putf(&out, "{\"action\":\"reset_demod\",\"ok\":%s,\"output\":", ok ? "true" : "false");
+        sb_json_str(&out, b.p ? b.p : "", b.n);
+        sb_put(&out, "}\n");
+        reply_sb(fd, &out, "application/json");
+        sb_free(&out); sb_free(&b);
+    } else if (!strcmp(action, "enter_safe_mode")) {
+        push_synth("error", "control", "SAFE_MODE_REQUESTED", "operator requested enter_safe_mode");
+        // Supervisor first: killing it before the bridge means it cannot
+        // notice the bridge is gone and bring it right back up underneath
+        // this request. Order the other way and safe mode could observe
+        // "killed" while a fresh bridge is already starting.
+        int nsup = signal_by_identity(PROC_SUPERVISOR, SIGKILL);
+        int nbridge = signal_by_identity(PROC_BRIDGE_AND_HELPERS, SIGKILL);
+        snprintf(body, sizeof body, "{\"action\":\"enter_safe_mode\",\"supervisor_killed\":%d,\"bridge_killed\":%d}\n",
+                 nsup, nbridge);
+        reply_json(fd, 200, "OK", body);
+    } else if (!strcmp(action, "restart_appliance")) {
+        push_synth("error", "control", "APPLIANCE_REBOOT_REQUESTED", "operator requested restart_appliance");
+        // Reply before forking: the ack needs to be on the wire before the
+        // board actually goes down. Plain `reboot` is a documented no-op on
+        // this firmware (see project memory); `-f` is required, and this
+        // execs it directly, never through a shell.
+        reply_json(fd, 200, "OK", "{\"action\":\"restart_appliance\",\"ok\":true}\n");
+        pid_t pid = fork();
+        if (pid == 0) { setsid(); execl("/sbin/reboot", "reboot", "-f", (char *)NULL); _exit(127); }
+    } else {
+        reply_json(fd, 404, "Not Found", "{\"error\":\"unknown control action\"}\n");
+    }
+}
+
 static void serve(int fd, int listen_fd, const struct options *o, const char *token, const struct logring *logs) {
     struct timeval tv = { 2, 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -1266,6 +1409,12 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
     if (parts < 3 || parts > 3 || strncmp(version, "HTTP/1.", 7) != 0) {
         reply_json(fd, 400, "Bad Request", "{\"error\":\"bad request line\"}\n"); return;
     }
+    // Split off a query string once, here, so every route below matches on
+    // the bare path regardless of whether one is present. Only the control
+    // actions read `query` (for confirm=yes); every existing GET route
+    // ignores it, which just means a stray "?anything" no longer 404s them.
+    char *query = strchr(path, '?');
+    if (query) *query++ = 0; else query = path + strlen(path);
     char auth[600] = "";
     for (char *p = line_end ? line_end + 2 : req + strlen(req); p && *p; ) {
         char *e = strstr(p, "\r\n"); if (e) *e = 0;
@@ -1280,21 +1429,31 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
     }
     char expected[300]; snprintf(expected, sizeof expected, "Bearer %s", token);
     if (!constant_time_equal(auth, expected)) { reply_json(fd, 401, "Unauthorized", "{\"error\":\"unauthorized\"}\n"); return; }
-    if (strcmp(method, "GET") != 0) { reply_json(fd, 405, "Method Not Allowed", "{\"error\":\"read-only API\"}\n"); return; }
+    // Every route is GET-only except the control actions, which change
+    // appliance state and so require POST -- a GET (a prefetch, a browser
+    // history revisit, a monitoring crawler) must never be able to trigger
+    // one just by being requested.
+    static const char CONTROL_PREFIX[] = "/api/v1/control/";
+    int is_control = !strncmp(path, CONTROL_PREFIX, sizeof CONTROL_PREFIX - 1);
+    if (strcmp(method, is_control ? "POST" : "GET") != 0) {
+        reply_json(fd, 405, "Method Not Allowed",
+                   is_control ? "{\"error\":\"control actions require POST\"}\n" : "{\"error\":\"read-only API\"}\n");
+        return;
+    }
 
     if (strcmp(path, "/api/v1/health") == 0) {
         char body[128]; snprintf(body, sizeof body, "{\"status\":\"ok\",\"service\":\"sdr-agent\",\"version\":%d}\n", SERVICE_VERSION);
         reply_json(fd, 200, "OK", body);
     } else if (strcmp(path, "/api/v1/status") == 0) {
         struct sb b; sb_init(&b);
-        if (!run_program(o->status_program, MAX_STATUS, &b)) unavailable(fd, "status");
+        if (!run_program(o->status_program, MAX_STATUS, &b, IO_TIMEOUT_MS)) unavailable(fd, "status");
         else reply_sb(fd, &b, "application/json");
         sb_free(&b);
     } else if (strcmp(path, "/api/v1/fpga") == 0 || strcmp(path, "/api/v1/ethernet") == 0 ||
                strcmp(path, "/api/v1/supervisor") == 0 || strcmp(path, "/api/v1/modem") == 0 ||
                strcmp(path, "/api/v1/config") == 0 || strcmp(path, "/api/v1/progress") == 0) {
         struct sb b; sb_init(&b);
-        int ok = run_program(o->status_program, MAX_STATUS, &b);
+        int ok = run_program(o->status_program, MAX_STATUS, &b, IO_TIMEOUT_MS);
         reply_section(fd, &b, ok, path + 8, path + 8);
         sb_free(&b);
     } else if (strcmp(path, "/api/v1/metrics") == 0 || strcmp(path, "/metrics") == 0 || strcmp(path, "/api/v1/bridge") == 0) {
@@ -1336,6 +1495,8 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
         struct sb b; sb_init(&b); bundles_list_json(o, &b); reply_sb(fd, &b, "application/json"); sb_free(&b);
     } else if (!strncmp(path, "/api/v1/bundles/", 16)) {
         reply_bundle(fd, o, path + 16);
+    } else if (is_control) {
+        reply_control(fd, o, path + (sizeof CONTROL_PREFIX - 1), query);
     } else {
         reply_json(fd, 404, "Not Found", "{\"error\":\"not found\"}\n");
     }
@@ -1344,8 +1505,9 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
 static int usage(void) {
     fprintf(stderr, "usage: sdr-agent [--bind IP] [--port N] [--token-file PATH] [--status-program PATH]\n"
                     "                 [--metrics-file PATH] [--log-file PATH] [--conf PATH] [--iio-dir PATH]\n"
-                    "                 [--fault-file PATH] [--bundle-dir PATH] [--rf-loss-threshold-s N]\n"
-                    "                 [--fault-max-bytes N] [--bundle-cooldown-s N] [--recovery-window-s N]\n");
+                    "                 [--fault-file PATH] [--bundle-dir PATH] [--demod-reset-script PATH]\n"
+                    "                 [--rf-loss-threshold-s N] [--fault-max-bytes N]\n"
+                    "                 [--bundle-cooldown-s N] [--recovery-window-s N]\n");
     return 2;
 }
 
@@ -1354,6 +1516,7 @@ int main(int argc, char **argv) {
         "127.0.0.1", "/mnt/jffs2/agent.token", "/mnt/jffs2/appliance_status.sh",
         "/tmp/bridge_stats.json", "/tmp/appliance.log", "/mnt/jffs2/bridge.conf",
         "/sys/bus/iio/devices", "/mnt/jffs2/fault_history.jsonl", "/mnt/jffs2/bundles",
+        "/mnt/jffs2/tools/reset_demod.sh",
         8088, RF_LOSS_THRESHOLD_S, FAULT_JOURNAL_MAX_BYTES,
         BUNDLE_CAPTURE_COOLDOWN_S, RECOVERY_WINDOW_S
     };
@@ -1371,6 +1534,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--iio-dir")) o.iio_dir = v;
         else if (!strcmp(a, "--fault-file")) o.fault_file = v;
         else if (!strcmp(a, "--bundle-dir")) o.bundle_dir = v;
+        else if (!strcmp(a, "--demod-reset-script")) o.demod_reset_script = v;
         // Production has no reason to change any of these from their
         // defaults -- they exist so a test can see RF_LOSS fire in seconds
         // instead of the real 120s threshold, see the journal actually get

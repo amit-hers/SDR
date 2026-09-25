@@ -1,10 +1,12 @@
 # Authenticated diagnostics API (`sdr-agent`)
 
 `sdr-agent` is the on-board management daemon: one small service per unit that
-owns the read-only HTTP diagnostics surface. It is intended to replace routine
-SSH inspection; it does not expose a shell, configuration writes, resets, or
-arbitrary file access. Source: `fpga/tools/sdr_agent.c`; test:
-`tests/sdr_agent_test.sh`.
+owns the HTTP diagnostics surface, plus five bounded, authenticated control
+actions. It is intended to replace routine SSH inspection; it does not expose
+a shell, configuration writes, or arbitrary file access -- every reset or
+restart it can perform is one of exactly five fixed, hand-written operations,
+never a caller-supplied command or path. Source: `fpga/tools/sdr_agent.c`;
+test: `tests/sdr_agent_test.sh`.
 
 ## Endpoints
 
@@ -26,10 +28,20 @@ All endpoints require `Authorization: Bearer <token>`.
 | `GET /api/v1/fault-history` | The persistent fault journal (`/mnt/jffs2/fault_history.jsonl`), same shape as `/events` -- survives a reboot, `/events` does not |
 | `GET /api/v1/bundles` | List of automatically captured diagnostic bundles (id, trigger, when) |
 | `GET /api/v1/bundles/latest`, `/api/v1/bundles/<id>` | One captured bundle in full |
+| `POST /api/v1/control/restart_bridge?confirm=yes` | Kill the bridge (and any leftover IIO helpers) by process identity |
+| `POST /api/v1/control/clear_counters?confirm=yes` | Zero the bridge's reporting counters |
+| `POST /api/v1/control/reset_demod?confirm=yes` | Pulse the demodulator's soft-reset register |
+| `POST /api/v1/control/enter_safe_mode?confirm=yes` | Kill the supervisor and the bridge; appliance stays non-forwarding |
+| `POST /api/v1/control/restart_appliance?confirm=yes` | Reboot the appliance (`reboot -f`) |
 
-Unknown routes return 404. Any method other than GET returns 405. Missing or
-incorrect authentication returns 401. A section that the source document does
-not contain returns 503, never an empty object.
+Unknown routes return 404. Every route above the control actions is GET-only;
+any other method is 405. The control actions are POST-only for the same
+reason in reverse -- a GET must never be able to trigger one -- and
+additionally require the literal query string `confirm=yes`, or 400, as a
+guard against a client that automatically follows or prefetches every link it
+discovers. Missing or incorrect authentication returns 401 on every route,
+control actions included. A section that the source document does not
+contain returns 503, never an empty object.
 
 `/api/v1/radio` exists because debugging from what software asked for is how a
 link was once chased while the LO sat at the previous frequency. `requested`
@@ -133,6 +145,77 @@ the full content); `GET /api/v1/bundles/<id>` or `.../bundles/latest` fetches
 one in full. `<id>` is validated as a plain non-negative integer before it
 ever reaches a filename -- never passed through unchecked.
 
+### `/api/v1/control/*`: safe remote control
+
+Everything above is read-only. These five are not, and the roadmap for them
+was explicit: bounded, authenticated operations, never a general remote
+shell. `<action>` is matched against exactly five literal names; anything
+else is a plain 404, the same as any other unknown route -- there is no
+sixth action and no way for a request to invent one. Every action logs a
+structured event (`BRIDGE_RESTART_REQUESTED`, `COUNTERS_CLEARED`,
+`DEMOD_RESET_REQUESTED`, `SAFE_MODE_REQUESTED`, `APPLIANCE_REBOOT_REQUESTED`)
+before it acts, so what happened and why are never separated.
+
+- **`restart_bridge`** kills `sdr_bridge` and any leftover `iio_readdev` /
+  `iio_writedev` helpers by resolved `/proc/<pid>/exe` identity -- the exact
+  match `appliance_supervise.sh`'s own `kill_bridges()` already uses, and for
+  the same reason that comment gives: a command-line pattern is also present
+  in the argv of whatever searches for it. `sdr-agent` does not itself start
+  a new bridge; it reports `supervisor_present` so the caller knows whether
+  `appliance_supervise.sh` will notice the death and restart it (up to ~60 s
+  later, and counting against that script's own `MAX_RESTARTS`/`WINDOW`
+  fault budget) or whether nothing will.
+
+- **`clear_counters`** sends `SIGUSR1` to `sdr_bridge` alone -- deliberately
+  not the IIO helpers, which install no handler for it and would simply be
+  killed by its default disposition. The bridge's signal handler only sets
+  an atomic flag (the one thing actually async-signal-safe); its own stats
+  thread notices the flag on its next tick and zeros a specific allowlist of
+  REPORTING fields. `rx_dma`, `rx_frames`, `rx_dup`, `rx_crcerr`, and
+  `recoveries` are excluded on purpose: the same stats tick's recovery
+  detector reads them back against local (non-atomic) baselines carried
+  between ticks, and zeroing the atomic without also resetting those
+  baselines is a `uint64_t` underflow on the very next tick -- it would read
+  as a runaway DMA advance and could trigger a demod reset this action never
+  asked for. "Clear counters" only ever clears what is purely reported,
+  never what a decision is made from.
+
+- **`reset_demod`** execs a fixed script (`reset_demod.sh`, installed to
+  `/mnt/jffs2/tools/reset_demod.sh`) that pulses the demodulator's soft-reset
+  register directly, with no separate draining subprocess. That matters
+  because the register only takes effect while something is actively
+  reading the RX DMA fabric; `rx_framed.sh`'s bring-up reset dance satisfies
+  that by spawning its own `iio_readdev`, which is correct at bring-up (when
+  nothing else is reading) but would `EBUSY` against a live bridge's own
+  already-open reader -- the single-open IIO character device allows only
+  one. On a running appliance the bridge's own reader already drains it, so
+  the live-reset script only needs the pulse.
+
+- **`enter_safe_mode`** kills the supervisor first, then the bridge (and its
+  helpers) -- deliberately in that order, so the supervisor cannot notice
+  the bridge is gone and bring a new one up in the gap before it too is
+  killed. The appliance is left in the same non-forwarding safe state
+  `PREFLIGHT_FAIL` already produces, until a reboot or manual intervention.
+
+- **`restart_appliance`** execs `/sbin/reboot -f` directly, never through a
+  shell: plain `reboot` is a documented no-op on this board's firmware. The
+  HTTP response is sent before the fork that execs it, so the caller's
+  acknowledgment reaches them ahead of the board actually going down.
+
+Every action requires `POST` (a `GET` is 405, before the action name or
+confirmation is even looked at) and the literal query string `?confirm=yes`
+(otherwise 400) -- a deliberate extra gate beyond the bearer token, against a
+client that follows or prefetches every link it discovers. None of the five
+is exercised end-to-end by the automated test (`tests/sdr_agent_test.sh`)
+against a real bridge, supervisor, or reboot binary -- doing so would risk
+exactly what these actions are for in a shared test environment. The test
+instead runs every action for real against an empty `/proc` match (nothing
+in the sandbox resolves to `/sdr_bridge` or `appliance_supervise`) plus a
+fixture script standing in for `reset_demod.sh`, and separately confirms
+`restart_appliance`'s method and confirm gates without ever letting it fork.
+Functional verification of a real restart, reset, and reboot is done on
+hardware.
+
 ## Security contract
 
 - Bind to the USB management address, never `0.0.0.0`.
@@ -141,8 +224,9 @@ ever reaches a filename -- never passed through unchecked.
   start if group or other permissions are present.
 - HTTP is plaintext. Treat the USB management network as trusted and isolated;
   do not route this port onto the RF/user Ethernet or the public Internet.
-- The status collector is executed directly with `exec`, never through a
-  shell. Request parameters cannot select commands or paths.
+- The status collector and every control action are executed directly with
+  `exec`, never through a shell. Request parameters can select which of the
+  five known control actions to run, never a command or a path.
 - Requests, command runtime, status output, metrics, logs, events, and socket
   waits all have fixed bounds.
 
@@ -188,6 +272,12 @@ Tokens: `flash.sh` generates one per unit **once** (kept across re-flashes so
 host copies stay valid), stores it at `/mnt/jffs2/agent.token` (0600) and
 mirrors it to `$SDR_TOKEN_DIR` (default `~/.config/sdr/tokens/<serial>.token`,
 directory 0700, file 0600).
+
+`reset_demod.sh` (`fpga/scripts/reset_demod.sh`) needs no separate wiring: it
+is one more `.sh` under `fpga/scripts/`, and `build-release.sh` already
+copies every one of those into the release bundle's supporting-tools, which
+`flash.sh` already installs whole to `/mnt/jffs2/tools/`. `sdr-agent`'s
+default `--demod-reset-script` points there.
 
 ## Central collection
 
