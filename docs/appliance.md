@@ -143,6 +143,7 @@ SAMPLE_RATE=3840000
 FREQUENCY=434000000
 DIFF_MODE=1             # differential QPSK
 STATS_S=30              # statistics interval, seconds
+PROBE_INTERVAL_S=5      # active RTT health probe cadence, seconds; 0 disables (optional, bridge default 5)
 ```
 
 For `MODE=tun`, set `LOCAL_IP`, `PEER_IP` and optionally `TUN_IFACE` instead of

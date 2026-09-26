@@ -113,3 +113,32 @@ add_test(NAME diagnostics_collector
 add_test(NAME config_schema
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/config_schema_test.sh
                  ${CMAKE_SOURCE_DIR}/release/appliance/config_schema.sh)
+
+# The active health-probe wire format: a request round-trips with its
+# sequence number and send-time intact, a reply is distinguishable from a
+# request by magic alone, and corrupted/short/arbitrary frames are rejected.
+add_executable(health_probe_test health_probe_test.cpp)
+target_include_directories(health_probe_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME health_probe COMMAND health_probe_test)
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+execute_process(COMMAND ${Python3_EXECUTABLE} -c "import cryptography"
+                RESULT_VARIABLE MISSION_CRYPTO_IMPORT OUTPUT_QUIET ERROR_QUIET)
+if(MISSION_CRYPTO_IMPORT EQUAL 0)
+    add_test(NAME mission_control COMMAND ${Python3_EXECUTABLE}
+             ${CMAKE_CURRENT_SOURCE_DIR}/mission/test_mission.py)
+    add_test(NAME mission_process COMMAND ${Python3_EXECUTABLE}
+             ${CMAKE_CURRENT_SOURCE_DIR}/mission/test_service.py)
+    set_tests_properties(mission_process PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+else()
+    message(WARNING "Mission tests unavailable: install Python cryptography (src/mission/requirements.txt)")
+endif()
+if(IVERILOG_EXECUTABLE)
+    add_test(NAME qam64_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/qam64_test.sh ${PROJECT_SOURCE_DIR}
+             $<TARGET_FILE:sdr-modem-characterize>)
+endif()
+add_test(NAME modem_characterization COMMAND sdr-modem-characterize 8)
+if(MISSION_CRYPTO_IMPORT EQUAL 0)
+    add_test(NAME mission_resilience COMMAND ${Python3_EXECUTABLE}
+             ${CMAKE_CURRENT_SOURCE_DIR}/mission/qualify.py --seconds 60)
+endif()

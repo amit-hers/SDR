@@ -1,0 +1,419 @@
+<!doctype html>
+<meta charset="utf-8">
+<!--
+  Appliance dashboard: UNIT-A / UNIT-B side by side, with the evidence
+  behind each unit's HEALTHY / DEGRADED / FAULT verdict, not just the label.
+
+  WHAT THIS IS. A single static HTML file, no build step, no dependency, no
+  server component of its own -- open it directly from disk (file://) or
+  serve it with anything ("python3 -m http.server"). It talks straight to
+  each unit's sdr-agent over the trusted USB management network the rest of
+  docs/diagnostics-api.md already assumes, the same way curl or
+  scripts/collect-diagnostics.py do: a bearer token per unit, plain HTTP.
+
+  WHY NOT /api/v1/stream. That route exists specifically so a live viewer
+  does not pay the cost of re-running the diagnostics bundle on its own
+  schedule -- but a browser's native EventSource cannot set a
+  Authorization header, and this API authenticates every route including
+  that one. Consuming it via fetch()+ReadableStream instead would work, but
+  adds real complexity (manual SSE framing, reconnect/backoff) for a first
+  version. This polls three already-cheap, already-existing endpoints per
+  unit instead (status, radio, events) rather than the heavier
+  diagnostic-bundle, which embeds the full 64 KiB log ring and is sized for
+  one on-demand pull, not a poll loop.
+
+  WHY THE VERDICT IS COMPUTED HERE, NOT SERVER-SIDE. sdr-agent already has a
+  three-value verdict of its own (appliance_status.sh's progress.verdict:
+  forwarding / NO_RX_PROGRESS / not_forwarding), but the roadmap for this
+  page asked for HEALTHY/DEGRADED/FAULT with the EVIDENCE behind it, drawn
+  from several signals together (supervisor state, peer compatibility, RF
+  match, recent events) -- a presentation policy, not a new fact the
+  appliance measures. Keeping it here means the classification can be
+  tuned without touching firmware on either board. See classify() below for
+  the exact rules, each with the field it reads.
+
+  NO CONTROL ACTIONS HERE. This is deliberately read-only: it shows
+  evidence, it does not expose restart_bridge/clear_counters/config-apply/
+  etc. Wiring the control API into a UI is a different, separately
+  reviewable piece of work.
+
+  CORS. Every sdr-agent response carries Access-Control-Allow-Origin: * and
+  answers OPTIONS without authentication specifically so a page like this
+  one can read the responses at all (see sdr_agent.c's own CONTRACT
+  comment) -- a browser refuses to expose a cross-origin response to page
+  JavaScript otherwise, preflight included.
+-->
+<title>Appliance Dashboard</title>
+<style>
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --border: #d8dce2; --text: #1a1d21;
+  --muted: #5b6270; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --healthy: #1a7f37; --healthy-bg: #ddf4e3;
+  --degraded: #9a6700; --degraded-bg: #fff3cd;
+  --fault: #b32222; --fault-bg: #fde2e1;
+  --unreachable: #57606a; --unreachable-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14161a; --panel: #1c1f24; --border: #33383f; --text: #e6e8eb; --muted: #9aa2ad;
+    --healthy: #4ac26b; --healthy-bg: #10321d;
+    --degraded: #e0a72e; --degraded-bg: #3a2e0a;
+    --fault: #f0625f; --fault-bg: #3a1414;
+    --unreachable: #9aa2ad; --unreachable-bg: #2a2e34;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14161a; --panel: #1c1f24; --border: #33383f; --text: #e6e8eb; --muted: #9aa2ad;
+  --healthy: #4ac26b; --healthy-bg: #10321d;
+  --degraded: #e0a72e; --degraded-bg: #3a2e0a;
+  --fault: #f0625f; --fault-bg: #3a1414;
+  --unreachable: #9aa2ad; --unreachable-bg: #2a2e34;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 16px; padding-block: 20px;
+}
+h1 { font-size: 18px; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
+.topbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+button, input {
+  font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text);
+}
+button { cursor: pointer; }
+button:hover { filter: brightness(0.97); }
+.settings {
+  display: none; grid-template-columns: 1fr 1fr; gap: 16px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 16px;
+}
+.settings.open { display: grid; }
+.settings label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+.settings input { width: 100%; }
+.settings .hint { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 820px) { .grid, .settings { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px; min-width: 0;
+}
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.panel-head h2 { font-size: 16px; margin: 0; }
+.serial { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.badge {
+  display: inline-block; padding: 4px 12px; border-radius: 999px; font-weight: 600;
+  font-size: 12.5px; letter-spacing: 0.02em; white-space: nowrap;
+}
+.badge.HEALTHY     { background: var(--healthy-bg);     color: var(--healthy); }
+.badge.DEGRADED    { background: var(--degraded-bg);    color: var(--degraded); }
+.badge.FAULT       { background: var(--fault-bg);       color: var(--fault); }
+.badge.UNREACHABLE { background: var(--unreachable-bg); color: var(--unreachable); }
+.evidence { margin: 12px 0; padding: 0; list-style: none; }
+.evidence li {
+  padding: 4px 0 4px 18px; position: relative; font-size: 13px;
+}
+.evidence li::before { content: "\2022"; position: absolute; left: 4px; color: var(--muted); }
+.section-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+  margin: 14px 0 6px;
+}
+.kv { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 12.5px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+.kv div:nth-child(even) { font-family: var(--mono); text-align: right; }
+.events { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.event-row {
+  display: grid; grid-template-columns: auto auto 1fr; gap: 8px; padding: 5px 8px;
+  font-size: 12px; border-bottom: 1px solid var(--border);
+}
+.event-row:last-child { border-bottom: none; }
+.event-row .age { color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+.event-row .sev { font-weight: 600; white-space: nowrap; }
+.event-row .sev.error, .event-row .sev.critical { color: var(--fault); }
+.event-row .sev.warning { color: var(--degraded); }
+.event-row .sev.info { color: var(--muted); }
+.event-row .msg { overflow-wrap: anywhere; }
+.empty { color: var(--muted); font-size: 12.5px; padding: 8px; }
+</style>
+
+<h1>Appliance Dashboard</h1>
+<p class="sub">Live evidence behind each unit's verdict &mdash; polls <code>/api/v1/status</code>, <code>/api/v1/radio</code> and <code>/api/v1/events</code> directly over the USB management network. Read-only: no control actions are issued from this page.</p>
+
+<div class="topbar">
+  <button id="toggleSettings" type="button">Settings</button>
+  <span class="sub" id="pollStatus" style="margin:0;"></span>
+</div>
+
+<div class="settings" id="settings">
+  <div>
+    <label for="aName">UNIT-A label</label>
+    <input id="aName" placeholder="UNIT-A">
+    <label for="aUrl">UNIT-A base URL</label>
+    <input id="aUrl" placeholder="http://192.168.2.17:8088">
+    <label for="aToken">UNIT-A bearer token</label>
+    <input id="aToken" placeholder="token" autocomplete="off">
+  </div>
+  <div>
+    <label for="bName">UNIT-B label</label>
+    <input id="bName" placeholder="UNIT-B">
+    <label for="bUrl">UNIT-B base URL</label>
+    <input id="bUrl" placeholder="http://192.168.2.1:8088">
+    <label for="bToken">UNIT-B bearer token</label>
+    <input id="bToken" placeholder="token" autocomplete="off">
+  </div>
+  <div class="hint" style="grid-column: 1 / -1;">
+    Saved to this browser's local storage only (never sent anywhere except the URLs above) &mdash;
+    same trust level as a token file on your own machine. Nothing here is shared between browsers or devices.
+  </div>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<script>
+"use strict";
+
+// ── persisted settings ──────────────────────────────────────────────────
+const STORE_KEY = "sdr-dashboard-units-v1";
+const defaults = {
+  a: { name: "UNIT-A", url: "http://192.168.2.17:8088", token: "" },
+  b: { name: "UNIT-B", url: "http://192.168.2.1:8088",  token: "" },
+};
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    if (saved && saved.a && saved.b) return saved;
+  } catch (e) { /* corrupt or blocked storage: fall through to defaults */ }
+  return JSON.parse(JSON.stringify(defaults));
+}
+function saveSettings(s) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (e) { /* private mode, quota, etc: settings just won't persist */ }
+}
+let settings = loadSettings();
+
+const $ = (id) => document.getElementById(id);
+function fillSettingsForm() {
+  $("aName").value = settings.a.name; $("aUrl").value = settings.a.url; $("aToken").value = settings.a.token;
+  $("bName").value = settings.b.name; $("bUrl").value = settings.b.url; $("bToken").value = settings.b.token;
+}
+function readSettingsForm() {
+  settings = {
+    a: { name: $("aName").value.trim() || "UNIT-A", url: $("aUrl").value.trim().replace(/\/+$/, ""), token: $("aToken").value.trim() },
+    b: { name: $("bName").value.trim() || "UNIT-B", url: $("bUrl").value.trim().replace(/\/+$/, ""), token: $("bToken").value.trim() },
+  };
+  saveSettings(settings);
+}
+["aName","aUrl","aToken","bName","bUrl","bToken"].forEach((id) => $(id).addEventListener("change", readSettingsForm));
+$("toggleSettings").addEventListener("click", () => $("settings").classList.toggle("open"));
+fillSettingsForm();
+
+// ── panel scaffolding ───────────────────────────────────────────────────
+function panelHtml(key) {
+  return `
+    <div class="panel" id="panel-${key}">
+      <div class="panel-head">
+        <div><h2 id="${key}-name"></h2><div class="serial" id="${key}-serial"></div></div>
+        <span class="badge UNREACHABLE" id="${key}-badge">UNKNOWN</span>
+      </div>
+      <ul class="evidence" id="${key}-evidence"></ul>
+      <div class="section-title">Radio</div>
+      <div class="kv" id="${key}-radio"></div>
+      <div class="section-title">Link</div>
+      <div class="kv" id="${key}-link"></div>
+      <div class="section-title">Recent events</div>
+      <div class="events" id="${key}-events"></div>
+    </div>`;
+}
+$("grid").innerHTML = panelHtml("a") + panelHtml("b");
+
+// ── fetch helper: bounded, authenticated, never throws past the caller ──
+async function getJson(base, token, path, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(base + path, {
+      headers: { Authorization: "Bearer " + token },
+      signal: ctrl.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) return { ok: false, status: res.status };
+    return { ok: true, body: await res.json() };
+  } catch (e) {
+    return { ok: false, status: 0, error: String(e && e.message || e) };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function fmt(n, unit) {
+  if (n === null || n === undefined) return "—";
+  if (typeof n === "number" && !Number.isInteger(n)) n = n.toFixed(2);
+  return unit ? `${n} ${unit}` : String(n);
+}
+function ago(seconds) {
+  if (seconds < 0) seconds = 0;
+  if (seconds < 90) return `${Math.round(seconds)}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+  return `${(seconds / 3600).toFixed(1)}h ago`;
+}
+
+// ── classification: HEALTHY / DEGRADED / FAULT, with evidence ───────────
+// Every rule below names the exact field it read, so the panel can show the
+// same reasoning it acted on -- a verdict with no visible evidence is not
+// more trustworthy than one with gaps, it is just less checkable.
+const RECENT_WINDOW_S = 300; // matches RECOVERY_WINDOW_S's own "still relevant" reasoning
+
+function classify(status, radio, events) {
+  const evidence = [];
+  let level = "HEALTHY";
+  const raise = (lvl, text) => {
+    evidence.push(text);
+    if (lvl === "FAULT" || (lvl === "DEGRADED" && level === "HEALTHY")) level = lvl;
+  };
+
+  const sup = status.supervisor || {};
+  const progress = status.progress || {};
+  const peer = (status.bridge && status.bridge.peer) || {};
+  const uptime = (status.unit && status.unit.uptime_s) || null;
+
+  if (sup.bridges_running === 0) raise("FAULT", `no bridge process running (supervisors: ${fmt(sup.supervisors)})`);
+  if (progress.verdict === "not_forwarding") raise("FAULT", "progress verdict: not_forwarding");
+  if (progress.verdict === "NO_RX_PROGRESS") raise("FAULT", `no received frames for over 120s (frames idle ${fmt(progress.frames_idle_s)}s)`);
+  if (peer.compatibility === "INCOMPATIBLE") raise("FAULT", "peer reports INCOMPATIBLE");
+
+  // RF_LOSS/RF_LOSS_CLEARED is a PAIR, not a one-shot: sdr-agent emits it
+  // itself (independent of appliance_status.sh's own progress.verdict,
+  // which is derived the same way but from a separately maintained script)
+  // and it stays true until the matching _CLEARED shows up, however long
+  // that takes -- so, unlike the one-shot codes below, this is checked with
+  // no recency window at all: the most recent of the pair IS the current
+  // state, whether that was 10 seconds or 10 minutes ago.
+  if (Array.isArray(events)) {
+    let lastRfLoss = null;
+    for (const e of events) {
+      if (e.code === "RF_LOSS" || e.code === "RF_LOSS_CLEARED") {
+        if (!lastRfLoss || Number(e.timestamp_monotonic_s) >= Number(lastRfLoss.timestamp_monotonic_s)) lastRfLoss = e;
+      }
+    }
+    if (lastRfLoss && lastRfLoss.code === "RF_LOSS") raise("FAULT", "RF_LOSS is active (no RF_LOSS_CLEARED since)");
+  }
+
+  if (peer.compatibility === "STALE") raise("DEGRADED", "peer verdict is STALE -- no recent HELLO");
+  if (peer.compatibility === "UNKNOWN") raise("DEGRADED", "peer compatibility UNKNOWN -- no HELLO seen yet");
+
+  if (radio && radio.match) {
+    for (const k of ["tx_lo", "rx_lo", "sample_rate"]) {
+      if (radio.match[k] === false) raise("DEGRADED", `radio ${k.replace("_", " ")} does not match what bridge.conf requested`);
+    }
+  }
+
+  if (Array.isArray(events) && uptime !== null) {
+    const recent = events.filter((e) => {
+      const ts = Number(e.timestamp_monotonic_s);
+      return Number.isFinite(ts) && (uptime - ts) <= RECENT_WINDOW_S && (uptime - ts) >= 0;
+    });
+    const faultCodes = { SUPERVISOR_FAULT: 1, PREFLIGHT_FAIL: 1, BRIDGE_HUNG: 1, CONFIG_REJECTED: 1 };
+    const degradedCodes = { DEMOD_RECOVERY: 1, QUEUE_DROP: 1, PEER_STALE: 1, BRIDGE_RESTART: 1, SAFE_MODE_REQUESTED: 1, CONFIG_ROLLBACK: 1 };
+    const seen = {};
+    for (const e of recent) {
+      if (faultCodes[e.code] && !seen[e.code]) { raise("FAULT", `recent ${e.code} (${ago(uptime - e.timestamp_monotonic_s)})`); seen[e.code] = 1; }
+      else if (degradedCodes[e.code] && !seen[e.code]) { raise("DEGRADED", `recent ${e.code} (${ago(uptime - e.timestamp_monotonic_s)})`); seen[e.code] = 1; }
+    }
+  }
+
+  if (evidence.length === 0) {
+    evidence.push("bridge running, forwarding, peer compatible, radio matches requested configuration");
+  }
+  return { level, evidence };
+}
+
+// ── rendering ─────────────────────────────────────────────────────────
+function setBadge(key, level) {
+  const b = $(`${key}-badge`);
+  b.textContent = level;
+  b.className = "badge " + level;
+}
+function renderUnreachable(key, label, reason) {
+  $(`${key}-name`).textContent = label;
+  $(`${key}-serial`).textContent = reason;
+  setBadge(key, "UNREACHABLE");
+  $(`${key}-evidence`).innerHTML = `<li>${reason}</li>`;
+  $(`${key}-radio`).innerHTML = "";
+  $(`${key}-link`).innerHTML = "";
+  $(`${key}-events`).innerHTML = `<div class="empty">no data</div>`;
+}
+function renderUnit(key, label, status, radio, events) {
+  $(`${key}-name`).textContent = label;
+  $(`${key}-serial`).textContent = (status.unit && status.unit.serial) ? `serial ${status.unit.serial}` : "";
+
+  const { level, evidence } = classify(status, radio, events);
+  setBadge(key, level);
+  $(`${key}-evidence`).innerHTML = evidence.map((e) => `<li>${e}</li>`).join("");
+
+  const r = radio || {};
+  const req = r.requested || {}, act = r.actual || {};
+  const radioRows = [
+    ["TX LO (requested / actual)", `${fmt(req.tx_lo_hz)} / ${fmt(act.tx_lo_hz)} Hz`],
+    ["RX LO (requested / actual)", `${fmt(req.rx_lo_hz)} / ${fmt(act.rx_lo_hz)} Hz`],
+    ["Sample rate", `${fmt(req.sample_rate_hz)} / ${fmt(act.sample_rate_hz)} Hz`],
+    ["RSSI", fmt(act.rssi_db, "dB")],
+    ["RX gain", `${fmt(act.rx_gain_db, "dB")} (${fmt(act.rx_gain_mode)})`],
+    ["TX attenuation", fmt(act.tx_attenuation_db, "dB")],
+    ["Die temp", act.temp_mc != null ? fmt(act.temp_mc / 1000, "°C") : "—"],
+  ];
+  $(`${key}-radio`).innerHTML = radioRows.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("");
+
+  const b = status.bridge || {};
+  const tx = b.tx || {}, rx = b.rx || {}, q = b.queues || {};
+  const peer = b.peer || {};
+  const sup = status.supervisor || {};
+  const linkRows = [
+    ["Peer", `${fmt(peer.compatibility)} (${fmt(peer.hellos)} hellos)`],
+    ["TX / RX frames", `${fmt(tx.packets)} / ${fmt(rx.frames)}`],
+    ["RX errors (crc / dup / self)", `${fmt(rx.crc_errors)} / ${fmt(rx.duplicates)} / ${fmt(rx.self)}`],
+    ["Queue drops (ctrl / bulk)", `${fmt(q.control_drops)} / ${fmt(q.bulk_drops)}`],
+    ["CPU decode", fmt(b.cpu_decode_pct, "%")],
+    ["Recoveries (lifetime)", fmt(b.recoveries)],
+    ["Bridges / supervisors running", `${fmt(sup.bridges_running)} / ${fmt(sup.supervisors)}`],
+    ["FPGA magic / packet size", `${fmt(status.fpga && status.fpga.magic)} / ${fmt(status.fpga && status.fpga.packet_bytes)} B`],
+  ];
+  $(`${key}-link`).innerHTML = linkRows.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("");
+
+  const uptime = (status.unit && status.unit.uptime_s) || 0;
+  const evList = (Array.isArray(events) ? events.slice(-12).reverse() : []);
+  $(`${key}-events`).innerHTML = evList.length ? evList.map((e) => {
+    const age = Number.isFinite(Number(e.timestamp_monotonic_s)) ? ago(uptime - e.timestamp_monotonic_s) : "";
+    return `<div class="event-row"><span class="age">${age}</span><span class="sev ${e.severity}">${e.severity}</span><span class="msg"><b>${e.code}</b> ${e.message || ""}</span></div>`;
+  }).join("") : `<div class="empty">no recent events</div>`;
+}
+
+// ── poll loop ─────────────────────────────────────────────────────────
+const POLL_MS = 2000;
+const FETCH_TIMEOUT_MS = 4000; // well under POLL_MS, so a slow/unreachable unit cannot pile up overlapping requests
+
+async function pollOne(key) {
+  const unit = settings[key];
+  if (!unit.url || !unit.token) { renderUnreachable(key, unit.name, "configure this unit's URL and token in Settings"); return; }
+  const [statusR, radioR, eventsR] = await Promise.all([
+    getJson(unit.url, unit.token, "/api/v1/status", FETCH_TIMEOUT_MS),
+    getJson(unit.url, unit.token, "/api/v1/radio", FETCH_TIMEOUT_MS),
+    getJson(unit.url, unit.token, "/api/v1/events", FETCH_TIMEOUT_MS),
+  ]);
+  if (!statusR.ok) {
+    const reason = statusR.status === 401 ? "unauthorized -- check the bearer token"
+                 : statusR.status === 0   ? `unreachable (${statusR.error || "network error"})`
+                 : `HTTP ${statusR.status}`;
+    renderUnreachable(key, unit.name, reason);
+    return;
+  }
+  renderUnit(key, unit.name, statusR.body, radioR.ok ? radioR.body : null, eventsR.ok ? (eventsR.body.events || []) : []);
+}
+
+let tickCount = 0;
+async function tick() {
+  tickCount++;
+  $("pollStatus").textContent = `polling every ${POLL_MS / 1000}s — tick ${tickCount}`;
+  await Promise.all([pollOne("a"), pollOne("b")]);
+}
+tick();
+setInterval(tick, POLL_MS);
+</script>

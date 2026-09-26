@@ -64,7 +64,29 @@ curl -sS --fail --max-time 5 -H "Authorization: Bearer $TOKEN" "$API/api/v1/radi
 `match.tx_lo`, `match.rx_lo`, `match.sample_rate` must all be `true`;
 `actual.tx_lo_powerdown` must be `0`; `actual.ensm_mode` must be `fdd`.
 Single sections are also available: `/api/v1/fpga`, `/peer`, `/queues`,
-`/supervisor`, `/ethernet`, `/progress`, `/modem`, `/config`.
+`/probe`, `/supervisor`, `/ethernet`, `/progress`, `/modem`, `/config`.
+
+## End-to-end active health probe
+
+Everything else here is configuration or a passive counter. This is the
+one number that comes from actually sending something through the real RF
+path right now and timing the echo back:
+
+```bash
+curl -sS --fail --max-time 5 -H "Authorization: Bearer $TOKEN" "$API/api/v1/probe" | python3 -m json.tool
+```
+
+```json
+{"sent":842,"delivered":839,"lost":3,
+ "rtt_us":{"p50":14200,"p95":38900,"p99":51000,"max":58300,"samples":200}}
+```
+
+RTT, not one-way latency: the request carries the sender's OWN timestamp,
+the peer echoes it back unmodified, and RTT is computed against that same
+local clock -- no clock sync between the two units needed. Runs on its own
+(`PROBE_INTERVAL_S` in `bridge.conf`, bridge default 5s, 0 disables) with no
+separate command to trigger it; this just reads what `sdr_bridge` is
+already measuring.
 
 ## Full appliance status
 
@@ -151,14 +173,35 @@ PEER_INCOMPATIBLE
 PEER_STALE
 DEMOD_RECOVERY
 PREFLIGHT_FAIL
-CONFIG_REJECTED
-BRIDGE_START        first bridge start in a restart window -- ordinary, at boot
-BRIDGE_RESTART      the supervisor bringing it back up after a crash or hang
+CONFIG_REJECTED       the config ON DISK failed appliance_start.sh's own preflight -- not forwarding
+BRIDGE_START          first bridge start in a restart window -- ordinary, at boot
+BRIDGE_RESTART        the supervisor bringing it back up after a crash or hang
 BRIDGE_HUNG
 SUPERVISOR_FAULT
-RF_LOSS             rx.frames stalled for over 120s; RF_LOSS_CLEARED once it resumes
-QUEUE_DROP          a control- or bulk-queue frame was dropped
+RF_LOSS               rx.frames stalled for over 120s; RF_LOSS_CLEARED once it resumes
+QUEUE_DROP            a control- or bulk-queue frame was dropped
 ```
+
+The five control actions and the config-apply workflow each log their own
+invocation, distinct from the above (all under `subsystem: "control"` except
+where noted):
+
+```text
+BRIDGE_RESTART_REQUESTED     restart_bridge was called
+COUNTERS_CLEARED             clear_counters was called
+DEMOD_RESET_REQUESTED        reset_demod was called
+SAFE_MODE_REQUESTED          enter_safe_mode was called
+APPLIANCE_REBOOT_REQUESTED   restart_appliance was called
+CANDIDATE_REJECTED           a POSTed candidate config failed validation -- nothing was touched
+CONFIG_APPLIED                a validated candidate was installed and the appliance is restarting
+CONFIG_ROLLBACK               an applied config did not verify; the previous one was restored
+```
+
+`CANDIDATE_REJECTED` is deliberately a different code from `CONFIG_REJECTED`
+above: one is a harmless, expected outcome of proposing a bad candidate (the
+live config is never touched), the other means the appliance itself is not
+forwarding. Conflating them would make a routine rejection indistinguishable
+from a real fault.
 
 Most codes are classified out of a line the bridge or supervisor already
 prints. `RF_LOSS` and `QUEUE_DROP` are the two exceptions -- nothing prints a
@@ -331,6 +374,24 @@ config that never verifies is rolled back to the one backup this same
 request made, and `CONFIG_APPLIED`/`CONFIG_ROLLBACK` are logged as
 structured events either way -- check `/api/v1/events` if the connection
 itself gets interrupted by the restart it triggered.
+
+## Web dashboard
+
+UNIT-A / UNIT-B side by side, with a HEALTHY/DEGRADED/FAULT badge and the
+evidence behind it. One static file, nothing to build:
+
+```bash
+cd web && python3 -m http.server 8000
+# open http://127.0.0.1:8000/dashboard.html, then use Settings to enter
+# each unit's URL and token (kept in this browser's local storage only)
+```
+
+Read-only -- it shows evidence, it does not expose restart/clear/config-apply.
+Polls `/api/v1/status`, `/api/v1/radio` and `/api/v1/events` every 2 s per
+unit; a unit that's unreachable or 401s shows `UNREACHABLE`, distinct from
+`FAULT` (that's the appliance telling you it's broken; this is the page not
+knowing). See `docs/diagnostics-api.md`'s "Web dashboard" section for the
+exact HEALTHY/DEGRADED/FAULT rules.
 
 ## Test authentication without exposing the token
 

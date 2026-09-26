@@ -27,11 +27,13 @@
 #include <mutex>
 #include "sdr/bridge/LoopGuard.hpp"
 #include "sdr/bridge/TrafficClass.hpp"
+#include "sdr/bridge/HealthProbe.hpp"
 #include "sdr/bridge/PeerHandshake.hpp"
 #include "sdr/framing/PacketReader.hpp"
 #include "sdr/framing/Frame.hpp"
 #include "sdr/framing/DmaBlockAggregator.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -122,6 +124,13 @@ struct Opts {
     bool        forward = false;
     std::string route;                 // network behind the peer, via the radio
     int         stats_s = 5;
+    // Active health probe: an echoed request through the real RF path, timed
+    // on the sender's own clock alone (see HealthProbe.hpp -- no cross-unit
+    // clock sync needed for an RTT). Same cadence family as --stats; 0
+    // disables it. On by default: it only ever substitutes for an otherwise
+    // identical-size HELLO filler frame that idle airtime is already
+    // spending, so there is no meaningful new airtime cost to turning it on.
+    int         probe_interval_s = 5;
 };
 
 void usage() {
@@ -155,7 +164,12 @@ void usage() {
       "  --batch-us N     TX aggregation window in microseconds (default 3000)\n"
       "  --route CIDR     a network behind the peer, routed over the radio\n"
       "  --forward        enable IPv4 forwarding (eth0 <-> radio)\n"
-      "  --stats N        statistics interval in seconds, 0 disables\n");
+      "  --stats N        statistics interval in seconds, 0 disables\n"
+      "  --probe-interval-s N  active end-to-end health probe cadence in\n"
+      "                   seconds, 0 disables (default 5). An echoed request\n"
+      "                   through the real RF path, timed on this unit's own\n"
+      "                   clock alone; reported as rtt_us p50/p95/p99/max and\n"
+      "                   a delivery ratio in bridge_stats.json\n");
 }
 
 // The IIO device indices are not stable -- they depend on which drivers probed,
@@ -902,6 +916,13 @@ struct Stats {
     std::atomic<uint64_t> tx_padding{0}, tx_full_flush{0}, tx_timeout_flush{0};
     std::atomic<uint64_t> rx_rejected{0}, rx_tun_err{0};
 
+    // Active health probe (HealthProbe.hpp). RTT samples themselves are not
+    // atomics -- a rolling window needs a container -- so they live in
+    // g_probe_rtt_us below, guarded by g_probe_mx; these three counts are
+    // pure reporting and fit the same lock-free pattern as everything else
+    // here.
+    std::atomic<uint64_t> probe_sent{0}, probe_delivered{0}, probe_lost{0};
+
     // Zero the REPORTING counters an operator means by "clear counters" --
     // deliberately NOT every field, and NOT a single whole-struct reset.
     //
@@ -941,6 +962,11 @@ struct Stats {
         tx_blocks = 0; tx_data_blocks = 0; tx_dma_bytes = 0;
         tx_padding = 0; tx_full_flush = 0; tx_timeout_flush = 0;
         rx_rejected = 0; rx_tun_err = 0;
+        // probe_sent/delivered/lost deliberately ARE cleared here (unlike
+        // rx_dma/rx_frames/recoveries above): nothing derives a decision
+        // from their absolute value, only from RTT samples riding alongside
+        // them in g_probe_rtt_us, which this method does not touch.
+        probe_sent = 0; probe_delivered = 0; probe_lost = 0;
     }
 };
 Stats g_stats;
@@ -990,6 +1016,118 @@ static sdr::PeerIdentity g_me;                 // filled at start-up
 static std::string       g_peer_reasons;       // why the peer is incompatible
 static std::mutex        g_peer_mx;
 static std::mutex     g_loop_mx;
+
+// ── Active health probe state ───────────────────────────────────────────
+// One mutex covers all of it: probes are low-rate by design (a handful of
+// seconds apart), so this is never on a hot path and a single lock keeps
+// the bookkeeping easy to reason about, unlike the per-frame counters above
+// which are lock-free atomics for exactly the opposite reason.
+static std::mutex     g_probe_mx;
+static uint32_t       g_probe_next_seq = 0;
+static uint64_t       g_probe_last_sent_us = 0;
+// Requests THIS unit sent and has not yet seen a reply for. A deque, not a
+// map: outstanding count is always small (one in flight is the common
+// case), so a linear scan to find a matching seq costs nothing measurable,
+// and bounding it below is simpler than bounding a map.
+struct OutstandingProbe { uint32_t seq; uint64_t send_time_us; };
+static std::deque<OutstandingProbe> g_probe_outstanding;
+static constexpr std::size_t MAX_OUTSTANDING_PROBES = 8;
+// Timeout for an outstanding probe with no reply. Generous relative to the
+// probe interval itself (never less than 3x it, floor 3s) so a single slow
+// or lightly-delayed round trip is not misreported as loss.
+static constexpr uint64_t PROBE_TIMEOUT_US = 5'000'000;
+// Replies THIS unit owes, from requests it received. Bounded for the same
+// reason as g_probe_outstanding -- a peer that somehow floods requests must
+// not grow this without limit; a full queue just drops the oldest owed
+// reply rather than blocking anything on the hot receive path.
+static std::deque<sdr::ProbeMessage> g_probe_pending_replies;
+static constexpr std::size_t MAX_PENDING_REPLIES = 8;
+// Rolling window of recent successful RTTs, microseconds. Bounded, not
+// time-windowed: a fixed sample count is simpler and, at one probe every
+// few seconds, still covers a long enough span to be meaningful (200
+// samples at the default 5s interval is ~17 minutes).
+static std::deque<uint64_t> g_probe_rtt_us;
+static constexpr std::size_t MAX_PROBE_SAMPLES = 200;
+
+static uint64_t nowMonotonicUs() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Drop outstanding requests older than PROBE_TIMEOUT_US and count each as
+// lost. Called with g_probe_mx already held.
+static void sweepStaleProbesLocked(uint64_t now_us) {
+    while (!g_probe_outstanding.empty() &&
+           now_us - g_probe_outstanding.front().send_time_us > PROBE_TIMEOUT_US) {
+        g_probe_outstanding.pop_front();
+        g_stats.probe_lost.fetch_add(1);
+    }
+}
+
+// What the next idle control-filler frame should carry, in priority order:
+// (1) a reply this unit owes -- sent promptly, ahead of routine keepalive
+// traffic, because queueing it behind anything else directly inflates the
+// ORIGINATOR's measured RTT by however long this side made it wait; (2) a
+// newly originated request, at most once per --probe-interval-s; (3) the
+// ordinary HELLO keepalive otherwise. When probing is disabled
+// (probe_interval_s <= 0) this always falls through to (3), byte-identical
+// to the bridge's behavior before this existed.
+static std::vector<uint8_t> nextControlPayload(const Opts& o) {
+    {
+        std::lock_guard<std::mutex> lk(g_probe_mx);
+        if (!g_probe_pending_replies.empty()) {
+            sdr::ProbeMessage m = g_probe_pending_replies.front();
+            g_probe_pending_replies.pop_front();
+            return sdr::encodeProbe(sdr::PROBE_REPLY_MAGIC, m);
+        }
+    }
+    if (o.probe_interval_s > 0) {
+        const uint64_t interval_us = (uint64_t)o.probe_interval_s * 1'000'000;
+        const uint64_t now = nowMonotonicUs();
+        std::lock_guard<std::mutex> lk(g_probe_mx);
+        if (now - g_probe_last_sent_us >= interval_us) {
+            g_probe_last_sent_us = now;
+            sweepStaleProbesLocked(now);
+            sdr::ProbeMessage m;
+            m.seq = g_probe_next_seq++;
+            m.send_time_us = now;
+            if (g_probe_outstanding.size() >= MAX_OUTSTANDING_PROBES) g_probe_outstanding.pop_front();
+            g_probe_outstanding.push_back({m.seq, now});
+            g_stats.probe_sent.fetch_add(1);
+            return sdr::encodeProbe(sdr::PROBE_REQUEST_MAGIC, m);
+        }
+    }
+    return sdr::encodeHello(g_me);
+}
+
+// A reply arrived: find the matching outstanding request, record its RTT,
+// and count it delivered. A seq with no match is a duplicate or a reply
+// that already timed out and was swept -- silently ignored, since it is
+// neither new information nor an error.
+static void onProbeReply(const sdr::ProbeMessage& reply) {
+    const uint64_t now = nowMonotonicUs();
+    std::lock_guard<std::mutex> lk(g_probe_mx);
+    for (auto it = g_probe_outstanding.begin(); it != g_probe_outstanding.end(); ++it) {
+        if (it->seq == reply.seq) {
+            const uint64_t rtt_us = now - it->send_time_us;
+            g_probe_outstanding.erase(it);
+            g_stats.probe_delivered.fetch_add(1);
+            if (g_probe_rtt_us.size() >= MAX_PROBE_SAMPLES) g_probe_rtt_us.pop_front();
+            g_probe_rtt_us.push_back(rtt_us);
+            return;
+        }
+    }
+}
+
+// Exact percentile off a small, bounded, already-in-memory sample set: a
+// copy-and-sort costs nothing measurable at this scale (<= MAX_PROBE_SAMPLES
+// elements, computed only once per --stats tick, never per-frame), so there
+// is no reason to reach for a streaming approximation.
+static uint64_t percentile(std::vector<uint64_t>& sorted, double p) {
+    if (sorted.empty()) return 0;
+    std::size_t idx = (std::size_t)(p * (double)(sorted.size() - 1));
+    return sorted[idx];
+}
 
 static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o) {
     // REAL-TIME PRIORITY, when asked for.
@@ -1084,15 +1222,17 @@ static void txLoop(int tun_fd, int tx_fd, DirectIioTx* direct_tx, const Opts& o)
 
     auto controlBlock = [&]() {
         std::vector<CompletedDmaBlock> blocks;
-        // The keepalive carries our IDENTITY rather than sixteen zero bytes.
-        // It is already transmitted continuously to hold the demodulator's
-        // timing loop, so the handshake costs no new protocol and no extra
-        // airtime. A peer that never hears one learns nothing, which is why the
+        // The keepalive carries our IDENTITY rather than sixteen zero bytes,
+        // and -- via nextControlPayload() -- occasionally an active health
+        // probe request or an owed reply instead. All of it is already
+        // transmitted continuously to hold the demodulator's timing loop, so
+        // none of this costs new protocol or extra airtime: it only ever
+        // substitutes for a filler frame idle airtime was already spending.
+        // A peer that never hears a HELLO learns nothing, which is why the
         // verdict starts UNKNOWN and is never assumed compatible.
-        const std::vector<uint8_t> hello = sdr::encodeHello(g_me);
-        const uint8_t* ka = hello.data();
         while (blocks.empty()) {
-            auto wire = encode(ka, hello.size(), FL_CTRL);
+            auto payload = nextControlPayload(o);
+            auto wire = encode(payload.data(), payload.size(), FL_CTRL);
             if (!agg.addFrame(wire, 0, false, blocks)) return false;
             g_stats.tx_idle.fetch_add(1);
         }
@@ -1365,6 +1505,24 @@ static void rxLoop(int tun_fd, int rx_fd, DirectIioRx* direct_rx, const Opts& o)
                                          pid.node_id);
                     }
                 }
+                // Not a HELLO (rejected on size/magic/version above): try the
+                // active health probe next. The two never collide -- see
+                // HealthProbe.hpp -- so trying both unconditionally on every
+                // FL_CTRL frame is simplest and costs nothing measurable at
+                // this rate.
+                sdr::ProbeMessage pm;
+                sdr::ProbeKind pk = sdr::decodeProbe(f.payload.data(), f.payload.size(), pm);
+                if (pk == sdr::ProbeKind::REQUEST) {
+                    // Echo it back verbatim (same seq, same sender timestamp
+                    // untouched) -- this unit's own clock never enters the
+                    // exchange at all, which is the whole reason no time sync
+                    // is needed for the sender's RTT to be meaningful.
+                    std::lock_guard<std::mutex> lk(g_probe_mx);
+                    if (g_probe_pending_replies.size() >= MAX_PENDING_REPLIES) g_probe_pending_replies.pop_front();
+                    g_probe_pending_replies.push_back(pm);
+                } else if (pk == sdr::ProbeKind::REPLY) {
+                    onProbeReply(pm);
+                }
                 continue;
             }
             if (f.payload.empty()) continue;
@@ -1448,6 +1606,7 @@ int main(int argc, char** argv) {
         else if (a == "--raw-eth") { o.iface = next("--raw-eth"); o.raw_eth = true; }
         else if (a == "--forward") o.forward = true;
         else if (a == "--stats")   o.stats_s = std::atoi(next("--stats").c_str());
+        else if (a == "--probe-interval-s") o.probe_interval_s = std::atoi(next("--probe-interval-s").c_str());
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); usage(); return 2; }
     }
@@ -1670,6 +1829,11 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
         std::this_thread::sleep_for(std::chrono::seconds(o.stats_s));
         if (g_clear_counters_requested.exchange(false)) {
             g_stats.clearReportingCounters();
+            // probe_sent/delivered/lost live in Stats and are cleared above;
+            // the RTT samples backing their percentiles live in this
+            // separate, mutex-guarded window and would otherwise keep
+            // reporting stale percentiles next to freshly-zeroed counts.
+            { std::lock_guard<std::mutex> lk(g_probe_mx); g_probe_rtt_us.clear(); }
             std::fprintf(stderr, "bridge: reporting counters cleared on request\n");
         }
         {
@@ -1844,6 +2008,24 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
         //
         // Written to a temp and renamed, so a reader never sees a half-written
         // file.
+        // Active health probe percentiles: an exact sort-based percentile
+        // over the current rolling window, computed once per tick here --
+        // never per-frame -- since the window is small and this is the only
+        // place anything reads it.
+        uint64_t probe_p50 = 0, probe_p95 = 0, probe_p99 = 0, probe_max = 0;
+        std::size_t probe_samples = 0;
+        {
+            std::vector<uint64_t> rtts;
+            { std::lock_guard<std::mutex> lk(g_probe_mx); rtts.assign(g_probe_rtt_us.begin(), g_probe_rtt_us.end()); }
+            probe_samples = rtts.size();
+            if (!rtts.empty()) {
+                std::sort(rtts.begin(), rtts.end());
+                probe_p50 = percentile(rtts, 0.50);
+                probe_p95 = percentile(rtts, 0.95);
+                probe_p99 = percentile(rtts, 0.99);
+                probe_max = rtts.back();
+            }
+        }
         {
             std::string peer_reasons_escaped;
             {
@@ -1868,7 +2050,9 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
                     "\"control_drops\":%llu,\"bulk_drops\":%llu,\"drain_ms\":%llu},"
                     "\"loop_guard\":{\"suppressed\":%llu,\"local_copies\":%llu,\"to_self\":%llu,\"from_self\":%llu},"
                     "\"recoveries\":%llu,\"cpu_decode_pct\":%.1f,"
-                    "\"peer\":{\"compatibility\":\"%s\",\"hellos\":%llu,\"reasons\":\"%s\"}}\n",
+                    "\"peer\":{\"compatibility\":\"%s\",\"hellos\":%llu,\"reasons\":\"%s\"},"
+                    "\"probe\":{\"sent\":%llu,\"delivered\":%llu,\"lost\":%llu,"
+                    "\"rtt_us\":{\"p50\":%llu,\"p95\":%llu,\"p99\":%llu,\"max\":%llu,\"samples\":%llu}}}\n",
                     o.iface.c_str(), o.node_id,
                     (unsigned long long)g_stats.tx_pkts.load(),
                     (unsigned long long)g_stats.tx_bytes.load(),
@@ -1898,7 +2082,15 @@ std::thread tx(txLoop, tun_fd, tx_fd, direct_tx.get(), std::cref(o));
                     busy_win,
                     peer_state,
                     (unsigned long long)g_stats.peer_hellos.load(),
-                    peer_reasons_escaped.c_str());
+                    peer_reasons_escaped.c_str(),
+                    (unsigned long long)g_stats.probe_sent.load(),
+                    (unsigned long long)g_stats.probe_delivered.load(),
+                    (unsigned long long)g_stats.probe_lost.load(),
+                    (unsigned long long)probe_p50,
+                    (unsigned long long)probe_p95,
+                    (unsigned long long)probe_p99,
+                    (unsigned long long)probe_max,
+                    (unsigned long long)probe_samples);
                 std::fclose(jf);
                 ::rename(tmpp, path);
             }

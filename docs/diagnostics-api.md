@@ -22,7 +22,7 @@ All endpoints require `Authorization: Bearer <token>`.
 | `GET /api/v1/radio` | Requested (`bridge.conf`) **and** actual (AD9363 IIO sysfs) RF configuration, side by side, with a `match` verdict |
 | `GET /api/v1/metrics` | `/tmp/bridge_stats.json` |
 | `GET /metrics`, `/api/v1/bridge` | Aliases of `/api/v1/metrics` |
-| `GET /api/v1/peer`, `/queues` | That top-level section of the bridge metrics |
+| `GET /api/v1/peer`, `/queues`, `/probe` | That top-level section of the bridge metrics |
 | `GET /api/v1/events` | Bounded selection of important appliance events |
 | `GET /api/v1/logs` | Last 64 KiB of the appliance log |
 | `GET /api/v1/diagnostic-bundle` | Status, metrics, radio, events, and recent log in one bounded JSON document (`bundle_version` 2) |
@@ -60,6 +60,36 @@ bandwidths, `ensm_mode`, TX attenuation, TX LO powerdown, RX gain mode and
 gain, RSSI, die temperature). `match` compares LOs and sample rate within
 `tolerance_hz`, because the PLL quantises (444000000 requested reads back
 443999998).
+
+### `/api/v1/probe`: an active end-to-end health probe
+
+Every other number in this API is either configuration or a passive
+counter -- inferred from what already crossed the link, not a direct
+measurement of whether a NEW packet would get through right now.
+`/api/v1/probe` is the roadmap's exception: `sdr_bridge` itself sends a
+small request through the real RF path at a low, steady rate
+(`PROBE_INTERVAL_S` in `bridge.conf`, bridge default 5 s if absent, 0
+disables it) and the peer echoes it straight back, riding the same
+`FL_CTRL` channel HELLO already uses -- no new protocol, no meaningful new
+airtime, since it only ever substitutes for a filler frame idle airtime was
+already spending.
+
+```json
+{"sent":842,"delivered":839,"lost":3,
+ "rtt_us":{"p50":14200,"p95":38900,"p99":51000,"max":58300,"samples":200}}
+```
+
+`rtt_us` is an exact percentile (sort-and-index, not an approximation) over
+a bounded rolling window (200 samples -- roughly 17 minutes at the default
+5 s cadence). No clock synchronization between the two units is needed for
+this to be meaningful: the request carries a timestamp on the SENDER's own
+clock, the reply echoes it back completely unmodified, and RTT is computed
+entirely against that same local clock. This is why it is round-trip time
+and not one-way delivery latency -- one-way needs the two clocks to agree,
+which nothing in this project establishes yet (that is its own future
+roadmap item, time synchronization). `lost` counts requests that got no
+reply within a bounded timeout, not a percentile -- delivery is inherently
+pass/fail per probe, only RTT is a distribution.
 
 ### `/api/v1/stream`: live telemetry
 
@@ -240,9 +270,12 @@ already passed:
 1. **Validate.** The candidate is written to `bridge.conf.candidate` --
    never the live file -- and `config_schema.sh validate` is exec'd directly
    against it (never through a shell). A candidate that fails is deleted; a
-   `CONFIG_REJECTED` event is logged; the response carries the validator's
-   own error text verbatim (`validation_output`) and `bridge.conf` was never
-   touched.
+   `CANDIDATE_REJECTED` event is logged (`warning`, not the `error`-severity
+   `CONFIG_REJECTED` classify() already uses for appliance_start.sh's own
+   startup preflight failing on the config actually on disk -- a rejected
+   candidate never touched anything running, which is a very different
+   situation); the response carries the validator's own error text verbatim
+   (`validation_output`) and `bridge.conf` was never touched.
 2. **Apply.** A validated candidate is only NOW backed up (the config
    currently in effect is copied to `bridge.conf.prev`) and installed with
    the same atomic rename `config_schema.sh`'s own `write` command uses,
@@ -382,6 +415,75 @@ is one more `.sh` under `fpga/scripts/`, and `build-release.sh` already
 copies every one of those into the release bundle's supporting-tools, which
 `flash.sh` already installs whole to `/mnt/jffs2/tools/`. `sdr-agent`'s
 default `--demod-reset-script` points there.
+
+## Web dashboard
+
+`web/dashboard.html` is UNIT-A and UNIT-B side by side, each with a
+HEALTHY / DEGRADED / FAULT badge and the specific evidence behind it -- not
+just the label. A single static file, no build step and no dependency:
+open it directly from disk, or serve it with anything
+(`python3 -m http.server`, from the `web/` directory). It talks to each
+unit's `sdr-agent` directly, the same trusted USB management network every
+other tool in this document uses, with a bearer token entered once per unit
+and kept in the browser's own local storage (never sent anywhere but that
+unit's URL).
+
+It polls three already-cheap endpoints per unit every 2 s --
+`/api/v1/status`, `/api/v1/radio`, `/api/v1/events` -- rather than
+`/api/v1/diagnostic-bundle` or `/api/v1/stream`: the bundle embeds the full
+64 KiB log ring and is sized for one on-demand pull, not a poll loop, and a
+browser's native `EventSource` cannot set the `Authorization` header this
+API requires on every route including the stream. Consuming the stream via
+`fetch()` + manual SSE framing would work but is real added complexity for
+a first version.
+
+**The verdict is computed in the page, not by sdr-agent.** The roadmap
+asked for HEALTHY/DEGRADED/FAULT with evidence drawn from several signals
+together (supervisor state, peer compatibility, RF match, recent events) --
+a presentation policy, not a new fact any unit measures. Keeping it
+client-side means it can be tuned without touching firmware on either
+board. The exact rules are in `classify()` in the page's own source, each
+naming the field it reads:
+
+- **FAULT**: no bridge process running; `progress.verdict` is
+  `not_forwarding` or `NO_RX_PROGRESS`; peer compatibility is
+  `INCOMPATIBLE`; or `RF_LOSS` is the more recent of the RF_LOSS/
+  RF_LOSS_CLEARED pair in `/api/v1/events` (checked with NO recency window,
+  since unlike the one-shot codes below, this pair means "still true until
+  the matching `_CLEARED` shows up," however long that takes -- checking it
+  directly here also means the page never disagrees with `sdr-agent`'s own
+  RF_LOSS detection just because a status script did or didn't independently
+  compute the same threshold).
+- **DEGRADED**: peer compatibility is `STALE` or `UNKNOWN`; the radio's
+  `match` has any of `tx_lo`/`rx_lo`/`sample_rate` false; or one of
+  `DEMOD_RECOVERY`, `QUEUE_DROP`, `PEER_STALE`, `BRIDGE_RESTART`,
+  `SAFE_MODE_REQUESTED`, `CONFIG_ROLLBACK` appears in `/api/v1/events`
+  within the last 300 s (matching `RECOVERY_WINDOW_S`'s own "still
+  relevant" reasoning) -- these have no `_CLEARED` counterpart, so recency
+  is what keeps an old, resolved event from reading as still true forever.
+- **UNREACHABLE**: the page's own state, not the appliance's -- a fetch
+  failed, timed out (4 s, well under the 2 s poll interval so a stuck unit
+  cannot pile up overlapping requests), or returned 401. Distinct from
+  FAULT on purpose: "the appliance told us it's broken" and "we don't even
+  know" are different situations and look different on screen.
+
+**Deliberately read-only.** This page shows evidence; it does not expose
+`restart_bridge`, `clear_counters`, config-apply, or any other control
+action. Wiring the control API into a UI is a separate, separately
+reviewable piece of work.
+
+**Why sdr-agent needed CORS support for this to work at all.** A browser
+refuses to expose a cross-origin response to a page's JavaScript unless the
+server opts in, `OPTIONS` preflight included -- and every request here sets
+`Authorization`, which makes it non-simple and always triggers a preflight.
+Every `sdr-agent` response now carries `Access-Control-Allow-Origin: *`,
+and `OPTIONS` is answered immediately, without authentication (a preflight
+carries no credentials; browsers strip `Authorization` from it by design).
+This is safe to leave unrestricted: nothing here is ever supplied
+automatically by a browser the way a cookie would be, so a malicious
+third-party page cannot forge a working authenticated request just by
+getting a victim to load it. The USB management network is already the
+trust boundary this whole API relies on; this does not widen it.
 
 ## Central collection
 

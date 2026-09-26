@@ -17,7 +17,7 @@ chmod 700 "$W/status"
 # "queues" is deliberately ABSENT here (unlike production): the missing-
 # section test further down relies on it being the one section this fixture
 # does not have. The queue-drop event test adds it later, live.
-printf '%s\n' '{"tx":{"packets":7},"peer":{"compatibility":"COMPATIBLE"}}' > "$W/metrics"
+printf '%s\n' '{"tx":{"packets":7},"peer":{"compatibility":"COMPATIBLE"},"probe":{"sent":10,"delivered":9,"lost":1,"rtt_us":{"p50":15000,"p95":42000,"p99":50000,"max":51000,"samples":9}}}' > "$W/metrics"
 cat > "$W/log" <<'EOF'
 1s ordinary line
 2s bridge: PEER_COMPATIBLE (node 2)
@@ -73,6 +73,8 @@ req "http://127.0.0.1:$PORT/api/v1/bridge" | grep -q '"packets":7'
 # Section views: a depth-1 member of the status or metrics document, nothing
 # else. "peer" exists in both documents; /peer must come from the metrics.
 req "http://127.0.0.1:$PORT/api/v1/peer" | grep -q '^{"compatibility":"COMPATIBLE"}$'
+req "http://127.0.0.1:$PORT/api/v1/probe" | grep -q '"delivered":9'
+req "http://127.0.0.1:$PORT/api/v1/probe" | grep -q '"p99":50000'
 req "http://127.0.0.1:$PORT/api/v1/fpga" | grep -q '^{"magic":"0x5344524C"}$'
 code=$(req -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/queues")
 [ "$code" = 503 ] || { echo "missing section did not return 503"; exit 1; }
@@ -207,6 +209,24 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer
 [ "$code" = 405 ] || { echo "write method was not rejected"; exit 1; }
 code=$(req -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/no-such-endpoint")
 [ "$code" = 404 ] || { echo "unknown route was not rejected"; exit 1; }
+
+# CORS: the web dashboard is a browser page, so every real request it makes
+# carries an Authorization header, which makes it "non-simple" and triggers
+# a preflight OPTIONS first -- unanswered, or answered without the right
+# headers, and the browser never even attempts the real GET/POST. Preflight
+# carries no credentials (browsers strip Authorization from it), so it must
+# succeed WITHOUT the token this API otherwise always requires.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X OPTIONS "http://127.0.0.1:$PORT/api/v1/status")
+[ "$code" = 204 ] || { echo "CORS preflight was not answered"; exit 1; }
+preflight=$(curl -sS -D - -o /dev/null -X OPTIONS "http://127.0.0.1:$PORT/api/v1/status")
+echo "$preflight" | grep -qi '^Access-Control-Allow-Origin: \*' || { echo "preflight missing Allow-Origin"; exit 1; }
+echo "$preflight" | grep -qi '^Access-Control-Allow-Methods:.*POST' || { echo "preflight missing Allow-Methods"; exit 1; }
+echo "$preflight" | grep -qi '^Access-Control-Allow-Headers:.*Authorization' || { echo "preflight missing Allow-Headers"; exit 1; }
+# A real (authenticated) response must ALSO carry the header, or the
+# browser still refuses to expose the body to the page's own JavaScript
+# even though the request itself succeeded on the wire.
+real=$(curl -sS -D - -o /dev/null -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/v1/health")
+echo "$real" | grep -qi '^Access-Control-Allow-Origin: \*' || { echo "a real response is missing Allow-Origin"; exit 1; }
 
 # The API owns a 64-KiB RAM ring and bounds the producer's tmpfs log at
 # 256 KiB. This is the negative path: an accidentally noisy producer must not
@@ -655,7 +675,7 @@ grep -q '^NODE_ID=1$' "$W/bridge2.conf.prev" || { echo "the pre-apply config was
 # Events are this PROCESS's in-memory ring, so the rejection and the
 # successful apply must both be checked on this instance, before it exits.
 events=$(req "http://127.0.0.1:$PORT/api/v1/events")
-echo "$events" | grep -q '"code":"CONFIG_REJECTED"' || { echo "an invalid candidate was not logged"; exit 1; }
+echo "$events" | grep -q '"code":"CANDIDATE_REJECTED"' || { echo "an invalid candidate was not logged"; exit 1; }
 echo "$events" | grep -q '"code":"CONFIG_APPLIED"' || { echo "a config apply was not logged"; exit 1; }
 
 pkill -f "$W/sdr_bridge" 2>/dev/null || true

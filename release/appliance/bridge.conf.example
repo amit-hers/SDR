@@ -22,6 +22,11 @@ RX_FREQUENCY=444000000     # THIS unit listens here = the PEER's FREQUENCY
 NODE_ID=1
 DIFF_MODE=1
 STATS_S=30
+# Active end-to-end health probe: an echoed request through the real RF
+# path, reported as delivery ratio and rtt_us p50/p95/p99/max in
+# bridge_stats.json (docs/diagnostics-api.md: GET /api/v1/probe). Optional;
+# the bridge's own default is 5s if this is absent. 0 disables it.
+PROBE_INTERVAL_S=5
 # Radio parameters (schema 2). These were hard-coded in the bring-up scripts;
 # now this file is the only place they are set, and appliance_start.sh reads
 # every one back from the AD9363 before forwarding. Validated ranges:

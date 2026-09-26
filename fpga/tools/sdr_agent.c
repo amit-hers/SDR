@@ -29,7 +29,16 @@
  *     actions to run, or supply the body of a config candidate, never a
  *     command, a path or an argument. There is no sixth control action and
  *     no way to add one from a request;
- *   - every buffer, wait and child process is bounded.
+ *   - every buffer, wait and child process is bounded;
+ *   - every response carries Access-Control-Allow-Origin: *, and OPTIONS is
+ *     answered without authentication, so a browser page (the web
+ *     dashboard) can call this API at all -- a browser refuses to expose
+ *     any cross-origin response to a page's JavaScript otherwise, preflight
+ *     included. Safe to leave unrestricted: nothing here is ever supplied
+ *     automatically by the browser the way a cookie would be, so a
+ *     malicious third-party page cannot forge a working authenticated
+ *     request just by getting a victim to load it. The USB management
+ *     network is already the trust boundary; this does not widen it.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -68,6 +77,18 @@
 // standing rule that a threshold worth padding gets real margin rather than
 // a shave to the edge.
 #define DEMOD_RESET_TIMEOUT_MS (IO_TIMEOUT_MS * 4)
+// appliance_status.sh forks devmem/config_schema.sh/provision.sh and scans
+// the appliance log several times over; measured on real hardware under
+// real long-uptime, high-frame-count load (Phase 8 qualification, task 14)
+// at a consistent 1.6-2.0s -- comfortably past IO_TIMEOUT_MS with zero
+// margin, which reproduced as an intermittent, purely-timing-driven
+// "status unavailable" that had nothing to do with the appliance actually
+// being unavailable. Same standing rule as DEMOD_RESET_TIMEOUT_MS: genuine
+// margin above the measured cost, not a value trimmed to it. The stream
+// (/api/v1/stream) never calls this path -- its own supervisor state comes
+// from a direct /proc scan (supervisor_json) precisely to stay cheap at
+// ~1Hz -- so widening this cannot affect stream cadence.
+#define STATUS_TIMEOUT_MS (IO_TIMEOUT_MS * 4)
 #define SERVICE_VERSION 2
 
 // Live telemetry (SSE). Bounded on every axis: a fixed number of concurrent
@@ -948,7 +969,7 @@ static void auto_bundle_json(const struct options *o, const struct logring *logs
     // document /api/v1/fpga and /api/v1/supervisor already read a section of
     // -- one fork covers both rather than one each.
     struct sb status; sb_init(&status);
-    int status_ok = run_program(o->status_program, MAX_STATUS, &status, IO_TIMEOUT_MS);
+    int status_ok = run_program(o->status_program, MAX_STATUS, &status, STATUS_TIMEOUT_MS);
     const char *v; size_t vn;
     sb_put(out, ",\"fpga\":");
     if (status_ok && json_member(status.p, status.n, "fpga", &v, &vn)) sb_putn(out, v, vn); else sb_put(out, "null");
@@ -1080,9 +1101,18 @@ static void send_all(int fd, const char *p, size_t n) {
 }
 static void reply(int fd, int code, const char *reason, const char *type, const char *body, size_t n) {
     char h[512];
+    // Access-Control-Allow-Origin is safe to send unconditionally here: this
+    // is a browser-only protection, and unlike a cookie-authenticated API,
+    // nothing about this one is ever supplied automatically by the browser
+    // -- the bearer token only ever reaches a request because a page (this
+    // project's own web dashboard, most likely) was explicitly given it, so
+    // a third-party site cannot forge a working request just by getting a
+    // victim's browser to visit it. The USB management network is already
+    // the trust boundary (docs/diagnostics-api.md); this does not widen it.
     int hn = snprintf(h, sizeof h,
         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         code, reason, type, n);
     send_all(fd, h, (size_t)hn); send_all(fd, body, n);
 }
@@ -1106,7 +1136,7 @@ static void reply_section(int fd, const struct sb *src, int src_ok, const char *
 
 static void bundle_json(const struct options *o, const struct logring *logs, struct sb *out) {
     struct sb status, metrics; sb_init(&status); sb_init(&metrics);
-    int status_ok = run_program(o->status_program, MAX_STATUS, &status, IO_TIMEOUT_MS);
+    int status_ok = run_program(o->status_program, MAX_STATUS, &status, STATUS_TIMEOUT_MS);
     int metrics_ok = read_tail(o->metrics_file, MAX_METRICS, &metrics) && !blank(metrics.p ? metrics.p : "", metrics.n);
     char node[24]; json_number_field(metrics_ok ? metrics.p : "", metrics_ok ? metrics.n : 0, "node_id", node, sizeof node);
     sb_put(out, "{\"bundle_version\":2,\"status\":");
@@ -1219,7 +1249,7 @@ static void run_stream_child(int fd, int listen_fd, const struct options *o) {
     static const char hdr[] =
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
         "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
-        "Connection: keep-alive\r\n\r\n";
+        "Access-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n";
     send_all(fd, hdr, sizeof hdr - 1);
     for (int tick = 0; tick < STREAM_MAX_TICKS && running; ++tick) {
         struct sb ev; sb_init(&ev);
@@ -1554,7 +1584,17 @@ static void reply_config_apply(int fd, const struct options *o, const char *quer
     int valid = run_program_ex(o->config_schema_script, argv, MAX_STATUS, &verr, IO_TIMEOUT_MS, 1);
     if (!valid) {
         unlink(candidate);
-        push_synth("warning", "control", "CONFIG_REJECTED", "candidate bridge.conf failed validation");
+        // CANDIDATE_REJECTED, not CONFIG_REJECTED: classify() already uses
+        // that code (severity "error") for appliance_start.sh's own
+        // "CONFIGURATION REJECTED" log line, which means the config
+        // actually on disk failed ITS preflight and the appliance is not
+        // forwarding -- a real fault. This is the opposite: an operator's
+        // PROPOSED candidate failed before touching anything already
+        // running, exactly the safe outcome this endpoint exists to
+        // produce. Reusing one code for both would make a routine,
+        // harmless rejection indistinguishable from an appliance that
+        // is actually down.
+        push_synth("warning", "control", "CANDIDATE_REJECTED", "candidate bridge.conf failed validation");
         struct sb out; sb_init(&out);
         sb_put(&out, "{\"action\":\"apply_config\",\"validated\":false,\"applied\":false,"
                      "\"verified\":false,\"rolled_back\":false,\"validation_output\":");
@@ -1639,6 +1679,23 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
     // ignores it, which just means a stray "?anything" no longer 404s them.
     char *query = strchr(path, '?');
     if (query) *query++ = 0; else query = path + strlen(path);
+    // CORS preflight. A browser sends this itself, automatically, before any
+    // cross-origin request that sets a custom header -- and every real
+    // request here sets Authorization, so any browser-based client (this
+    // project's own web dashboard included) triggers one before every
+    // single call. Answered immediately, before authentication is even
+    // considered: a preflight carries no credentials (browsers strip
+    // Authorization from it by design), so requiring auth on it would make
+    // every browser client permanently unable to reach this API at all.
+    if (!strcmp(method, "OPTIONS")) {
+        static const char pf[] =
+            "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Authorization, Content-Type\r\n"
+            "Access-Control-Max-Age: 600\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        send_all(fd, pf, sizeof pf - 1);
+        return;
+    }
     char auth[600] = ""; char *body_start = hdr_end + 4; long content_length = -1;
     for (char *p = line_end ? line_end + 2 : req + strlen(req); p && *p; ) {
         char *e = strstr(p, "\r\n"); if (e) *e = 0;
@@ -1703,14 +1760,14 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
         reply_json(fd, 200, "OK", body);
     } else if (strcmp(path, "/api/v1/status") == 0) {
         struct sb b; sb_init(&b);
-        if (!run_program(o->status_program, MAX_STATUS, &b, IO_TIMEOUT_MS)) unavailable(fd, "status");
+        if (!run_program(o->status_program, MAX_STATUS, &b, STATUS_TIMEOUT_MS)) unavailable(fd, "status");
         else reply_sb(fd, &b, "application/json");
         sb_free(&b);
     } else if (strcmp(path, "/api/v1/fpga") == 0 || strcmp(path, "/api/v1/ethernet") == 0 ||
                strcmp(path, "/api/v1/supervisor") == 0 || strcmp(path, "/api/v1/modem") == 0 ||
                (is_config_path && !strcmp(method, "GET")) || strcmp(path, "/api/v1/progress") == 0) {
         struct sb b; sb_init(&b);
-        int ok = run_program(o->status_program, MAX_STATUS, &b, IO_TIMEOUT_MS);
+        int ok = run_program(o->status_program, MAX_STATUS, &b, STATUS_TIMEOUT_MS);
         reply_section(fd, &b, ok, path + 8, path + 8);
         sb_free(&b);
     } else if (is_config_path) {   // the remaining case, method already validated above: POST
@@ -1727,7 +1784,8 @@ static void serve(int fd, int listen_fd, const struct options *o, const char *to
         if (!read_tail(o->metrics_file, MAX_METRICS, &b) || blank(b.p ? b.p : "", b.n)) unavailable(fd, "metrics");
         else reply_sb(fd, &b, "application/json");
         sb_free(&b);
-    } else if (strcmp(path, "/api/v1/peer") == 0 || strcmp(path, "/api/v1/queues") == 0) {
+    } else if (strcmp(path, "/api/v1/peer") == 0 || strcmp(path, "/api/v1/queues") == 0 ||
+               strcmp(path, "/api/v1/probe") == 0) {
         struct sb b; sb_init(&b);
         int ok = read_tail(o->metrics_file, MAX_METRICS, &b) && !blank(b.p ? b.p : "", b.n);
         reply_section(fd, &b, ok, path + 8, path + 8);

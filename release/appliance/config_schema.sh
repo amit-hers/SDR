@@ -33,7 +33,7 @@ fail() { echo "CONFIG INVALID: $*" >&2; _err=1; }
 is_known() {
     case "$1" in
         CONFIG_VERSION|MODE|IFACE|SAMPLE_RATE|FREQUENCY|RX_FREQUENCY|DIFF_MODE|\
-        NODE_ID|STATS_S|LOCAL_IP|PEER_IP|TUN_IFACE|BULK_MIN|MAX_RESTARTS|\
+        NODE_ID|STATS_S|PROBE_INTERVAL_S|LOCAL_IP|PEER_IP|TUN_IFACE|BULK_MIN|MAX_RESTARTS|\
         TX_RF_BANDWIDTH|RX_RF_BANDWIDTH|TX_ATTENUATION_DB|RX_GAIN_MODE|RX_GAIN_DB) return 0 ;;
         *) return 1 ;;
     esac
@@ -57,7 +57,7 @@ validate() {
         fail "file does not end with a newline -- it looks truncated (interrupted write?)"
     fi
     MODE=; IFACE=; SAMPLE_RATE=; FREQUENCY=; RX_FREQUENCY=; DIFF_MODE=
-    NODE_ID=; STATS_S=; CONFIG_VERSION=
+    NODE_ID=; STATS_S=; PROBE_INTERVAL_S=; CONFIG_VERSION=
     TX_RF_BANDWIDTH=; RX_RF_BANDWIDTH=; TX_ATTENUATION_DB=; RX_GAIN_MODE=; RX_GAIN_DB=
     ln=0
     while IFS= read -r line; do
@@ -100,6 +100,10 @@ validate() {
     [ -n "${NODE_ID:-}" ] && { in_range "$NODE_ID" 1 4294967295 || fail "NODE_ID '$NODE_ID' must be a number >= 1"; }
     [ -n "${DIFF_MODE:-}" ] && { case "$DIFF_MODE" in 0|1) ;; *) fail "DIFF_MODE '$DIFF_MODE' must be 0 or 1" ;; esac; }
     [ -n "${STATS_S:-}" ] && { in_range "$STATS_S" 1 3600 || fail "STATS_S $STATS_S outside 1..3600"; }
+    # 0 is a valid, meaningful value here (explicitly disable the probe),
+    # unlike STATS_S above -- so the range allows it rather than treating an
+    # explicit 0 as a schema violation.
+    [ -n "${PROBE_INTERVAL_S:-}" ] && { in_range "$PROBE_INTERVAL_S" 0 3600 || fail "PROBE_INTERVAL_S $PROBE_INTERVAL_S outside 0..3600"; }
 
     # Radio parameters. Ranges are the AD9363's: analog RF filter 200 kHz..
     # 20 MHz, TX attenuation 0..89.75 dB in 0.25 dB steps, manual RX gain

@@ -262,6 +262,7 @@ case "$MODE" in
 esac
 [ -n "$PKT_DEC" ] && set -- "$@" --pkt "$PKT_DEC"
 [ -n "${STATS_S:-}" ] && set -- "$@" --stats "$STATS_S"
+[ -n "${PROBE_INTERVAL_S:-}" ] && set -- "$@" --probe-interval-s "$PROBE_INTERVAL_S"
 
 log "starting bridge: $*"
 # Hand over to the supervisor rather than exec'ing the bridge directly, so a
