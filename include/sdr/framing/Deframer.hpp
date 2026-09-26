@@ -49,6 +49,7 @@ public:
     // its CRC re-checked, so this cannot be inflated by frames that were
     // already intact.
     uint64_t fecRescued() const { return fec_rescued_; }
+    uint64_t fecFailed() const { return fec_failed_; }
     uint64_t goodFrames() const { return good_frames_; }
 
 private:
@@ -74,11 +75,12 @@ private:
     uint32_t node_id_   {0};
     uint32_t seq_       {0};
 
-    std::array<uint8_t, MAX_PAYLOAD + 4 + 255> payload_buf_{};  // +4 CRC, +255 RS slack
+    std::array<uint8_t, MAX_CODED_PAYLOAD + CRC_SIZE> payload_buf_{};
     int      pay_pos_   {0};
     int      pay_total_ {0};  // plen + CRC_SIZE (+ RS padding if FL_FEC)
 
     uint64_t fec_rescued_{0};
+    uint64_t fec_failed_{0};
     uint64_t crc_errors_  {0};
     uint64_t good_frames_ {0};
 };

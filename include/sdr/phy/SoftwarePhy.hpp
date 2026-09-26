@@ -94,6 +94,11 @@ public:
     bool sendFrame(const uint8_t* payload, size_t len,
                    uint8_t flags, uint32_t seq) override;
 
+    // Single TX-producer API: payload mode is carried in the robust BPSK
+    // header. Does not mutate RX state or the configured baseline mode.
+    bool sendFrameWithMode(const uint8_t* payload, size_t len, uint8_t flags,
+                           uint32_t seq, ModCode mode);
+    uint64_t clippedSamples() const { return clamped_.load(); }
     void  flushPending() override;
     void  onFrame(FrameHandler h) override { on_frame_ = std::move(h); }
     Stats stats() const override;

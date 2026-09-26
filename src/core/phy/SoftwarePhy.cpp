@@ -287,6 +287,13 @@ void SoftwarePhy::flushPending() {
 
 bool SoftwarePhy::sendFrame(const uint8_t* payload, size_t len,
                             uint8_t flags, uint32_t seq) {
+    return sendFrameWithMode(payload, len, flags, seq, tx_mod_);
+}
+
+bool SoftwarePhy::sendFrameWithMode(const uint8_t* payload, size_t len,
+                                    uint8_t flags, uint32_t seq, ModCode mode) {
+    if (!isWireMod(mode) || len > MAX_PAYLOAD || ((flags & FL_FEC) && !fec_))
+        return false;
     if (!running_.load()) return false;
 
     // Framing belongs to the PHY: the daemon hands over payload, and what
@@ -296,14 +303,14 @@ bool SoftwarePhy::sendFrame(const uint8_t* payload, size_t len,
     Framer framer;
     std::vector<uint8_t> frame;
     { StageProfiler::Scope sc(prof_, StageProfiler::TX_FRAME, len);
-      frame = framer.encode(payload, len, flags, tx_mod_, mhzToBw(cfg_.bw_mhz),
+      frame = framer.encode(payload, len, flags, mode, mhzToBw(cfg_.bw_mhz),
                             cfg_.node_id, seq, fec_.get(), aes_.get()); }
 
     // Acquisition section in BPSK, payload in tx_mod_. Never modulate the
     // preamble with the payload scheme: the receiver correlates against a
     // fixed BPSK reference and would not see the burst at all.
     { StageProfiler::Scope sc(prof_, StageProfiler::TX_MOD, frame.size() * 8);
-      SplitModem::modulate(frame, tx_mod_, iq_syms_); }
+      SplitModem::modulate(frame, mode, iq_syms_); }
     { StageProfiler::Scope sc(prof_, StageProfiler::TX_RRC, iq_syms_.size());
       interp_->process(iq_syms_, iq_shaped_); }
     { StageProfiler::Scope sc(prof_, StageProfiler::TX_CONV, iq_shaped_.size());
@@ -903,6 +910,8 @@ void SoftwarePhy::rxThread() {
                 // the failure rate look ~0 no matter how bad the link was.
                 // Count each fresh deframer's failure directly instead.
                 if (deframer.crcErrors() > 0) {
+                    if (deframer.fecFailed() > 0)
+                        stats_.fec_uncorrectable.fetch_add(1, std::memory_order_relaxed);
                     // Seq lives at body offset 12 (big-endian) and is
                     // readable even when the CRC fails, so failures can be
                     // matched against the transmitted frame.
@@ -1001,6 +1010,7 @@ void SoftwarePhy::rxThread() {
                                << " rssi=" << rssi << " snr=" << snr << "\n";
                     frame_log_.flush();
                 }
+                stats_.evm_rms.store(sm.evm_rms, std::memory_order_relaxed);
                 if (on_frame_) on_frame_(*result);
             }
 
@@ -1522,7 +1532,7 @@ void SoftwarePhy::rxThread() {
                     SplitModem::Result sm;
                     { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
                       sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
-                                                  SYNC_SEARCH_SYMS, tap); }
+                                                  SYNC_SEARCH_SYMS, tap, true); }
                     if (sm.header_ok) {
                         stats_.cur_mod.store(static_cast<int>(sm.payload_mod),
                                              std::memory_order_relaxed);
@@ -2064,7 +2074,7 @@ void SoftwarePhy::rxThread() {
                 SplitModem::Result sm;
                 { StageProfiler::Scope sc(prof_, StageProfiler::RX_DEMOD, iq_syms.size());
                   sm = SplitModem::demodulate(iq_syms, fec_ != nullptr,
-                                              SYNC_SEARCH_SYMS, tap); }
+                                              SYNC_SEARCH_SYMS, tap, true); }
                 if (sm.header_ok) {
                     // Acquisition is always BPSK; payload is whatever the
                     // header declared. Splitting the two separates a carrier
@@ -2095,6 +2105,7 @@ void SoftwarePhy::rxThread() {
                                    << (sm.complete ? " complete" : " TRUNCATED") << "\n";
                 }
                 if (!sm.complete) continue;   // nothing decodable at this offset
+                stats_.evm_rms.store(sm.evm_rms, std::memory_order_relaxed);
 
                 ok_any = false;
                 this_frame_ok = deliver(sm, rssi, snr, oi);

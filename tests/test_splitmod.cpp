@@ -327,5 +327,32 @@ void run_splitmod() {
         assert(out->payload == payload);
     }
 
+    std::printf("[splitmod] QAM residual carrier tracking and EVM\n");
+    for (auto mode : {ModCode::QAM64, ModCode::QAM16}) {
+        auto payload = makePayload(600);
+        auto frame = Framer().encode(payload, 0, mode, BwCode::BW_1P25, 1, 91);
+        std::vector<std::complex<float>> symbols;
+        SplitModem::modulate(frame, mode, symbols);
+        auto perfect = SplitModem::demodulate(symbols, false);
+        assert(perfect.complete && perfect.evm_rms < 1e-5f);
+        const size_t start = BOOTSTRAP_SYMS;
+        for (size_t i = start; i < symbols.size(); ++i)
+            symbols[i] *= std::polar(1.f, .0002f * float(i - start));
+        bool legacy_called = false;
+        auto tracked = SplitModem::demodulate(symbols, false, 512,
+            [&](std::vector<std::complex<float>>&) { legacy_called = true; }, true);
+        assert(!legacy_called && tracked.complete);
+        assert(tracked.evm_rms < .03f);
+        Deframer decoder;
+        std::optional<DecodedFrame> decoded;
+        for (auto byte : tracked.bytes)
+            if (auto d = decoder.push(byte, nullptr, nullptr)) decoded = std::move(d);
+        assert(decoded && decoded->payload == payload);
+        bool generic_called = false;
+        SplitModem::demodulate(symbols, false, 512,
+            [&](std::vector<std::complex<float>>&) { generic_called = true; });
+        assert(generic_called);
+    }
+
     std::printf("[splitmod] OK\n");
 }

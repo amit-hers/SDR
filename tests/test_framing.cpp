@@ -127,6 +127,55 @@ static void test_fec_rescue() {
     std::cout << "  [framing] Reed-Solomon rescues corrupted frames: PASS\n";
 }
 
+static void test_maximum_fec_codewords() {
+    sdr::ReedSolomon rs;
+    assert(sdr::ReedSolomon::encodedSize(sdr::MAX_PAYLOAD) == sdr::MAX_CODED_PAYLOAD);
+    for (size_t length : {size_t(223),size_t(224),size_t(1338),size_t(1339),sdr::MAX_PAYLOAD}) {
+        std::vector<uint8_t> payload(length);
+        for (size_t i=0;i<length;++i) payload[i]=static_cast<uint8_t>(i*37+11);
+        for (unsigned errors : {0u, 16u, 40u}) {
+            auto wire=sdr::Framer().encode(payload.data(),payload.size(),sdr::FL_FEC,
+                                           sdr::ModCode::QAM64,sdr::mhzToBw(1),7,99,&rs,nullptr);
+            const size_t last_block=sdr::PREAMBLE_LEN+sdr::HEADER_SIZE+
+                                    sdr::ReedSolomon::encodedSize(length)-255;
+            for(unsigned i=0;i<errors;++i) wire[last_block+i]^=0x91;
+            sdr::Deframer decoder;
+            std::optional<sdr::DecodedFrame> decoded;
+            for(auto byte:wire) if(auto frame=decoder.push(byte,&rs,nullptr))decoded=std::move(frame);
+            if(errors<=16) {
+                assert(decoded && decoded->payload==payload);
+                assert(decoder.fecFailed()==0);
+                assert(decoder.fecRescued()==(errors ? 1u : 0u));
+            } else {
+                assert(!decoded);
+                assert(decoder.fecFailed()==1);
+            }
+        }
+    }
+    std::cout << "  [framing] maximum FEC codewords and repair bounds: PASS\n";
+}
+
+static void test_invalid_codeword_with_valid_outer_crc() {
+    sdr::ReedSolomon rs;
+    std::vector<uint8_t> payload(223,0x5a);
+    auto wire=sdr::Framer().encode(payload.data(),payload.size(),sdr::FL_FEC,
+                                  sdr::ModCode::QPSK,sdr::mhzToBw(1),7,101,&rs,nullptr);
+    const size_t start=sdr::PREAMBLE_LEN+sdr::HEADER_SIZE;
+    for(size_t i=0;i<60;++i) wire[start+i]^=static_cast<uint8_t>(i*13+1);
+    const size_t crc_at=start+sdr::ReedSolomon::encodedSize(payload.size());
+    uint32_t crc=0xffffffffu;
+    for(size_t i=sdr::PREAMBLE_LEN;i<crc_at;++i) {
+        crc^=wire[i];
+        for(int bit=0;bit<8;++bit) crc=(crc>>1)^(0xedb88320u & -(crc&1u));
+    }
+    crc=~crc;
+    for(unsigned i=0;i<4;++i) wire[crc_at+i]=static_cast<uint8_t>(crc>>(8*i));
+    sdr::Deframer decoder;
+    for(auto byte:wire) assert(!decoder.push(byte,&rs,nullptr));
+    assert(decoder.fecFailed()==1);
+    std::cout << "  [framing] invalid RS codeword with valid outer CRC rejected: PASS\n";
+}
+
 void run_framing() {
     std::cout << "[framing tests]\n";
     test_roundtrip();
@@ -134,5 +183,7 @@ void run_framing() {
     test_large_payload();
     test_multi_frame();
     test_fec_rescue();
+    test_maximum_fec_codewords();
+    test_invalid_codeword_with_valid_outer_crc();
     std::cout << "[framing tests] ALL PASS\n\n";
 }

@@ -18,6 +18,9 @@ static constexpr size_t   CRC_SIZE     = 4;
 // the path, so the limit is what the wire carries. In TUN mode (no L2 header)
 // the usable MTU is this value; in raw-eth mode it is this minus 14.
 static constexpr size_t   MAX_PAYLOAD  = 1514; // bytes
+// RS(255,223) rounds up to whole codewords: 1514 bytes need 1785 wire
+// bytes, not MAX_PAYLOAD + 255. Both decoder buffers must use this bound.
+static constexpr size_t MAX_CODED_PAYLOAD = ((MAX_PAYLOAD + 222) / 223) * 255;
 static constexpr size_t   FRAME_OVERHEAD = HEADER_SIZE + CRC_SIZE; // 22 bytes
 
 // ── Preamble ──────────────────────────────────────────────────────────────

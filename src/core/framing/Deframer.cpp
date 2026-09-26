@@ -91,7 +91,7 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
         if (pay_pos_ == pay_total_) {
             // Verify CRC over header + payload (excluding the 4 CRC bytes)
             size_t body_len = HEADER_SIZE + static_cast<size_t>(pay_total_ - 4);
-            uint8_t  body[HEADER_SIZE + MAX_PAYLOAD + 255];
+            uint8_t  body[HEADER_SIZE + MAX_CODED_PAYLOAD];
             std::memcpy(body, hdr_buf_, HEADER_SIZE);
             std::memcpy(body + HEADER_SIZE, payload_buf_.data(),
                         static_cast<size_t>(pay_total_ - 4));
@@ -145,8 +145,13 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
                 bool rescued = false;
                 try {
                     raw = fec->decode(tryw.data(), tryw.size());
-                    if (!crc_ok) {
-                        // Re-encode and re-check: did RS restore the exact
+                    {
+                        const bool damaged_on_arrival = !crc_ok;
+                        crc_ok = false;
+                        // Re-encode and re-check even when the outer CRC was
+                        // valid: malformed non-codewords must not become
+                        // fabricated plaintext after a failed/miscorrected decode.
+                        // Did RS restore the exact
                         // codeword the transmitter sent?
                         std::vector<uint8_t> fixed = fec->encode(raw.data(), raw.size());
                         if (fixed.size() == static_cast<size_t>(wire_len)) {
@@ -163,14 +168,19 @@ std::optional<DecodedFrame> Deframer::push(uint8_t byte,
                             std::memcpy(body2.data() + HEADER_SIZE, fixed.data(), fixed.size());
                             if (crc32(body2.data(), body2.size()) == got) {
                                 crc_ok  = true;
-                                rescued = true;
+                                rescued = damaged_on_arrival;
                             }
                         }
                     }
-                } catch (...) {
-                    if (!crc_ok) { ++crc_errors_; return std::nullopt; }
+                } catch (const std::runtime_error&) {
+                    // A valid outer CRC does not make an undecodable RS
+                    // codeword valid. Never resize an empty decode to zeros
+                    // and accidentally deliver a fabricated payload.
+                    ++fec_failed_;
+                    ++crc_errors_;
+                    return std::nullopt;
                 }
-                if (!crc_ok) { ++crc_errors_; return std::nullopt; }
+                if (!crc_ok) { ++fec_failed_; ++crc_errors_; return std::nullopt; }
                 if (rescued) ++fec_rescued_;
                 raw.resize(plen_saved);
             } else {

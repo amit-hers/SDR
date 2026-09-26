@@ -42,6 +42,7 @@ public:
         ModCode  payload_mod {ModCode::BPSK};
         uint8_t  flags       {0};
         uint16_t plen        {0};
+        float evm_rms        {-1.f}; // decision-directed, uncalibrated RMS error
 
         // Canonical (de-inverted) bytes from the sync word through the CRC,
         // ready to push into a Deframer.
@@ -64,10 +65,13 @@ public:
     // symbols. `fec_enabled` must match the receiver's FEC configuration --
     // it decides whether the header's payload length refers to pre- or
     // post-RS bytes, and therefore how many payload symbols to consume.
+    // Host PHY opts into a QAM-specific replacement for its QPSK Costas
+    // tap. Other callers retain the original generic payload-tap contract.
     static Result demodulate(const std::vector<std::complex<float>>& syms,
                              bool   fec_enabled,
                              size_t max_search_syms = 512,
-                             const PayloadTap& payload_tap = {});
+                             const PayloadTap& payload_tap = {},
+                             bool replace_qpsk_tap_for_qam = false);
 
 private:
     // Demodulates `n` symbols as BPSK into a bit vector (1 symbol = 1 bit).

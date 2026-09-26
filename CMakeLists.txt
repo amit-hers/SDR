@@ -72,3 +72,8 @@ message(STATUS "  cmake -B build -DCMAKE_BUILD_TYPE=Release")
 message(STATUS "  cmake --build build -j\$(nproc)")
 message(STATUS "  ctest --test-dir build --output-on-failure")
 message(STATUS "")
+
+install(DIRECTORY src/mission DESTINATION share/sdr-datalink
+        FILES_MATCHING PATTERN "*.py")
+install(PROGRAMS scripts/sdr-mission DESTINATION bin)
+install(PROGRAMS scripts/sdr-mission-clock scripts/mission-config.py DESTINATION bin)

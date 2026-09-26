@@ -30,3 +30,13 @@ install(TARGETS sdrctl DESTINATION bin)
 # partition. Its static C++ predecessor was ~810 KiB and never persisted.
 add_executable(sdr-agent ../../fpga/tools/sdr_agent.c)
 install(TARGETS sdr-agent DESTINATION bin)
+
+# Experimental frame transport for authenticated mission networking.
+add_executable(sdr-mission-phy mission_phy.cpp ../daemon/Config.cpp)
+target_include_directories(sdr-mission-phy PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(sdr-mission-phy PRIVATE sdr_core)
+install(TARGETS sdr-mission-phy DESTINATION bin)
+
+add_executable(sdr-modem-characterize modem_characterize.cpp)
+target_link_libraries(sdr-modem-characterize PRIVATE sdr_core)
+install(TARGETS sdr-modem-characterize DESTINATION bin)

@@ -73,6 +73,8 @@ struct LinkStats {
     std::atomic<float> rx_kbps   {0.f};
     std::atomic<float> dist_km   {0.f};
 
+    std::atomic<float> evm_rms {-1.f};
+
     // Current modulation (1=BPSK 2=QPSK 3=16QAM 4=64QAM)
     std::atomic<int> cur_mod {2};
 

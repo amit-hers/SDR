@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Run from the checkout or installed share/sdr-datalink tree."""
+import sys
+from pathlib import Path
+root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root / 'src'))
+sys.path.insert(0, str(root / 'share' / 'sdr-datalink'))
+from mission.service import main
+raise SystemExit(main())

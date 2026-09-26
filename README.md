@@ -223,6 +223,8 @@ build/src/tools/sdr-live-stats
   flash map, the mailbox contract, and why `flashcp` lies on a stock board
 - [Deployment](docs/DEPLOYMENT.md) — building, tagging, flashing, verifying,
   rolling back, and what the ABI fields mean
+- [Experimental mission network](docs/mission-network.md) — authenticated mesh,
+  RF control, safety transport, redundancy, and qualification tools
 - [Roadmap](docs/roadmap.md) — recommended next steps and future features
 - [FPGA and recovery](docs/fpga-and-recovery.md) — HLS build and board-recovery assets
 - [Cheatsheet](CHEATSHEET.md) — compact commands for established developers

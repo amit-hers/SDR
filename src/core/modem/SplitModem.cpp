@@ -3,6 +3,9 @@
 #include "sdr/fec/ReedSolomon.hpp"
 #include <stdexcept>
 #include <string>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
 
 namespace sdr {
 
@@ -47,6 +50,31 @@ void SplitModem::modulate(const std::vector<uint8_t>& frame,
     syms.insert(syms.end(), b.begin(), b.end());
 }
 
+// Decision-directed residual tracking for square QAM. The QPSK Costas
+// detector is not valid for inner QAM points. Acquisition must already have
+// removed the bulk phase/frequency error; limit the residual loop to its basin.
+static void trackQam(std::vector<std::complex<float>>& samples, ModCode mode) {
+    const auto scheme = mode == ModCode::QAM64 ? LIQUID_MODEM_QAM64 : LIQUID_MODEM_QAM16;
+    modem detector = modem_create(scheme);
+    if (!detector) throw std::runtime_error("QAM carrier detector allocation");
+    float phase = 0.f, frequency = 0.f;
+    for (auto& sample : samples) {
+        sample *= std::polar(1.f, -phase);
+        liquid_float_complex in{}, point{};
+        std::memcpy(&in, &sample, sizeof(in));
+        unsigned symbol = 0;
+        modem_demodulate(detector, in, &symbol);
+        modem_modulate(detector, symbol, &point);
+        std::complex<float> decision;
+        std::memcpy(&decision, &point, sizeof(decision));
+        const float error = std::clamp(std::imag(sample * std::conj(decision)) /
+                                      std::max(.1f, std::norm(decision)), -.2f, .2f);
+        frequency = std::clamp(frequency + .0001f * error, -.01f, .01f);
+        phase = std::clamp(phase + frequency + .02f * error, -.35f, .35f);
+    }
+    modem_destroy(detector);
+}
+
 // ── RX ────────────────────────────────────────────────────────────────────
 void SplitModem::bpskBits(const std::complex<float>* syms, size_t n,
                           std::vector<uint8_t>& bits) {
@@ -68,7 +96,8 @@ void SplitModem::bpskBits(const std::complex<float>* syms, size_t n,
 SplitModem::Result SplitModem::demodulate(const std::vector<std::complex<float>>& syms,
                                           bool   fec_enabled,
                                           size_t max_search_syms,
-                                          const PayloadTap& payload_tap) {
+                                          const PayloadTap& payload_tap,
+                                          bool replace_qpsk_tap_for_qam) {
     Result r;
     if (syms.size() < HEADER_SYMS) return r;
 
@@ -140,11 +169,25 @@ SplitModem::Result SplitModem::demodulate(const std::vector<std::complex<float>>
 
     // Carrier tracking, if the caller wants it, sees only these symbols --
     // never the BPSK acquisition section ahead of them.
-    if (payload_tap) payload_tap(pay_syms_buf);
+    if (payload_tap) {
+        if (replace_qpsk_tap_for_qam &&
+            (r.payload_mod == ModCode::QAM16 || r.payload_mod == ModCode::QAM64))
+            trackQam(pay_syms_buf, r.payload_mod);
+        else
+            payload_tap(pay_syms_buf);
+    }
 
     Modem pay(toScheme(r.payload_mod));
     std::vector<uint8_t> pay_bytes_buf;
     pay.demodulate(pay_syms_buf.data(), static_cast<int>(pay_syms_buf.size()), pay_bytes_buf);
+    std::vector<std::complex<float>> decided;
+    pay.modulate(pay_bytes_buf.data(), static_cast<int>(pay_bytes_buf.size()), decided);
+    double error = 0, reference = 0;
+    for (size_t i = 0; i < pay_syms_buf.size(); ++i) {
+        error += std::norm(pay_syms_buf[i] - decided[i]);
+        reference += std::norm(decided[i]);
+    }
+    if (reference > 0) r.evm_rms = static_cast<float>(std::sqrt(error / reference));
     // The final symbol may carry padding bits when bits/symbol does not divide
     // the byte count; those land past the CRC and are simply dropped.
     pay_bytes_buf.resize(pay_bytes);
