@@ -1,0 +1,10 @@
+{
+  "unit": {"serial":"AKRLJ24FWXM7H65X","mac":"00:60:88:3d:32:ae","uptime_s":915},
+  "fpga": {"magic":"0x5344524C","version":"0x00010300","abi":"0x00000003","regmap":"0x00000004","packet_bytes":"0x00002000"},
+  "config": {"status":"valid","provisioning":"matches_hardware","node_id":"327951062","tx_hz":"434000000","rx_hz":"444000000","sample_rate":"15360000"},
+  "modem": {"mod_en":"0x00000001","dem_en":"0x00000001","lock_count":"0x07C99DD5","mu_clamped":"0x00530B48","rssi_db":"65.75"},
+  "bridge": {"iface":"eth0","node_id":327951062,"tx":{"packets":20,"bytes":1618,"idle":966554,"errors":0,"oversize":0,"stall_ms":115400},"rx":{"dma":15229,"frames":957932,"bytes":1678,"crc_errors":90,"duplicates":0,"control":957911,"boundary_recovered":46,"self":0,"inject_err":0},"queues":{"control_depth":0,"bulk_depth":0,"control_drops":0,"bulk_drops":0,"drain_ms":0},"loop_guard":{"suppressed":0,"local_copies":0,"to_self":0,"from_self":0},"recoveries":0,"cpu_decode_pct":43.9,"peer":{"compatibility":"COMPATIBLE","hellos":957865,"reasons":""},"probe":{"sent":27,"delivered":20,"lost":7,"rtt_us":{"p50":170553,"p95":170674,"p99":170674,"max":172640,"samples":20}}},
+  "ethernet": {"rx_packets":896,"tx_packets":1020,"mtu":1500,"flags":"0x1103"},
+  "supervisor": {"bridges_running":1,"supervisors":1,"recoveries":0,"restarts":2,"faulted":0},
+  "progress": {"frames_idle_s":0,"delivered_idle_s":0,"verdict":"forwarding"}
+}

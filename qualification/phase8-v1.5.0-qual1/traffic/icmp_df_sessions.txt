@@ -1,0 +1,32 @@
+=== A->B DF-set full-size ping (session 1) ===
+1480 bytes from 192.1.1.10: icmp_seq=10 ttl=128 time=180 ms
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9011ms
+rtt min/avg/max/mdev = 173.873/177.894/182.225/2.521 ms
+=== B->A DF-set full-size ping (session 1) ===
+
+Pinging 192.1.1.3 with 1472 bytes of data:
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=174ms TTL=64
+
+Ping statistics for 192.1.1.3:
+    Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 174ms, Maximum = 176ms, Average = 174ms
+=== A->B DF-set full-size ping (session 2, after reset_demod) ===
+PING 192.1.1.10 (192.1.1.10) from 192.1.1.3 enp3s0: 1472(1500) bytes of data.
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 0 received, 100% packet loss, time 9208ms
+
+=== B->A DF-set full-size ping (session 2) ===
+ssh: connect to host 192.1.1.10 port 22: No route to host

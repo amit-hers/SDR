@@ -1,0 +1,13 @@
+=== before sustained large-frame run ===
+{'dma': 218614, 'frames': 12091329, 'bytes': 40646982, 'crc_errors': 1073, 'duplicates': 0, 'control': 12058095, 'boundary_recovered': 190010, 'self': 0, 'inject_err': 0}
+=== sending 200x 1472B (near-max) frames, small interval ===
+1480 bytes from 192.1.1.10: icmp_seq=199 ttl=128 time=172 ms
+1480 bytes from 192.1.1.10: icmp_seq=200 ttl=128 time=173 ms
+
+--- 192.1.1.10 ping statistics ---
+200 packets transmitted, 200 received, 0% packet loss, time 10076ms
+rtt min/avg/max/mdev = 169.216/175.498/186.068/4.482 ms, pipe 4
+=== after sustained large-frame run ===
+{'dma': 220958, 'frames': 12226610, 'bytes': 40951072, 'crc_errors': 1081, 'duplicates': 0, 'control': 12193171, 'boundary_recovered': 192151, 'self': 0, 'inject_err': 0}
+dup 0
+crc 1081

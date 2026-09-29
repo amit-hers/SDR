@@ -1,0 +1,5 @@
+{"action":"restart_bridge","killed":3,"supervisor_present":true}
+
+--- 192.1.1.10 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3048ms
+rtt min/avg/max/mdev = 169.979/1054.568/2373.459/886.088 ms, pipe 3

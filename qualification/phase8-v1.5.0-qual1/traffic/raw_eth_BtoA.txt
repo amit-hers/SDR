@@ -1,0 +1,95 @@
+=== B->A frame ~64B (ping -l 0) ===
+
+Pinging 192.1.1.3 with 0 bytes of data:
+Reply from 192.1.1.3: bytes=0 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=170ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=0 time=176ms TTL=64
+
+Ping statistics for 192.1.1.3:
+    Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 170ms, Maximum = 178ms, Average = 175ms
+
+=== B->A frame ~128B (ping -l 86) ===
+
+Pinging 192.1.1.3 with 86 bytes of data:
+Reply from 192.1.1.3: bytes=86 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=172ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=177ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=172ms TTL=64
+Reply from 192.1.1.3: bytes=86 time=176ms TTL=64
+
+Ping statistics for 192.1.1.3:
+    Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 171ms, Maximum = 178ms, Average = 173ms
+
+=== B->A frame ~512B (ping -l 470) ===
+
+Pinging 192.1.1.3 with 470 bytes of data:
+Reply from 192.1.1.3: bytes=470 time=172ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=172ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=177ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=470 time=177ms TTL=64
+
+Ping statistics for 192.1.1.3:
+    Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 171ms, Maximum = 178ms, Average = 174ms
+
+=== B->A frame ~1000B (ping -l 958) ===
+
+Pinging 192.1.1.3 with 958 bytes of data:
+Reply from 192.1.1.3: bytes=958 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=172ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=174ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=172ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=171ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=179ms TTL=64
+Reply from 192.1.1.3: bytes=958 time=174ms TTL=64
+
+Ping statistics for 192.1.1.3:
+    Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 171ms, Maximum = 179ms, Average = 173ms
+
+=== B->A frame ~1514B (ping -l 1472) ===
+
+Pinging 192.1.1.3 with 1472 bytes of data:
+Reply from 192.1.1.3: bytes=1472 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=178ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=176ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=175ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=179ms TTL=64
+Reply from 192.1.1.3: bytes=1472 time=179ms TTL=64
+
+Ping statistics for 192.1.1.3:
+    Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 175ms, Maximum = 179ms, Average = 176ms
+

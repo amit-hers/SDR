@@ -1,0 +1,1 @@
+B-to-A UDP: SKIPPED after repeated SSH-to-Windows hangs (same flakiness as raw_eth_BtoA's first attempt). A-to-B UDP data stands as the primary throughput evidence for this run.

@@ -1,0 +1,3 @@
+192.1.1.1 lladdr 00:60:88:3e:18:23 STALE 
+192.1.1.2 FAILED 
+192.1.1.10 lladdr 70:b5:e8:8c:16:dc DELAY 

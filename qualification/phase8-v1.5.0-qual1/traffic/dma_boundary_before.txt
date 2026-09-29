@@ -1,0 +1,112 @@
+=== A metrics before boundary stress ===
+{
+    "iface": "eth0",
+    "node_id": 327951062,
+    "tx": {
+        "packets": 96,
+        "bytes": 38394,
+        "idle": 2808126,
+        "errors": 0,
+        "oversize": 0,
+        "stall_ms": 335942
+    },
+    "rx": {
+        "dma": 44529,
+        "frames": 2799340,
+        "bytes": 37708,
+        "crc_errors": 254,
+        "duplicates": 0,
+        "control": 2799244,
+        "boundary_recovered": 146,
+        "self": 0,
+        "inject_err": 0
+    },
+    "queues": {
+        "control_depth": 0,
+        "bulk_depth": 0,
+        "control_drops": 0,
+        "bulk_drops": 0,
+        "drain_ms": 0
+    },
+    "loop_guard": {
+        "suppressed": 0,
+        "local_copies": 0,
+        "to_self": 0,
+        "from_self": 0
+    },
+    "recoveries": 0,
+    "cpu_decode_pct": 44.5,
+    "peer": {
+        "compatibility": "COMPATIBLE",
+        "hellos": 2799098,
+        "reasons": ""
+    },
+    "probe": {
+        "sent": 77,
+        "delivered": 70,
+        "lost": 7,
+        "rtt_us": {
+            "p50": 170595,
+            "p95": 170710,
+            "p99": 172073,
+            "max": 172640,
+            "samples": 70
+        }
+    }
+}
+=== B metrics before boundary stress ===
+{
+    "iface": "eth0",
+    "node_id": 465429558,
+    "tx": {
+        "packets": 1101,
+        "bytes": 149125,
+        "idle": 8298688,
+        "errors": 0,
+        "oversize": 0,
+        "stall_ms": 998019
+    },
+    "rx": {
+        "dma": 123307,
+        "frames": 7244938,
+        "bytes": 148286,
+        "crc_errors": 501,
+        "duplicates": 0,
+        "control": 7243976,
+        "boundary_recovered": 40050,
+        "self": 0,
+        "inject_err": 0
+    },
+    "queues": {
+        "control_depth": 0,
+        "bulk_depth": 0,
+        "control_drops": 0,
+        "bulk_drops": 0,
+        "drain_ms": 0
+    },
+    "loop_guard": {
+        "suppressed": 0,
+        "local_copies": 0,
+        "to_self": 3,
+        "from_self": 0
+    },
+    "recoveries": 5,
+    "cpu_decode_pct": 50.5,
+    "peer": {
+        "compatibility": "COMPATIBLE",
+        "hellos": 7243583,
+        "reasons": ""
+    },
+    "probe": {
+        "sent": 227,
+        "delivered": 197,
+        "lost": 30,
+        "rtt_us": {
+            "p50": 153036,
+            "p95": 165171,
+            "p99": 167385,
+            "max": 173657,
+            "samples": 197
+        }
+    }
+}

@@ -5,6 +5,18 @@ Phase 8. **Accept no further changes except a fix for a reproducible blocker,
 or what the 8192-byte FPGA integration requires.** No opportunistic
 refactoring: the value of this baseline is that it is the thing that was tested.
 
+**2026-09-26 update: both external blockers below are resolved.** Candidate
+`v1.5.0-qual1` (commit `2249997`) ran with `RX_PKT_BYTES=8192` at 15.36 MS/s
+against genuinely separated Ethernet segments (a real second PC on each
+side, no shared switch -- verified by disabling RF forwarding and confirming
+end-to-end connectivity actually dropped to 0%). Full results, findings, and
+the frozen supported envelope are in `qualification/phase8-v1.5.0-qual1/`
+(`SUMMARY.md` and `CONFIGURATION_FREEZE.md`) at the repo root -- not
+reproduced here in full, since that record is the evidence and this file
+predates it. Not everything in "Then" below was completed in that pass
+(TCP, a forced QUEUE_DROP, a production-length soak, and hard-power/
+brownout testing remain outstanding -- see that document's "Known gaps").
+
 ## Commit
 
     c3b4faf  Record the two testing rules, with the failures that earned them

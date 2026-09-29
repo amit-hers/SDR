@@ -1,0 +1,30 @@
+=== A->B frame ~64B (ping payload 0) ===
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9002ms
+
+
+=== A->B frame ~128B (ping payload 86) ===
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9012ms
+rtt min/avg/max/mdev = 174.195/177.150/181.457/2.521 ms
+
+=== A->B frame ~512B (ping payload 470) ===
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9010ms
+rtt min/avg/max/mdev = 173.775/178.005/181.895/2.473 ms
+
+=== A->B frame ~1000B (ping payload 958) ===
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9013ms
+rtt min/avg/max/mdev = 173.853/177.972/181.670/2.536 ms
+
+=== A->B frame ~1514B (ping payload 1472) ===
+
+--- 192.1.1.10 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9015ms
+rtt min/avg/max/mdev = 174.600/178.956/182.216/2.480 ms
+

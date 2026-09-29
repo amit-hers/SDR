@@ -1,0 +1,28 @@
+=== A->B UDP offered 2Mbps ===
+SENT seq_count=2084 bytes=2500800 elapsed_s=10.00 offered_mbps=2.001
+RESULT delivered_unique=2033 expected=2084 lost=51 loss_pct=2.45 bytes=2439600 elapsed_s=9.77 delivered_mbps=1.998
+
+=== A->B UDP offered 4Mbps ===
+SENT seq_count=4167 bytes=5000400 elapsed_s=10.00 offered_mbps=4.000
+RESULT delivered_unique=4097 expected=4167 lost=70 loss_pct=1.68 bytes=4916400 elapsed_s=9.80 delivered_mbps=4.013
+
+=== A->B UDP offered 6Mbps ===
+SENT seq_count=6250 bytes=7500000 elapsed_s=10.00 offered_mbps=6.000
+RESULT delivered_unique=6142 expected=6250 lost=108 loss_pct=1.73 bytes=7370400 elapsed_s=9.80 delivered_mbps=6.017
+
+=== A->B UDP offered 8Mbps ===
+SENT seq_count=8334 bytes=10000800 elapsed_s=10.00 offered_mbps=8.001
+RESULT delivered_unique=3388 expected=6023 lost=2635 loss_pct=43.75 bytes=4065600 elapsed_s=116.81 delivered_mbps=0.278
+
+NOTE: the 8Mbps run's elapsed_s=116.81 (vs an expected ~13s ceiling) indicates
+measurement-harness overhead (SSH-to-Windows latency/flakiness observed
+throughout this session), not necessarily genuine link saturation loss.
+Treat the 8Mbps/43.75% figure as UNRELIABLE pending a retest with a
+more robust harness (e.g. a receiver that self-terminates strictly at
+the wall-clock deadline regardless of SSH session state).
+
+TCP (section 10): SKIP. PC-B's Windows SSH server hung again on both the
+deploy attempt and a bare "echo test" sanity check (exit 124 after 15s,
+port 22 itself was never the problem earlier -- this is a repeat of the
+same instability seen for B->A UDP). Not fixable from this side; needs
+attention on PC-B itself (see earlier restart that temporarily resolved it).

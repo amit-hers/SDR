@@ -7,7 +7,19 @@ measured was measured; anything unproven says so.
 
 ## 1. Blocked on physical setup (not software)
 
-### 1.1 Phase 8 cannot start: both RJ45 ports share one switch segment
+### 1.1 RESOLVED 2026-09-26: both RJ45 ports share one switch segment
+
+**Resolved.** Candidate `v1.5.0-qual1` (commit `2249997`) was qualified
+against a real, separated topology: PC-A (this host) on one unit's segment,
+a genuine second machine (Windows, `192.1.1.10`) on the other's, no shared
+switch. Proven the same way this issue asks for, not assumed: RF forwarding
+was disabled on one unit (`enter_safe_mode`) and PC-A-to-PC-B connectivity
+dropped to 100% loss; restoring it brought connectivity back to 0% loss.
+Full results in `qualification/phase8-v1.5.0-qual1/` at the repo root
+(`SUMMARY.md` section 2, "Physical topology validation"). The historical
+record below (the switch-segment discovery and the loop hazard it created)
+stays as the reason this check exists and must be re-run, not skipped,
+whenever the physical setup changes again.
 
 **Corrected 2026-09-19.** This was recorded as a direct cable between the two
 units. It is a switch, and the development host's `enp3s0` is on it too. Proven
@@ -60,7 +72,20 @@ something the bridge can recognise, such as tagging its own injections or
 learning which source MACs arrive from the radio. Worth designing before the
 product is deployed anywhere with a switch behind it.
 
-### 1.2 No host endpoints
+### 1.2 RESOLVED 2026-09-26: no host endpoints
+
+**Resolved.** A second machine (Windows, `ahkov@192.1.1.10`) is now
+available on the far segment; `enp3s0` on the development host serves the
+near segment. Real PC-to-PC traffic (raw Ethernet at 5 frame sizes, ARP,
+ICMP including DF-set full-size, UDP, and a sustained mixed-traffic soak)
+crossed the RF link end to end -- see
+`qualification/phase8-v1.5.0-qual1/SUMMARY.md`. Caveat: PC-B has no
+Python or iperf3 installed and its SSH server repeatedly hangs after one
+command, which blocked TCP testing and some bidirectional/under-load
+cases this pass (same document, "Known gaps"/section 10). The original
+finding below (a board's own traffic cannot substitute for a real second
+endpoint) remains true and is why this was worth fixing rather than
+working around.
 
 Phase 8 needs an independent Ethernet endpoint per unit. The development machine
 has only `enp3s0` (its internet uplink) and `wlp2s0`. Traffic generated *on* a
@@ -243,6 +268,15 @@ UNIT-A `96dede1f...`, UNIT-B `ed148d99...`. Version skew between the ends makes
 every result ambiguous -- a binary that forwards nothing was already found
 deployed on one unit while the other was being debugged (3.6). **Check both
 checksums before interpreting any two-unit measurement.**
+
+**Recurred 2026-09-26, same root cause, different session.** Before this
+session's own deploy, UNIT-A was found running `v1.4.0-dev4` and UNIT-B
+`v1.4.0-dev5` -- neither the current candidate, and different from each
+other. This is a standing risk this project keeps re-discovering, not a
+one-time bug: **always check `/mnt/jffs2/sdr-release` (or the SHA256s) on
+BOTH units before trusting any two-unit result**, this entry's own advice
+from before. Both units were reflashed to the same `v1.5.0-qual1` build
+before that session's qualification run.
 
 ### 3.10 Modulator crest factor is 1.09, not 1.71
 

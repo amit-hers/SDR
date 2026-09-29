@@ -1,0 +1,4 @@
+PC-A: this host (Linux), enp3s0 192.1.1.3/24
+PC-B: Windows, ahkov@192.1.1.10, Ethernet adapter 192.1.1.10/24, no gateway on that adapter
+UNIT (mgmt 192.168.2.17): serial AKRLJ24FWXM7H65X, node_id 327951062
+UNIT (mgmt 192.168.2.1): serial 3SXRLJMXS7EL5IBJ, node_id 465429558

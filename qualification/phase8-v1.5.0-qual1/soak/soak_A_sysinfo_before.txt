@@ -1,0 +1,6 @@
+Warning: Permanently added '192.168.2.17' (ED25519) to the list of known hosts.
+Filesystem                Size      Used Available Use% Mounted on
+mtd2                    896.0K    680.0K    216.0K  76% /mnt/jffs2
+              total        used        free      shared  buff/cache   available
+Mem:            875          14         844           0          17         832
+Swap:             0           0           0
