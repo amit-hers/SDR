@@ -83,6 +83,41 @@ convert an unavailable condition into PASS.
    test against this API waits a full stats interval before trusting a
    delta.
 
+## 2026-09-29 addendum: single-unit session (only UNIT-B connected)
+
+Only UNIT-B (mgmt `192.168.2.1`) was reachable this session -- UNIT-A was
+disconnected. Everything achievable without a peer was covered:
+
+- **UNIT-B survived 3 days disconnected/idle correctly**: still running
+  `v1.5.0-qual1`, FPGA identity intact, `sdr-agent` reachable -- another
+  data point for jffs2 persistence (now 3 confirmed cycles total across
+  the two sessions).
+- **`clear_counters` verified on real hardware for the first time**:
+  reporting counters (`tx.packets`/`bytes`/`idle`/`errors`/`oversize`/
+  `stall_ms`) cleared cleanly; decision-feeding counters (`rx.dma`,
+  `recoveries`) continued their natural progression with no discontinuity
+  and no spurious `DEMOD_RECOVERY` -- the underflow hazard this design
+  exists to avoid was confirmed genuinely avoided. Closes that part of
+  task 10's hardware acceptance.
+- **`reset_demod` finding REPRODUCED in isolation (no peer at all)** --
+  see `events/FINDING_reset_demod_stall.md`. This rules out "only under
+  active peer traffic" as the cause: `cpu_decode_pct` went to 0% both
+  times, `restart_bridge` recovered it both times. Now 2-for-2, not a
+  one-off. `CONFIGURATION_FREEZE.md` updated accordingly.
+- **A 3rd power cycle** (`restart_appliance`, full reboot): 33s to full
+  recovery. Three independent clean-reboot trials now on record.
+- **Dashboard validated against a real, realistic single-unit-connected
+  scenario**: UNIT-A (disconnected) rendered `UNREACHABLE` gracefully,
+  UNIT-B rendered `DEGRADED` with accurate evidence ("peer compatibility
+  UNKNOWN -- no HELLO seen yet"), no crash, no stale/wrong data.
+  `dashboard_single_unit.png`.
+- Full diagnostic bundle downloaded and saved for the evidence package
+  (`candidate/unitB_diagnostic_bundle.json`).
+
+Nothing requiring a peer (forwarding, ARP, throughput, RF interruption,
+topology validation, etc.) was attempted this session -- that all still
+stands as recorded from 2026-09-26 above.
+
 ## What's genuinely left before Phase 8 can be called fully qualified
 
 TCP testing, full bidirectional/under-load probe and ping behavior, a

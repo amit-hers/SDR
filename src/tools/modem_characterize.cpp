@@ -16,10 +16,13 @@
 int main(int argc,char** argv) {
     try {
         unsigned frames=100;
-        if(argc==2 && std::string(argv[1])=="--rtl-vectors") {
-            sdr::Modem modem(sdr::ModScheme::QAM64);
-            for(unsigned label=0;label<64;++label) {
-                const uint8_t byte=static_cast<uint8_t>(label<<2);
+        if(argc==2 && (std::string(argv[1])=="--rtl-vectors" || std::string(argv[1])=="--rtl-vectors=qam16")) {
+            const bool qam16=std::string(argv[1])=="--rtl-vectors=qam16";
+            sdr::Modem modem(qam16?sdr::ModScheme::QAM16:sdr::ModScheme::QAM64);
+            const unsigned labels=qam16?16u:64u;
+            const unsigned shift=qam16?4u:2u;
+            for(unsigned label=0;label<labels;++label) {
+                const uint8_t byte=static_cast<uint8_t>(label<<shift);
                 std::vector<std::complex<float>> symbols;
                 modem.modulate(&byte,1,symbols);
                 const auto i=static_cast<uint16_t>(static_cast<int16_t>(std::lround(symbols[0].real()*8192)));

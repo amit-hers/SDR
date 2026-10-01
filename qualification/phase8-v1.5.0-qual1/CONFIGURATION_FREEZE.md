@@ -49,7 +49,7 @@ envelope** until a fresh qualification pass covers the new value.
 | Fault | Recovery path | Frozen result |
 |---|---|---|
 | RF interruption | Automatic (RF_LOSS -> RF_LOSS_CLEARED on restore) | PASS -- ~129s detection (matches the 120s threshold), fully automatic resumption, no manual intervention |
-| Demod stall/reset | `reset_demod` control action | **CONDITIONAL** -- stalled the demodulator when exercised under active traffic in this pass (see Known Gaps); `restart_bridge` is the confirmed-working recovery when this happens |
+| Demod stall/reset | `reset_demod` control action | **NOT SELF-SUFFICIENT** -- reproduced 2-for-2 (once under active peer traffic, once fully isolated with no peer at all), so this is not a live-traffic-specific race: `reset_demod` leaves `cpu_decode_pct` at 0% despite reporting `"ok":true` every time it has been tried on real hardware so far. `restart_bridge` is the confirmed-working recovery; always follow `reset_demod` with it and verify decode activity resumed rather than trusting the action's own response. See Known Gaps. |
 | Bridge crash/hang | Supervisor auto-restart, or `restart_bridge` control action | PASS |
 | Full appliance restart | `restart_appliance` control action | PASS -- ~42-46s to full recovery across two independent trials, both units |
 | Config change | `POST /api/v1/config` (validate -> backup -> atomic replace -> apply -> verify -> rollback) | PASS for the apply-success and reject-invalid paths; the verify-failure -> rollback path is covered by automated fixture tests (not re-forced on live hardware this pass -- see Known Gaps) |
@@ -59,10 +59,14 @@ envelope** until a fresh qualification pass covers the new value.
 
 ## Known gaps (do not treat as qualified until closed)
 
-1. **`reset_demod` under active traffic can stall the demodulator** instead
-   of recovering it (task 14 finding). Until root-caused, treat
-   `reset_demod` as needing a `restart_bridge` follow-up check, not as a
-   self-sufficient recovery action for automated fault response.
+1. **`reset_demod` reliably stalls decode activity (`cpu_decode_pct` -> 0%)
+   despite reporting success.** Reproduced twice: once under active peer
+   traffic (2026-09-26), once fully isolated with no peer connected at all
+   (2026-09-29) -- ruling out "only under live traffic" as the cause.
+   `restart_bridge` recovers it both times. Until root-caused in
+   `fpga/scripts/reset_demod.sh`/`sdr_agent.c`, this action must never be
+   used unattended: always follow it with `restart_bridge` and confirm
+   `cpu_decode_pct` actually recovered.
 2. **TCP is entirely unvalidated** in this qualification pass. No claim is
    made about TCP behavior over this link.
 3. **A genuine forced `QUEUE_DROP` was not produced.** The queue-drop path

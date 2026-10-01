@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import csv
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from mission.node import Node
 from mission.protocol import Authenticator, ReplayWindow, pack, unpack, b64
 from mission.service import load_config
 
+ROOT = Path(__file__).resolve().parents[2]
 KEY = '82' * 32
 CAPS = {'modulations':['BPSK','QPSK','16QAM','64QAM'], 'fec':['none','rs255223']}
 
@@ -251,6 +253,36 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(amc.mode,'BPSK')
         for i in range(20):amc.update(good,{'modulations':['BPSK'],'fec':['none']},20+i)
         self.assertEqual(amc.mode,'BPSK')
+
+    def test_amc_thresholds_calibrated_against_measured_awgn_sweep(self):
+        # Pins AMC.snr to docs/reports/mission-awgn.csv, the project's own
+        # symbol-domain AWGN characterization -- not to an assumption. Fails
+        # loudly if either drifts out of sync with the other: a re-measured
+        # CSV that moves a crossover point, or a threshold edit that is no
+        # longer grounded in measured data, both belong in the SAME commit
+        # as a look at this test.
+        path = ROOT / 'docs' / 'reports' / 'mission-awgn.csv'
+        if not path.exists():
+            self.skipTest('mission-awgn.csv not generated in this checkout')
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+        per = {}
+        for r in rows:
+            if r['fec'] == 'none':
+                per[(r['mode'], int(r['snr_db']))] = float(r['per'])
+        DOWNGRADE_TRIGGER = .10  # AMC.update()'s own "per > .10" degradation gate
+        for mode, threshold in zip(AMC.modes, AMC.snr):
+            if mode == 'BPSK':
+                continue  # no threshold to check -- always the floor mode
+            measured = per.get((mode, threshold))
+            self.assertIsNotNone(
+                measured, f'{mode} has no measured PER at its own threshold {threshold} dB -- '
+                'add that SNR point to the sweep before trusting this threshold')
+            self.assertLessEqual(
+                measured, DOWNGRADE_TRIGGER,
+                f'{mode} threshold {threshold} dB measures {measured:.0%} PER, above the '
+                f'controller\'s own {DOWNGRADE_TRIGGER:.0%} downgrade trigger -- the '
+                'controller would upgrade into this mode and immediately downgrade back out')
 
     def test_clock_holdover_loss_and_monotonic(self):
         clock=MissionClock()

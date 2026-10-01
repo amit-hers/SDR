@@ -58,11 +58,53 @@ action rather than one that itself sometimes requires a follow-up
 
 ## Open questions for follow-up (not resolved in this session)
 
-- Is this reproducible, or a one-off? (single occurrence so far)
-- Does it correlate with the bridge being under active peer traffic at the
-  moment of the pulse (as opposed to reset_demod's original bring-up-only
-  validation, which was on an idle/just-started link)?
+- ~~Is this reproducible, or a one-off?~~ **Reproduced, 2026-09-29** -- see
+  below. Not a one-off.
+- ~~Does it correlate with the bridge being under active peer traffic~~
+  **No -- reproduced in isolation, with NO peer connected at all.** See
+  below; this rules out "only happens under active peer traffic" as the
+  explanation.
 - Should `reset_demod`'s response include a post-pulse decode-activity
   check (poll `cpu_decode_pct` / a frames-advancing check for a bounded
   window) before reporting `"ok":true`, rather than trusting the script's
-  own immediate register readback alone?
+  own immediate register readback alone? Still open, and now looks more
+  clearly warranted -- see below.
+
+## Reproduction 2026-09-29, in isolation (no peer connected at all)
+
+Only one unit was reachable this session (unit B, mgmt `192.168.2.1`,
+serial `3SXRLJMXS7EL5IBJ`) -- no peer transmitting, `peer.compatibility`
+already `UNKNOWN` throughout, no forwarding possible either way. This
+removes "active peer traffic" as a variable entirely.
+
+- Before: `cpu_decode_pct` 15.1% (nonzero even alone -- the demod is still
+  doing SOME decode work on whatever it hears, presumably noise/self, with
+  no compatible peer to lock onto).
+- `POST /api/v1/control/reset_demod?confirm=yes` -> `{"ok":true,
+  "output":"demod reset pulsed: lock=0x00000004 mu_clamped=0x00000003\n"}`
+  -- same shape of "success" response as the first incident.
+- After (one full `--stats` interval later): `cpu_decode_pct` **0.0**,
+  `rx.dma` still climbing normally (6771, up from before -- so the DMA
+  drain itself is NOT stuck, only the decode work built on top of it).
+- `POST /api/v1/control/restart_bridge?confirm=yes` -> recovered:
+  `cpu_decode_pct` back to 13.8% (in line with the pre-reset baseline)
+  within one `--stats` interval of the bridge coming back up.
+
+**This changes the interpretation.** The original finding's "does it need
+active peer traffic" question is answered NO: the same 0%-decode-then-
+recovered-by-restart_bridge pattern reproduces with no peer at all. That
+makes "races something in the bridge's own receive state whenever it's
+invoked" a better working theory than "specifically a live-traffic
+problem" -- `reset_demod` may simply always leave `cpu_decode_pct` at 0%
+until the next `restart_bridge`, regardless of what else is going on. The
+DMA drain precondition the script's own design relies on (`rx.dma`
+climbing normally in both incidents) is clearly satisfied; whatever breaks
+is downstream of that, in the decode path itself.
+
+**Practical guidance updated**: treat `reset_demod` as NOT self-sufficient
+under any circumstances observed so far -- always follow it with a
+`restart_bridge` and verify `cpu_decode_pct` recovers, rather than trusting
+the action's own `"ok":true` response. This is now two-for-two on real
+hardware; the fixture-only host tests (`tests/sdr_agent_test.sh`, task 10)
+never exercised the actual FPGA register behavior, which is presumably
+why this wasn't caught until real hardware qualification.

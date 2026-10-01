@@ -136,6 +136,12 @@ endif()
 if(IVERILOG_EXECUTABLE)
     add_test(NAME qam64_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/qam64_test.sh ${PROJECT_SOURCE_DIR}
              $<TARGET_FILE:sdr-modem-characterize>)
+    add_test(NAME qam16_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/qam16_test.sh ${PROJECT_SOURCE_DIR}
+             $<TARGET_FILE:sdr-modem-characterize>)
+    add_test(NAME rs_encoder_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_encoder_test.sh ${PROJECT_SOURCE_DIR}
+             ${Python3_EXECUTABLE})
+    add_test(NAME rs_syndrome_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_syndrome_test.sh ${PROJECT_SOURCE_DIR}
+             ${Python3_EXECUTABLE})
 endif()
 add_test(NAME modem_characterization COMMAND sdr-modem-characterize 8)
 if(MISSION_CRYPTO_IMPORT EQUAL 0)

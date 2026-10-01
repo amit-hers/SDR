@@ -109,7 +109,33 @@ class RFMonitor:
 
 class AMC:
     modes = ('BPSK', 'QPSK', '16QAM', '64QAM')
-    snr = (0, 9, 16, 25)
+    # SNR thresholds calibrated against docs/reports/mission-awgn.csv's own
+    # symbol-domain AWGN sweep (48 mode/FEC/SNR points, 100 frames each),
+    # not chosen a priori. The uncoded PER at each measured point (this
+    # controller's own downgrade trigger is per > .10, so that is the bar
+    # each threshold is checked against):
+    #
+    #   QPSK   snr=6  per=1.00 (fail)  snr=12 per=0.07 (passes, barely)
+    #   16QAM  snr=12 per=1.00 (fail)  snr=18 per=0.22 (FAILS)  snr=24 per=0.00 (passes clean)
+    #   64QAM  snr=18 per=1.00 (fail)  snr=24 per=0.32 (FAILS)  snr=30 per=0.00 (passes clean)
+    #
+    # The previous thresholds (9/16/25) sat right on top of the FAILING
+    # points above (16QAM's old 16 dB threshold is 2 dB below the measured
+    # 18 dB point that still showed 22% PER; 64QAM's old 25 dB threshold is
+    # 1 dB above the measured 24 dB point that showed 32% PER) -- a
+    # feedback loop reporting SNR/EVM near those thresholds would pass the
+    # `candidates` gate, upgrade, then immediately see per > .10 on actual
+    # traffic and downgrade again: oscillation, not the "sustained upgrade"
+    # this controller is meant to produce. Set at the nearest CONFIRMED
+    # clean point instead of an interpolated middle value (only 6 dB
+    # granularity exists in the data, so a guessed intermediate number
+    # would be false precision); this stays a deliberately conservative
+    # choice, not a lab calibration -- symbol-domain AWGN excludes carrier/
+    # timing/analog impairments, and real SNR feedback is itself only an
+    # uncalibrated estimate (docs/mission-network.md). The controller's own
+    # hysteresis (5 consecutive good ticks to upgrade, one bad tick to
+    # downgrade) is the remaining margin against being exactly at the edge.
+    snr = (0, 12, 24, 30)
     evm = (1., .35, .16, .07)
 
     def __init__(self, qualified=('BPSK', 'QPSK')):
