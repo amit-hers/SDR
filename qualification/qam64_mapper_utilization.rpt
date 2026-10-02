@@ -1,9 +1,9 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
 ---------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2025.1 (lin64) Build 6140274 Wed May 21 22:58:25 MDT 2025
-| Date         : Wed Sep 30 19:21:31 2026
+| Date         : Fri Oct  2 09:28:24 2026
 | Host         : amither-Legion-T5-28IMB05 running 64-bit Ubuntu 24.04.2 LTS
-| Command      : report_utilization -file ./qam64_mapper_utilization.rpt
+| Command      : report_utilization -file qualification/qam64_mapper_utilization.rpt
 | Design       : qam64_mapper
 | Device       : xc7z020clg400-2
 | Speed File   : -2

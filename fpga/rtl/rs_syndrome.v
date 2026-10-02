@@ -59,7 +59,7 @@ module rs_syndrome (
     assign s_ready = in_data && out_free;
     wire accept_data = in_data && s_valid && out_free;
 
-    wire syndromes_nonzero = acc[0]|acc[1]|acc[2]|acc[3]|acc[4]|acc[5]|acc[6]|acc[7]|
+    wire [7:0] syndromes_nonzero = acc[0]|acc[1]|acc[2]|acc[3]|acc[4]|acc[5]|acc[6]|acc[7]|
                               acc[8]|acc[9]|acc[10]|acc[11]|acc[12]|acc[13]|acc[14]|acc[15]|
                               acc[16]|acc[17]|acc[18]|acc[19]|acc[20]|acc[21]|acc[22]|acc[23]|
                               acc[24]|acc[25]|acc[26]|acc[27]|acc[28]|acc[29]|acc[30]|acc[31];

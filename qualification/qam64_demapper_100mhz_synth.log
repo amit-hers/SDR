@@ -1,0 +1,253 @@
+#-----------------------------------------------------------
+# Vivado v2025.1 (64-bit)
+# SW Build 6140274 on Wed May 21 22:58:25 MDT 2025
+# IP Build 6138677 on Thu May 22 03:10:11 MDT 2025
+# SharedData Build 6139179 on Tue May 20 17:58:58 MDT 2025
+# Start of session at: Fri Oct  2 09:24:42 2026
+# Process ID         : 307695
+# Current directory  : /home/amither/Documents/SDR
+# Command line       : vivado -mode batch -source qualification/qam64_demapper_100mhz_ooc_synth.tcl -log qualification/qam64_demapper_100mhz_synth.log -nojournal
+# Log file           : /home/amither/Documents/SDR/qualification/qam64_demapper_100mhz_synth.log
+# Journal file       : 
+# Running On         : amither-Legion-T5-28IMB05
+# Platform           : Ubuntu
+# Operating System   : Ubuntu 24.04.2 LTS
+# Processor Detail   : Intel(R) Core(TM) i9-10900 CPU @ 2.80GHz
+# CPU Frequency      : 4654.872 MHz
+# CPU Physical cores : 10
+# CPU Logical cores  : 20
+# Host memory        : 67146 MB
+# Swap memory        : 8589 MB
+# Total Virtual      : 75736 MB
+# Available Virtual  : 54334 MB
+#-----------------------------------------------------------
+source qualification/qam64_demapper_100mhz_ooc_synth.tcl
+# read_verilog [file join [file dirname [info script]] .. fpga rtl qam64_demapper.v]
+# synth_design -top qam64_demapper -part xc7z020clg400-2 -mode out_of_context
+Command: synth_design -top qam64_demapper -part xc7z020clg400-2 -mode out_of_context
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Synth 8-7079] Multithreading enabled for synth_design using a maximum of 7 processes.
+INFO: [Synth 8-7078] Launching helper process for spawning children vivado processes
+INFO: [Synth 8-7075] Helper process launched with PID 307744
+---------------------------------------------------------------------------------
+Starting Synthesize : Time (s): cpu = 00:00:03 ; elapsed = 00:00:03 . Memory (MB): peak = 1951.281 ; gain = 416.570 ; free physical = 5006 ; free virtual = 50446
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'qam64_demapper' [/home/amither/Documents/SDR/fpga/rtl/qam64_demapper.v:28]
+INFO: [Synth 8-6155] done synthesizing module 'qam64_demapper' (0#1) [/home/amither/Documents/SDR/fpga/rtl/qam64_demapper.v:28]
+---------------------------------------------------------------------------------
+Finished Synthesize : Time (s): cpu = 00:00:04 ; elapsed = 00:00:04 . Memory (MB): peak = 2024.219 ; gain = 489.508 ; free physical = 4939 ; free virtual = 50380
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Constraint Validation : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2042.031 ; gain = 507.320 ; free physical = 4945 ; free virtual = 50387
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Loading Part and Timing Information
+---------------------------------------------------------------------------------
+Loading part: xc7z020clg400-2
+INFO: [Device 21-403] Loading part xc7z020clg400-2
+---------------------------------------------------------------------------------
+Finished Loading Part and Timing Information : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2042.031 ; gain = 507.320 ; free physical = 4944 ; free virtual = 50387
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished RTL Optimization Phase 2 : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2050.938 ; gain = 516.227 ; free physical = 4937 ; free virtual = 50380
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start RTL Component Statistics 
+---------------------------------------------------------------------------------
+Detailed RTL Component Info : 
++---Adders : 
+	   3 Input   17 Bit       Adders := 2     
++---XORs : 
+	   2 Input      3 Bit         XORs := 2     
++---Registers : 
+	               17 Bit    Registers := 2     
+	                6 Bit    Registers := 1     
+	                3 Bit    Registers := 2     
+	                1 Bit    Registers := 4     
++---Muxes : 
+	   8 Input   15 Bit        Muxes := 2     
+---------------------------------------------------------------------------------
+Finished RTL Component Statistics 
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Part Resource Summary
+---------------------------------------------------------------------------------
+Part Resources:
+DSPs: 220 (col length:60)
+BRAMs: 280 (col length: RAMB18 60 RAMB36 30)
+---------------------------------------------------------------------------------
+Finished Part Resource Summary
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Cross Boundary and Area Optimization
+---------------------------------------------------------------------------------
+WARNING: [Synth 8-7080] Parallel synthesis criteria is not met
+DSP Report: Generating DSP ei, operation Mode is: A2*B2.
+DSP Report: register mid_di_reg is absorbed into DSP ei.
+DSP Report: register mid_di_reg is absorbed into DSP ei.
+DSP Report: operator ei is absorbed into DSP ei.
+DSP Report: Generating DSP m_error_reg, operation Mode is: (C+A2*B2)'.
+DSP Report: register mid_dq_reg is absorbed into DSP m_error_reg.
+DSP Report: register mid_dq_reg is absorbed into DSP m_error_reg.
+DSP Report: register m_error_reg is absorbed into DSP m_error_reg.
+DSP Report: operator m_error0 is absorbed into DSP m_error_reg.
+DSP Report: operator eq is absorbed into DSP m_error_reg.
+---------------------------------------------------------------------------------
+Finished Cross Boundary and Area Optimization : Time (s): cpu = 00:00:08 ; elapsed = 00:00:08 . Memory (MB): peak = 2207.812 ; gain = 673.102 ; free physical = 4828 ; free virtual = 50271
+---------------------------------------------------------------------------------
+ Sort Area is  m_error_reg_2 : 0 0 : 2425 2425 : Used 1 time 0
+ Sort Area is  ei_0 : 0 0 : 2298 2298 : Used 1 time 0
+---------------------------------------------------------------------------------
+Start ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+
+DSP: Preliminary Mapping Report (see note below. The ' indicates corresponding REG is set)
++---------------+-------------+--------+--------+--------+--------+--------+------+------+------+------+-------+------+------+
+|Module Name    | DSP Mapping | A Size | B Size | C Size | D Size | P Size | AREG | BREG | CREG | DREG | ADREG | MREG | PREG | 
++---------------+-------------+--------+--------+--------+--------+--------+------+------+------+------+-------+------+------+
+|qam64_demapper | A2*B2       | 17     | 17     | -      | -      | 34     | 1    | 1    | -    | -    | -     | 0    | 0    | 
+|qam64_demapper | (C+A2*B2)'  | 17     | 17     | 32     | -      | 32     | 1    | 1    | 0    | -    | -     | 0    | 1    | 
++---------------+-------------+--------+--------+--------+--------+--------+------+------+------+------+-------+------+------+
+
+Note: The table above is a preliminary report that shows the DSPs inferred at the current stage of the synthesis flow. Some DSP may be reimplemented as non DSP primitives later in the synthesis flow. Multiple instantiated DSPs are reported only once.
+---------------------------------------------------------------------------------
+Finished ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Timing Optimization
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Timing Optimization : Time (s): cpu = 00:00:08 ; elapsed = 00:00:08 . Memory (MB): peak = 2207.812 ; gain = 673.102 ; free physical = 4828 ; free virtual = 50271
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Technology Mapping
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Technology Mapping : Time (s): cpu = 00:00:08 ; elapsed = 00:00:08 . Memory (MB): peak = 2207.812 ; gain = 673.102 ; free physical = 4828 ; free virtual = 50270
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished IO Insertion : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Instances
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Instances : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Rebuilding User Hierarchy
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Rebuilding User Hierarchy : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Ports
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Ports : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Handling Custom Attributes
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Handling Custom Attributes : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Nets
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Nets : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Writing Synthesis Report
+---------------------------------------------------------------------------------
+
+DSP Final Report (the ' indicates corresponding REG is set)
++---------------+-------------+--------+--------+--------+--------+--------+------+------+------+------+-------+------+------+
+|Module Name    | DSP Mapping | A Size | B Size | C Size | D Size | P Size | AREG | BREG | CREG | DREG | ADREG | MREG | PREG | 
++---------------+-------------+--------+--------+--------+--------+--------+------+------+------+------+-------+------+------+
+|qam64_demapper | A'*B'       | 30     | 18     | -      | -      | 34     | 1    | 1    | -    | -    | -     | 0    | 0    | 
+|qam64_demapper | (C+A'*B')'  | 30     | 18     | 32     | -      | 32     | 1    | 1    | 0    | -    | -     | 0    | 1    | 
++---------------+-------------+--------+--------+--------+--------+--------+------+------+------+------+-------+------+------+
+
+
+Report BlackBoxes: 
++-+--------------+----------+
+| |BlackBox name |Instances |
++-+--------------+----------+
++-+--------------+----------+
+
+Report Cell Usage: 
++------+--------+------+
+|      |Cell    |Count |
++------+--------+------+
+|1     |CARRY4  |    32|
+|2     |DSP48E1 |     2|
+|3     |LUT1    |    23|
+|4     |LUT2    |   109|
+|5     |LUT3    |     2|
+|6     |LUT4    |    12|
+|7     |LUT5    |    19|
+|8     |LUT6    |    16|
+|9     |FDRE    |    16|
++------+--------+------+
+
+Report Instance Areas: 
++------+---------+-------+------+
+|      |Instance |Module |Cells |
++------+---------+-------+------+
+|1     |top      |       |   231|
++------+---------+-------+------+
+---------------------------------------------------------------------------------
+Finished Writing Synthesis Report : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4727 ; free virtual = 50167
+---------------------------------------------------------------------------------
+Synthesis finished with 0 errors, 0 critical warnings and 1 warnings.
+Synthesis Optimization Runtime : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.625 ; gain = 841.914 ; free physical = 4729 ; free virtual = 50168
+Synthesis Optimization Complete : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.633 ; gain = 841.914 ; free physical = 4736 ; free virtual = 50176
+INFO: [Project 1-571] Translating synthesized netlist
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2390.500 ; gain = 0.000 ; free physical = 4893 ; free virtual = 50332
+INFO: [Netlist 29-17] Analyzing 34 Unisim elements for replacement
+INFO: [Netlist 29-28] Unisim Transformation completed in 0 CPU seconds
+INFO: [Project 1-570] Preparing netlist for logic optimization
+INFO: [Opt 31-138] Pushed 0 inverter(s) to 0 load pin(s).
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2525.082 ; gain = 0.000 ; free physical = 4824 ; free virtual = 50263
+INFO: [Project 1-111] Unisim Transformation Summary:
+No Unisim elements were transformed.
+
+Synth Design complete | Checksum: 68be7711
+INFO: [Common 17-83] Releasing license: Synthesis
+14 Infos, 1 Warnings, 0 Critical Warnings and 0 Errors encountered.
+synth_design completed successfully
+synth_design: Time (s): cpu = 00:00:15 ; elapsed = 00:00:13 . Memory (MB): peak = 2525.117 ; gain = 990.406 ; free physical = 4821 ; free virtual = 50255
+INFO: [Common 17-2834] synth_design peak Physical Memory [PSS] (MB): overall = 1980.068; main = 1980.068; forked = 335.189
+INFO: [Common 17-2834] synth_design peak Virtual Memory [VSS] (MB): overall = 3256.020; main = 2525.086; forked = 956.203
+# create_clock -name clk -period 10.000 [get_ports clk]
+# report_utilization -file [file join [file dirname [info script]] qam64_demapper_100mhz_utilization.rpt]
+# report_timing_summary -file [file join [file dirname [info script]] qam64_demapper_100mhz_timing.rpt]
+INFO: [Timing 38-35] Done setting XDC timing constraints.
+INFO: [Timing 38-91] UpdateTimingParams: Speed grade: -2, Delay Type: min_max.
+INFO: [Timing 38-191] Multithreading enabled for timing update using a maximum of 8 CPUs
+WARNING: [Timing 38-242] The property HD.CLK_SRC of clock port "clk" is not set. In out-of-context mode, this prevents timing estimation for clock delay/skew
+Resolution: Set the HD.CLK_SRC property of the out-of-context port to the location of the clock buffer instance in the top-level design
+# close_design
+INFO: [Common 17-206] Exiting Vivado at Fri Oct  2 09:25:04 2026...

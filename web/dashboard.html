@@ -4,8 +4,8 @@
   Appliance dashboard: UNIT-A / UNIT-B side by side, with the evidence
   behind each unit's HEALTHY / DEGRADED / FAULT verdict, not just the label.
 
-  WHAT THIS IS. A single static HTML file, no build step, no dependency, no
-  server component of its own -- open it directly from disk (file://) or
+  WHAT THIS IS. A static page with a configuration script, no build step, and an
+  optional local credential proxy (serve_dashboard.py) -- open it from disk or
   serve it with anything ("python3 -m http.server"). It talks straight to
   each unit's sdr-agent over the trusted USB management network the rest of
   docs/diagnostics-api.md already assumes, the same way curl or
@@ -32,10 +32,8 @@
   tuned without touching firmware on either board. See classify() below for
   the exact rules, each with the field it reads.
 
-  NO CONTROL ACTIONS HERE. This is deliberately read-only: it shows
-  evidence, it does not expose restart_bridge/clear_counters/config-apply/
-  etc. Wiring the control API into a UI is a different, separately
-  reviewable piece of work.
+  Configuration editing uses the device's validate/apply/verify/rollback API.
+  The optional serve_dashboard.py keeps device credentials on the host.
 
   CORS. Every sdr-agent response carries Access-Control-Allow-Origin: * and
   answers OPTIONS without authentication specifically so a page like this
@@ -43,6 +41,7 @@
   comment) -- a browser refuses to expose a cross-origin response to page
   JavaScript otherwise, preflight included.
 -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Appliance Dashboard</title>
 <style>
 :root {
@@ -78,11 +77,12 @@ body {
 h1 { font-size: 18px; margin: 0 0 4px; }
 .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
 .topbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
-button, input {
+button, input, select {
   font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--panel); color: var(--text);
 }
 button { cursor: pointer; }
+button.primary { background: #1763c0; color: white; border-color: #1763c0; font-weight: 600; }
 button:hover { filter: brightness(0.97); }
 .settings {
   display: none; grid-template-columns: 1fr 1fr; gap: 16px; background: var(--panel);
@@ -118,7 +118,7 @@ button:hover { filter: brightness(0.97); }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
   margin: 14px 0 6px;
 }
-.kv { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 12.5px; }
+.kv { overflow-wrap: anywhere; display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 12.5px; }
 .kv div:nth-child(odd) { color: var(--muted); }
 .kv div:nth-child(even) { font-family: var(--mono); text-align: right; }
 .events { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
@@ -134,16 +134,30 @@ button:hover { filter: brightness(0.97); }
 .event-row .sev.info { color: var(--muted); }
 .event-row .msg { overflow-wrap: anywhere; }
 .empty { color: var(--muted); font-size: 12.5px; padding: 8px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font: 12px/1.5 var(--mono); }
+form .kv { grid-template-columns: minmax(0, 1fr) minmax(100px, 150px); align-items: center; gap: 8px; }
+form input, form select { width: 100%; min-width: 0; }
+button:disabled { opacity: 0.5; cursor: default; }
+@media (max-width: 500px) { .kv { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+details { margin-top: 14px; } summary { cursor: pointer; font-weight: 600; }
 </style>
 
 <h1>Appliance Dashboard</h1>
-<p class="sub">Live evidence behind each unit's verdict &mdash; polls <code>/api/v1/status</code>, <code>/api/v1/radio</code> and <code>/api/v1/events</code> directly over the USB management network. Read-only: no control actions are issued from this page.</p>
+<p class="sub">Live evidence behind each unit's verdict &mdash; polls <code>/api/v1/status</code>, <code>/api/v1/radio</code> and <code>/api/v1/events</code> directly over the USB management network. Live diagnostics and reviewed RF configuration changes.</p>
 
 <div class="topbar">
-  <button id="toggleSettings" type="button">Settings</button>
+  <button id="configureA" class="primary" type="button">Configure UNIT-A</button>
+  <button id="configureB" class="primary" type="button">Configure UNIT-B</button>
+  <button id="toggleSettings" type="button">Connection settings</button>
+  <label for="refreshInterval">Telemetry refresh</label>
+  <select id="refreshInterval"><option value="1000">1 second</option><option value="2000" selected>2 seconds</option><option value="5000">5 seconds</option><option value="10000">10 seconds</option><option value="30000">30 seconds</option></select>
+  <button id="refreshNow" type="button">Refresh now</button>
+  <button id="pauseTelemetry" type="button">Pause telemetry</button>
   <span class="sub" id="pollStatus" style="margin:0;"></span>
 </div>
 
+<p class="sub">Use the blue Configure buttons to edit RF settings. Telemetry refresh controls this browser's polling; the device's telemetry generation interval is under Configure → Device telemetry interval.</p>
+<p id="editorError" role="alert" hidden>Configuration controls could not load. Refresh this page with Ctrl+Shift+R.</p>
 <div class="settings" id="settings">
   <div>
     <label for="aName">UNIT-A label</label>
@@ -151,7 +165,7 @@ button:hover { filter: brightness(0.97); }
     <label for="aUrl">UNIT-A base URL</label>
     <input id="aUrl" placeholder="http://192.168.2.17:8088">
     <label for="aToken">UNIT-A bearer token</label>
-    <input id="aToken" placeholder="token" autocomplete="off">
+    <input id="aToken" type="password" placeholder="token" autocomplete="off">
   </div>
   <div>
     <label for="bName">UNIT-B label</label>
@@ -159,10 +173,10 @@ button:hover { filter: brightness(0.97); }
     <label for="bUrl">UNIT-B base URL</label>
     <input id="bUrl" placeholder="http://192.168.2.1:8088">
     <label for="bToken">UNIT-B bearer token</label>
-    <input id="bToken" placeholder="token" autocomplete="off">
+    <input id="bToken" type="password" placeholder="token" autocomplete="off">
   </div>
   <div class="hint" style="grid-column: 1 / -1;">
-    Saved to this browser's local storage only (never sent anywhere except the URLs above) &mdash;
+    Local server connections use host token files automatically. Direct connection settings are saved in this browser &mdash;
     same trust level as a token file on your own machine. Nothing here is shared between browsers or devices.
   </div>
 </div>
@@ -202,7 +216,7 @@ function readSettingsForm() {
   };
   saveSettings(settings);
 }
-["aName","aUrl","aToken","bName","bUrl","bToken"].forEach((id) => $(id).addEventListener("change", readSettingsForm));
+["aName","aUrl","aToken","bName","bUrl","bToken"].forEach((id) => $(id).addEventListener("input", readSettingsForm));
 $("toggleSettings").addEventListener("click", () => $("settings").classList.toggle("open"));
 fillSettingsForm();
 
@@ -215,10 +229,21 @@ function panelHtml(key) {
         <span class="badge UNREACHABLE" id="${key}-badge">UNKNOWN</span>
       </div>
       <ul class="evidence" id="${key}-evidence"></ul>
+      <div id="${key}-config-editor"></div>
       <div class="section-title">Radio</div>
       <div class="kv" id="${key}-radio"></div>
       <div class="section-title">Link</div>
       <div class="kv" id="${key}-link"></div>
+      <div class="section-title">Diagnostics & live rates</div>
+      <div class="sub" id="${key}-freshness">Waiting for data</div>
+      <div class="kv" id="${key}-diagnostics"></div>
+      <details><summary>Full live status (FPGA, modem, queues, Ethernet)</summary><pre id="${key}-raw"></pre></details>
+      <details><summary>Logs & persistent fault history</summary>
+        <p class="sub">History survives reboots. Its uptime timestamps cannot be compared across boots; these entries do not indicate a current fault.</p>
+        <button type="button" id="${key}-collect">Load diagnostic details</button>
+        <button type="button" id="${key}-export">Download diagnostic bundle</button>
+        <pre id="${key}-detail">Load on demand to avoid extra device polling.</pre>
+      </details>
       <div class="section-title">Recent events</div>
       <div class="events" id="${key}-events"></div>
     </div>`;
@@ -260,6 +285,9 @@ function ago(seconds) {
 // Every rule below names the exact field it read, so the panel can show the
 // same reasoning it acted on -- a verdict with no visible evidence is not
 // more trustworthy than one with gaps, it is just less checkable.
+const snapshots = {};
+const previous = {};
+const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const RECENT_WINDOW_S = 300; // matches RECOVERY_WINDOW_S's own "still relevant" reasoning
 
 function classify(status, radio, events) {
@@ -273,8 +301,12 @@ function classify(status, radio, events) {
   const sup = status.supervisor || {};
   const progress = status.progress || {};
   const peer = (status.bridge && status.bridge.peer) || {};
-  const uptime = (status.unit && status.unit.uptime_s) || null;
+  const uptime = status.unit?.uptime_s ?? null;
 
+  if (!radio) raise("DEGRADED", "radio endpoint unavailable; RF configuration unverified");
+  if (!Array.isArray(events)) raise("DEGRADED", "events endpoint unavailable; fault event state unverified");
+  if (sup.bridges_running == null || !progress.verdict || !peer.compatibility) raise("DEGRADED", "incomplete status; health cannot be fully verified");
+  if (Number(sup.faulted) > 0) raise("FAULT", "supervisor reports faulted");
   if (sup.bridges_running === 0) raise("FAULT", `no bridge process running (supervisors: ${fmt(sup.supervisors)})`);
   if (progress.verdict === "not_forwarding") raise("FAULT", "progress verdict: not_forwarding");
   if (progress.verdict === "NO_RX_PROGRESS") raise("FAULT", `no received frames for over 120s (frames idle ${fmt(progress.frames_idle_s)}s)`);
@@ -308,7 +340,7 @@ function classify(status, radio, events) {
 
   if (Array.isArray(events) && uptime !== null) {
     const recent = events.filter((e) => {
-      const ts = Number(e.timestamp_monotonic_s);
+      const ts = e.timestamp_monotonic_s == null ? NaN : Number(e.timestamp_monotonic_s);
       return Number.isFinite(ts) && (uptime - ts) <= RECENT_WINDOW_S && (uptime - ts) >= 0;
     });
     const faultCodes = { SUPERVISOR_FAULT: 1, PREFLIGHT_FAIL: 1, BRIDGE_HUNG: 1, CONFIG_REJECTED: 1 };
@@ -336,7 +368,9 @@ function renderUnreachable(key, label, reason) {
   $(`${key}-name`).textContent = label;
   $(`${key}-serial`).textContent = reason;
   setBadge(key, "UNREACHABLE");
-  $(`${key}-evidence`).innerHTML = `<li>${reason}</li>`;
+  $(`${key}-freshness`).textContent = "Connection failed; last successful details below are stale.";
+  delete previous[key];
+  $(`${key}-evidence`).innerHTML = `<li>${esc(reason)}</li>`;
   $(`${key}-radio`).innerHTML = "";
   $(`${key}-link`).innerHTML = "";
   $(`${key}-events`).innerHTML = `<div class="empty">no data</div>`;
@@ -347,20 +381,23 @@ function renderUnit(key, label, status, radio, events) {
 
   const { level, evidence } = classify(status, radio, events);
   setBadge(key, level);
-  $(`${key}-evidence`).innerHTML = evidence.map((e) => `<li>${e}</li>`).join("");
+  $(`${key}-evidence`).innerHTML = evidence.map((e) => `<li>${esc(e)}</li>`).join("");
 
+  renderDiagnostics(key, status, radio, events);
   const r = radio || {};
   const req = r.requested || {}, act = r.actual || {};
   const radioRows = [
     ["TX LO (requested / actual)", `${fmt(req.tx_lo_hz)} / ${fmt(act.tx_lo_hz)} Hz`],
     ["RX LO (requested / actual)", `${fmt(req.rx_lo_hz)} / ${fmt(act.rx_lo_hz)} Hz`],
     ["Sample rate", `${fmt(req.sample_rate_hz)} / ${fmt(act.sample_rate_hz)} Hz`],
+    ["TX bandwidth (requested / actual)", `${fmt(req.tx_rf_bandwidth_hz)} / ${fmt(act.tx_rf_bandwidth_hz)} Hz`],
+    ["RX bandwidth (requested / actual)", `${fmt(req.rx_rf_bandwidth_hz)} / ${fmt(act.rx_rf_bandwidth_hz)} Hz`],
     ["RSSI", fmt(act.rssi_db, "dB")],
     ["RX gain", `${fmt(act.rx_gain_db, "dB")} (${fmt(act.rx_gain_mode)})`],
     ["TX attenuation", fmt(act.tx_attenuation_db, "dB")],
     ["Die temp", act.temp_mc != null ? fmt(act.temp_mc / 1000, "°C") : "—"],
   ];
-  $(`${key}-radio`).innerHTML = radioRows.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("");
+  $(`${key}-radio`).innerHTML = radioRows.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join("");
 
   const b = status.bridge || {};
   const tx = b.tx || {}, rx = b.rx || {}, q = b.queues || {};
@@ -376,23 +413,122 @@ function renderUnit(key, label, status, radio, events) {
     ["Bridges / supervisors running", `${fmt(sup.bridges_running)} / ${fmt(sup.supervisors)}`],
     ["FPGA magic / packet size", `${fmt(status.fpga && status.fpga.magic)} / ${fmt(status.fpga && status.fpga.packet_bytes)} B`],
   ];
-  $(`${key}-link`).innerHTML = linkRows.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("");
+  $(`${key}-link`).innerHTML = linkRows.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join("");
 
   const uptime = (status.unit && status.unit.uptime_s) || 0;
   const evList = (Array.isArray(events) ? events.slice(-12).reverse() : []);
   $(`${key}-events`).innerHTML = evList.length ? evList.map((e) => {
-    const age = Number.isFinite(Number(e.timestamp_monotonic_s)) ? ago(uptime - e.timestamp_monotonic_s) : "";
-    return `<div class="event-row"><span class="age">${age}</span><span class="sev ${e.severity}">${e.severity}</span><span class="msg"><b>${e.code}</b> ${e.message || ""}</span></div>`;
+    const age = e.timestamp_monotonic_s != null && Number.isFinite(Number(e.timestamp_monotonic_s)) ? ago(uptime - e.timestamp_monotonic_s) : "";
+    return `<div class="event-row"><span class="age">${age}</span><span class="sev">${esc(e.severity)}</span><span class="msg"><b>${esc(e.code)}</b> ${esc(e.message || "")}</span></div>`;
   }).join("") : `<div class="empty">no recent events</div>`;
 }
 
+
+function renderDiagnostics(key, status, radio, events) {
+  const now = Date.now(), old = previous[key];
+  const b = status.bridge || {}, rx = b.rx || {}, tx = b.tx || {}, probe = b.probe || {};
+  const compatible = old && old.url === settings[key].url && old.status.unit?.serial === status.unit?.serial && status.unit?.uptime_s >= old.status.unit?.uptime_s;
+  function rate(section, field) {
+    const current = b[section]?.[field], before = old?.status.bridge?.[section]?.[field];
+    if (!compatible || current == null || before == null || current < before || now <= old.time) return "—";
+    return ((current - before) / ((now - old.time) / 1000)).toFixed(1) + "/s";
+  }
+  const rows = [
+    ["Progress / RX idle", `${fmt(status.progress?.verdict)} / ${fmt(status.progress?.frames_idle_s, "s")}`],
+    ["Payload delivered idle", fmt(status.progress?.delivered_idle_s, "s")],
+    ["RX frames / CRC errors per second", `${rate("rx", "frames")} / ${rate("rx", "crc_errors")}`],
+    ["TX / RX payload bytes per second", `${rate("tx", "bytes")} / ${rate("rx", "bytes")}`],
+    ["RX control frames / total", `${fmt(rx.control)} / ${fmt(rx.frames)}`],
+    ["Probe sent / delivered / lost", `${fmt(probe.sent)} / ${fmt(probe.delivered)} / ${fmt(probe.lost)}`],
+    ["Probe loss (reported lost / sent)", probe.sent > 0 && probe.lost != null ? (100 * probe.lost / probe.sent).toFixed(2) + "%" : "—"],
+    ["Probe RTT p50 / p95 / p99 (ms)", ["p50", "p95", "p99"].map(k => probe.rtt_us?.[k] == null ? "—" : fmt(probe.rtt_us[k] / 1000)).join(" / ")],
+    ["TX errors / oversize / stall ms", `${fmt(tx.errors)} / ${fmt(tx.oversize)} / ${fmt(tx.stall_ms)}`],
+    ["RX DMA / boundary recovery / injection errors", `${fmt(rx.dma)} / ${fmt(rx.boundary_recovered)} / ${fmt(rx.inject_err)}`],
+    ["Queue depth control / bulk", `${fmt(b.queues?.control_depth)} / ${fmt(b.queues?.bulk_depth)}`],
+    ["Peer incompatibility reasons", b.peer?.reasons || "none reported"],
+    ["Supervisor fault / restart count", `${fmt(status.supervisor?.faulted)} / ${fmt(status.supervisor?.restarts)}`],
+    ["Configuration / provisioning", `${fmt(status.config?.status)} / ${fmt(status.config?.provisioning)}`],
+    ["Ethernet RX / TX packets", `${fmt(status.ethernet?.rx_packets)} / ${fmt(status.ethernet?.tx_packets)}`],
+    ["TX LO powerdown / radio mode", `${fmt(radio?.actual?.tx_lo_powerdown)} / ${fmt(radio?.actual?.ensm_mode)}`],
+    ["Uptime", fmt(status.unit?.uptime_s, "s")],
+  ];
+  $(`${key}-diagnostics`).innerHTML = rows.map(([k,v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join("");
+  $(`${key}-freshness`).textContent = `Last successful sample: ${new Date(now).toLocaleTimeString()}. Rates include control traffic; payload counters are separate.`;
+  snapshots[key] = {captured_at: new Date(now).toISOString(), status, radio, events};
+  $(`${key}-raw`).textContent = JSON.stringify(snapshots[key], null, 2);
+  previous[key] = {time: now, status, url: settings[key].url};
+}
+async function collectDetails(key, download) {
+  const unit = {...settings[key]}, button = $(`${key}-${download ? "export" : "collect"}`), output = $(`${key}-detail`);
+  button.disabled = true;
+  output.textContent = "Loading diagnostics…";
+  try {
+    const paths = download ? ["diagnostic-bundle", "fault-history"] : ["logs", "fault-history"];
+    const result = {captured_at: new Date().toISOString(), unit: unit.name, latest_sample: snapshots[key] || null};
+    for (const endpoint of paths) {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
+      try {
+        const response = await fetch(unit.url + "/api/v1/" + endpoint, {headers: {Authorization: "Bearer " + unit.token}, signal: controller.signal, cache: "no-store"});
+        result[endpoint] = response.ok ? (endpoint === "logs" ? await response.text() : await response.json()) : {error: "HTTP " + response.status};
+      } catch (error) { result[endpoint] = {error: String(error.message)}; }
+      finally { clearTimeout(timer); }
+    }
+    const text = JSON.stringify(result, null, 2);
+    output.textContent = text;
+    if (download) {
+      const url = URL.createObjectURL(new Blob([text], {type: "application/json"}));
+      const a = document.createElement("a"); a.href = url; a.download = `sdr-${key}-${Date.now()}.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  } finally { button.disabled = false; }
+}
+for (const key of ["a", "b"]) {
+  $(`${key}-collect`).addEventListener("click", () => collectDetails(key, false));
+  $(`${key}-export`).addEventListener("click", () => collectDetails(key, true));
+}
+
 // ── poll loop ─────────────────────────────────────────────────────────
-const POLL_MS = 2000;
-const FETCH_TIMEOUT_MS = 4000; // well under POLL_MS, so a slow/unreachable unit cannot pile up overlapping requests
+let POLL_MS = 2000;
+try { const saved = Number(localStorage.getItem("sdr-refresh-ms")); if ([1000,2000,5000,10000,30000].includes(saved)) POLL_MS = saved; } catch (_) {}
+$("refreshInterval").value = String(POLL_MS);
+let pollTimer = null, pollBusy = false, pollingPaused = false, pollingReady = false, refreshQueued = false;
+function schedulePoll(delay = POLL_MS) {
+  clearTimeout(pollTimer);
+  if (pollingReady && !pollingPaused) pollTimer = setTimeout(runPoll, delay);
+}
+async function runPoll() {
+  clearTimeout(pollTimer);
+  if (!pollingReady) return;
+  if (pollBusy) { refreshQueued = true; return; }
+  pollBusy = true;
+  $("refreshNow").disabled = true;
+  try { await tick(); }
+  finally {
+    pollBusy = false;
+    $("refreshNow").disabled = false;
+    if (pollingPaused) $("pollStatus").textContent = "Telemetry paused — displayed values are the last sample";
+    if (refreshQueued) { refreshQueued = false; runPoll(); }
+    else schedulePoll();
+  }
+}
+$("refreshInterval").addEventListener("change", () => {
+  POLL_MS = Number($("refreshInterval").value);
+  try { localStorage.setItem("sdr-refresh-ms", String(POLL_MS)); } catch (_) {}
+  $("pollStatus").textContent = pollingPaused ? "Telemetry paused" : `Refresh interval set to ${POLL_MS / 1000}s`;
+  if (!pollBusy) schedulePoll();
+});
+$("refreshNow").addEventListener("click", runPoll);
+$("pauseTelemetry").addEventListener("click", () => {
+  pollingPaused = !pollingPaused;
+  $("pauseTelemetry").textContent = pollingPaused ? "Resume telemetry" : "Pause telemetry";
+  if (pollingPaused) { clearTimeout(pollTimer); $("pollStatus").textContent = "Telemetry paused — displayed values are the last sample"; }
+  else runPoll();
+});
+const FETCH_TIMEOUT_MS = 15000; // Next poll starts only after this poll completes.
 
 async function pollOne(key) {
   const unit = settings[key];
-  if (!unit.url || !unit.token) { renderUnreachable(key, unit.name, "configure this unit's URL and token in Settings"); return; }
+  if (!unit.url || (!unit.token && !unit.url.startsWith("/devices/"))) { renderUnreachable(key, unit.name, "configure this unit's URL and token in Settings"); return; }
   const [statusR, radioR, eventsR] = await Promise.all([
     getJson(unit.url, unit.token, "/api/v1/status", FETCH_TIMEOUT_MS),
     getJson(unit.url, unit.token, "/api/v1/radio", FETCH_TIMEOUT_MS),
@@ -405,15 +541,24 @@ async function pollOne(key) {
     renderUnreachable(key, unit.name, reason);
     return;
   }
-  renderUnit(key, unit.name, statusR.body, radioR.ok ? radioR.body : null, eventsR.ok ? (eventsR.body.events || []) : []);
+  renderUnit(key, unit.name, statusR.body, radioR.ok ? radioR.body : null, eventsR.ok ? (eventsR.body.events || []) : null);
 }
 
 let tickCount = 0;
 async function tick() {
   tickCount++;
-  $("pollStatus").textContent = `polling every ${POLL_MS / 1000}s — tick ${tickCount}`;
+  $("pollStatus").textContent = pollingPaused ? "Refreshing once — automatic telemetry remains paused" : `polling with ${POLL_MS / 1000}s between completed samples — tick ${tickCount}`;
   await Promise.all([pollOne("a"), pollOne("b")]);
 }
-tick();
-setInterval(tick, POLL_MS);
+async function start() {
+  try {
+    const response = await fetch("/dashboard-connection.json", {cache: "no-store"});
+    if (response.ok) { settings = await response.json(); fillSettingsForm(); }
+  } catch (_) { /* Static serving still supports direct device connections. */ }
+  pollingReady = true;
+  runPoll();
+}
+start();
 </script>
+
+<script src="dashboard_config.js?v=20261002-2" onerror="document.getElementById('editorError').hidden=false"></script>

@@ -418,24 +418,59 @@ default `--demod-reset-script` points there.
 
 ## Web dashboard
 
-`web/dashboard.html` is UNIT-A and UNIT-B side by side, each with a
-HEALTHY / DEGRADED / FAULT badge and the specific evidence behind it -- not
-just the label. A single static file, no build step and no dependency:
-open it directly from disk, or serve it with anything
-(`python3 -m http.server`, from the `web/` directory). It talks to each
-unit's `sdr-agent` directly, the same trusted USB management network every
-other tool in this document uses, with a bearer token entered once per unit
-and kept in the browser's own local storage (never sent anywhere but that
-unit's URL).
+Run from the repository root:
 
-It polls three already-cheap endpoints per unit every 2 s --
-`/api/v1/status`, `/api/v1/radio`, `/api/v1/events` -- rather than
-`/api/v1/diagnostic-bundle` or `/api/v1/stream`: the bundle embeds the full
-64 KiB log ring and is sized for one on-demand pull, not a poll loop, and a
-browser's native `EventSource` cannot set the `Authorization` header this
-API requires on every route including the stream. Consuming the stream via
-`fetch()` + manual SSE framing would work but is real added complexity for
-a first version.
+```sh
+python3 web/serve_dashboard.py
+```
+
+Open `http://127.0.0.1:8000/dashboard.html`. The loopback-only server connects
+UNIT-A (`192.168.2.17`) and UNIT-B (`192.168.2.1`) using the existing files in
+`~/.config/sdr/tokens/`. Tokens stay on the host. Use `--unit-a`, `--unit-b`,
+`--serial-a`, `--serial-b`, and `--token-dir` for a different lab setup. Stop an
+older static server on port 8000 before starting this server.
+
+The page and `dashboard_config.js` also work with a static HTTP server;
+that mode requires each device URL and bearer token in Settings.
+
+Each unit shows a HEALTHY / DEGRADED / FAULT badge with its evidence, counter
+rates, payload vs. control traffic, probe loss/latency, radio readbacks,
+Ethernet/queue/supervisor diagnostics, and expandable raw status. Logs,
+persistent fault history, and downloadable diagnostic bundles load on demand.
+Persistent history spans reboots and does not set the current health badge.
+
+The page polls `/api/v1/status`, `/api/v1/radio`, and `/api/v1/events`, waiting
+the selected **Telemetry refresh** interval (1, 2, 5, 10, or 30 seconds) after
+each completed cycle to avoid overlapping requests. The browser remembers this
+choice. **Pause telemetry** stops automatic polling; **Refresh now** takes a
+single sample even while paused. **Device telemetry interval** in the radio
+editor is separate: it sets `STATS_S` on the SDR and requires Apply. Refreshing
+the browser faster than that interval may show repeated device samples.
+Unavailable radio/events data degrades the verdict instead of silently
+claiming full health. A failed status request marks retained diagnostics stale.
+
+Click the blue **Configure UNIT-A** or **Configure UNIT-B** button at the top.
+It opens the editor and loads the selected device configuration. Each unit also
+has a visible **Load settings to edit** button.
+Supported controls include TX/RX frequency and bandwidth, sample rate,
+TX attenuation, RX gain mode/manual gain, differential encoding, statistics
+interval, and probe interval. QPSK is the production modem; the page does not
+offer unsupported 16-QAM/64-QAM switching.
+
+**Validate & preview changes** checks device-schema ranges, attenuation steps,
+bandwidth vs. sample rate, and same-unit TX/RX separation. It compares frequencies
+and sample rate with fresh peer status, displays a change list and the full
+candidate, and preserves other configuration fields. These are local checks;
+the device remains the authoritative validator. **Apply reviewed changes**
+rechecks the loaded config for external changes, asks for confirmation, then
+calls the existing validate/apply/verify/rollback API. Applying restarts the
+selected unit's link. Peer changes are separate; updates are not atomic across
+two units. A lost response is an unknown outcome: reload configuration and
+inspect status before retrying.
+
+The local proxy exposes only the listed diagnostic reads and confirmed config
+POST, rejects cross-origin applies, bounds request size, and never returns
+credentials. It does not expose arbitrary device URLs or shell commands.
 
 **The verdict is computed in the page, not by sdr-agent.** The roadmap
 asked for HEALTHY/DEGRADED/FAULT with evidence drawn from several signals
@@ -462,15 +497,13 @@ naming the field it reads:
   relevant" reasoning) -- these have no `_CLEARED` counterpart, so recency
   is what keeps an old, resolved event from reading as still true forever.
 - **UNREACHABLE**: the page's own state, not the appliance's -- a fetch
-  failed, timed out (4 s, well under the 2 s poll interval so a stuck unit
-  cannot pile up overlapping requests), or returned 401. Distinct from
+  failed, timed out (15 s, with polling cycles serialized to avoid overlap), or returned 401. Distinct from
   FAULT on purpose: "the appliance told us it's broken" and "we don't even
   know" are different situations and look different on screen.
 
-**Deliberately read-only.** This page shows evidence; it does not expose
-`restart_bridge`, `clear_counters`, config-apply, or any other control
-action. Wiring the control API into a UI is a separate, separately
-reviewable piece of work.
+**Configuration changes are explicit.** Live diagnostics are read-only. The RF
+editor sends a configuration POST only after a preview and user confirmation.
+Reboot, demod reset, and other control actions are not exposed.
 
 **Why sdr-agent needed CORS support for this to work at all.** A browser
 refuses to expose a cross-origin response to a page's JavaScript unless the

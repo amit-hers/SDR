@@ -1,0 +1,322 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2025.1 (lin64) Build 6140274 Wed May 21 22:58:25 MDT 2025
+| Date         : Thu Oct  1 19:05:52 2026
+| Host         : amither-Legion-T5-28IMB05 running 64-bit Ubuntu 24.04.2 LTS
+| Command      : report_timing_summary -file ./axi_rs_harness_hw_v3_timing.rpt
+| Design       : axi_rs_test_harness_hw
+| Device       : 7z020-clg400
+| Speed File   : -2  PRODUCTION 1.12 2019-11-22
+| Design State : Synthesized
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Timing Summary Report
+
+------------------------------------------------------------------------------------------------
+| Timer Settings
+| --------------
+------------------------------------------------------------------------------------------------
+
+  Enable Multi Corner Analysis               :  Yes
+  Enable Pessimism Removal                   :  Yes
+  Pessimism Removal Resolution               :  Nearest Common Node
+  Enable Input Delay Default Clock           :  No
+  Enable Preset / Clear Arcs                 :  No
+  Disable Flight Delays                      :  No
+  Ignore I/O Paths                           :  No
+  Timing Early Launch at Borrowing Latches   :  No
+  Borrow Time for Max Delay Exceptions       :  Yes
+  Merge Timing Exceptions                    :  Yes
+  Inter-SLR Compensation                     :  Conservative
+
+  Corner  Analyze    Analyze    
+  Name    Max Paths  Min Paths  
+  ------  ---------  ---------  
+  Slow    Yes        Yes        
+  Fast    Yes        Yes        
+
+
+------------------------------------------------------------------------------------------------
+| Report Methodology
+| ------------------
+------------------------------------------------------------------------------------------------
+
+No report available as report_methodology has not been run prior. Run report_methodology on the current design for the summary of methodology violations.
+
+
+
+check_timing report
+
+Table of Contents
+-----------------
+1. checking no_clock (0)
+2. checking constant_clock (0)
+3. checking pulse_width_clock (0)
+4. checking unconstrained_internal_endpoints (0)
+5. checking no_input_delay (22)
+6. checking no_output_delay (23)
+7. checking multiple_clock (0)
+8. checking generated_clocks (0)
+9. checking loops (0)
+10. checking partial_input_delay (0)
+11. checking partial_output_delay (0)
+12. checking latch_loops (0)
+
+1. checking no_clock (0)
+------------------------
+ There are 0 register/latch pins with no clock.
+
+
+2. checking constant_clock (0)
+------------------------------
+ There are 0 register/latch pins with constant_clock.
+
+
+3. checking pulse_width_clock (0)
+---------------------------------
+ There are 0 register/latch pins which need pulse_width check
+
+
+4. checking unconstrained_internal_endpoints (0)
+------------------------------------------------
+ There are 0 pins that are not constrained for maximum delay.
+
+ There are 0 pins that are not constrained for maximum delay due to constant clock.
+
+
+5. checking no_input_delay (22)
+-------------------------------
+ There are 22 input ports with no input delay specified. (HIGH)
+
+ There are 0 input ports with no input delay but user has a false path constraint.
+
+
+6. checking no_output_delay (23)
+--------------------------------
+ There are 23 ports with no output delay specified. (HIGH)
+
+ There are 0 ports with no output delay but user has a false path constraint
+
+ There are 0 ports with no output delay but with a timing clock defined on it or propagating through it
+
+
+7. checking multiple_clock (0)
+------------------------------
+ There are 0 register/latch pins with multiple clocks.
+
+
+8. checking generated_clocks (0)
+--------------------------------
+ There are 0 generated clocks that are not connected to a clock source.
+
+
+9. checking loops (0)
+---------------------
+ There are 0 combinational loops in the design.
+
+
+10. checking partial_input_delay (0)
+------------------------------------
+ There are 0 input ports with partial input delay specified.
+
+
+11. checking partial_output_delay (0)
+-------------------------------------
+ There are 0 ports with partial output delay specified.
+
+
+12. checking latch_loops (0)
+----------------------------
+ There are 0 combinational latch loops in the design through latch input
+
+
+
+------------------------------------------------------------------------------------------------
+| Design Timing Summary
+| ---------------------
+------------------------------------------------------------------------------------------------
+
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      4.077        0.000                      0                 5217        0.246        0.000                      0                 5217        4.500        0.000                       0                  1769  
+
+
+All user specified timing constraints are met.
+
+
+------------------------------------------------------------------------------------------------
+| Clock Summary
+| -------------
+------------------------------------------------------------------------------------------------
+
+Clock  Waveform(ns)       Period(ns)      Frequency(MHz)
+-----  ------------       ----------      --------------
+clk    {0.000 5.000}      10.000          100.000         
+
+
+------------------------------------------------------------------------------------------------
+| Intra Clock Table
+| -----------------
+------------------------------------------------------------------------------------------------
+
+Clock             WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+-----             -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+clk                 4.077        0.000                      0                 5217        0.246        0.000                      0                 5217        4.500        0.000                       0                  1769  
+
+
+------------------------------------------------------------------------------------------------
+| Inter Clock Table
+| -----------------
+------------------------------------------------------------------------------------------------
+
+From Clock    To Clock          WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints  
+----------    --------          -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------  
+
+
+------------------------------------------------------------------------------------------------
+| Other Path Groups Table
+| -----------------------
+------------------------------------------------------------------------------------------------
+
+Path Group    From Clock    To Clock          WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints  
+----------    ----------    --------          -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------  
+
+
+------------------------------------------------------------------------------------------------
+| Timing Details
+| --------------
+------------------------------------------------------------------------------------------------
+
+
+---------------------------------------------------------------------------------------------------
+From Clock:  clk
+  To Clock:  clk
+
+Setup :            0  Failing Endpoints,  Worst Slack        4.077ns,  Total Violation        0.000ns
+Hold  :            0  Failing Endpoints,  Worst Slack        0.246ns,  Total Violation        0.000ns
+PW    :            0  Failing Endpoints,  Worst Slack        4.500ns,  Total Violation        0.000ns
+---------------------------------------------------------------------------------------------------
+
+
+Max Delay Paths
+--------------------------------------------------------------------------------------
+Slack (MET) :             4.077ns  (required time - arrival time)
+  Source:                 u_forney/x_inv_reg/CLKARDCLK
+                            (rising edge-triggered cell RAMB18E1 clocked by clk  {rise@0.000ns fall@5.000ns period=10.000ns})
+  Destination:            u_forney/r_cp_reg_rep/ADDRARDADDR[10]
+                            (rising edge-triggered cell RAMB18E1 clocked by clk  {rise@0.000ns fall@5.000ns period=10.000ns})
+  Path Group:             clk
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            10.000ns  (clk rise@10.000ns - clk rise@0.000ns)
+  Data Path Delay:        5.358ns  (logic 2.545ns (47.498%)  route 2.813ns (52.502%))
+  Logic Levels:           4  (LUT2=1 LUT6=3)
+  Clock Path Skew:        -0.039ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.748ns = ( 10.748 - 10.000 ) 
+    Source Clock Delay      (SCD):    0.787ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.035ns  ((TSJ^2 + TIJ^2)^1/2 + DJ) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.000ns
+    Discrete Jitter          (DJ):    0.000ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk rise edge)        0.000     0.000 r  
+                                                      0.000     0.000 r  s_axi_aclk (IN)
+                         net (fo=1768, unset)         0.787     0.787    u_forney/s_axi_aclk
+                         RAMB18E1                                     r  u_forney/x_inv_reg/CLKARDCLK
+  -------------------------------------------------------------------    -------------------
+                         RAMB18E1 (Prop_ramb18e1_CLKARDCLK_DOADO[2])
+                                                      2.125     2.912 r  u_forney/x_inv_reg/DOADO[2]
+                         net (fo=16, unplaced)        0.646     3.558    u_forney/x_inv_reg_n_13
+                         LUT6 (Prop_lut6_I4_O)        0.105     3.663 r  u_forney/r_cp[6]_i_7/O
+                         net (fo=1, unplaced)         0.582     4.245    u_forney/r_cp[6]_i_7_n_0
+                         LUT6 (Prop_lut6_I2_O)        0.105     4.350 r  u_forney/r_cp[6]_i_3/O
+                         net (fo=1, unplaced)         0.582     4.932    u_forney/r_cp[6]_i_3_n_0
+                         LUT6 (Prop_lut6_I0_O)        0.105     5.037 f  u_forney/r_cp[6]_i_2/O
+                         net (fo=2, unplaced)         0.358     5.395    u_forney/r_cp[6]_i_2_n_0
+                         LUT2 (Prop_lut2_I1_O)        0.105     5.500 r  u_forney/r_cp_reg_rep_i_2/O
+                         net (fo=1, unplaced)         0.646     6.145    u_forney/r_cp_reg_rep_i_2_n_0
+                         RAMB18E1                                     r  u_forney/r_cp_reg_rep/ADDRARDADDR[10]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock clk rise edge)       10.000    10.000 r  
+                                                      0.000    10.000 r  s_axi_aclk (IN)
+                         net (fo=1768, unset)         0.748    10.748    u_forney/s_axi_aclk
+                         RAMB18E1                                     r  u_forney/r_cp_reg_rep/CLKARDCLK
+                         clock pessimism              0.000    10.748    
+                         clock uncertainty           -0.035    10.712    
+                         RAMB18E1 (Setup_ramb18e1_CLKARDCLK_ADDRARDADDR[10])
+                                                     -0.490    10.222    u_forney/r_cp_reg_rep
+  -------------------------------------------------------------------
+                         required time                         10.222    
+                         arrival time                          -6.145    
+  -------------------------------------------------------------------
+                         slack                                  4.077    
+
+
+
+
+
+Min Delay Paths
+--------------------------------------------------------------------------------------
+Slack (MET) :             0.246ns  (arrival time - required time)
+  Source:                 u_enc/reg__reg[0][1]/C
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@5.000ns period=10.000ns})
+  Destination:            u_enc/reg__reg[1][1]/D
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@5.000ns period=10.000ns})
+  Path Group:             clk
+  Path Type:              Hold (Min at Fast Process Corner)
+  Requirement:            0.000ns  (clk rise@0.000ns - clk rise@0.000ns)
+  Data Path Delay:        0.386ns  (logic 0.262ns (67.793%)  route 0.124ns (32.207%))
+  Logic Levels:           1  (LUT5=1)
+  Clock Path Skew:        0.021ns (DCD - SCD - CPR)
+    Destination Clock Delay (DCD):    0.411ns
+    Source Clock Delay      (SCD):    0.390ns
+    Clock Pessimism Removal (CPR):    -0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk rise edge)        0.000     0.000 r  
+                                                      0.000     0.000 r  s_axi_aclk (IN)
+                         net (fo=1768, unset)         0.390     0.390    u_enc/s_axi_aclk
+                         FDRE                                         r  u_enc/reg__reg[0][1]/C
+  -------------------------------------------------------------------    -------------------
+                         FDRE (Prop_fdre_C_Q)         0.164     0.554 r  u_enc/reg__reg[0][1]/Q
+                         net (fo=2, unplaced)         0.124     0.679    u_enc/reg__reg[0]_32[1]
+                         LUT5 (Prop_lut5_I4_O)        0.098     0.777 r  u_enc/reg_[1][1]_i_1__0/O
+                         net (fo=1, unplaced)         0.000     0.777    u_enc/p_85_out[1]
+                         FDRE                                         r  u_enc/reg__reg[1][1]/D
+  -------------------------------------------------------------------    -------------------
+
+                         (clock clk rise edge)        0.000     0.000 r  
+                                                      0.000     0.000 r  s_axi_aclk (IN)
+                         net (fo=1768, unset)         0.411     0.411    u_enc/s_axi_aclk
+                         FDRE                                         r  u_enc/reg__reg[1][1]/C
+                         clock pessimism              0.000     0.411    
+                         FDRE (Hold_fdre_C_D)         0.120     0.531    u_enc/reg__reg[1][1]
+  -------------------------------------------------------------------
+                         required time                         -0.531    
+                         arrival time                           0.777    
+  -------------------------------------------------------------------
+                         slack                                  0.246    
+
+
+
+
+
+Pulse Width Checks
+--------------------------------------------------------------------------------------
+Clock Name:         clk
+Waveform(ns):       { 0.000 5.000 }
+Period(ns):         10.000
+Sources:            { s_axi_aclk }
+
+Check Type        Corner  Lib Pin             Reference Pin  Required(ns)  Actual(ns)  Slack(ns)  Location  Pin
+Min Period        n/a     RAMB18E1/CLKARDCLK  n/a            2.170         10.000      7.830                u_forney/r_cp_reg_rep/CLKARDCLK
+Low Pulse Width   Slow    FDRE/C              n/a            0.500         5.000       4.500                ar_done_reg/C
+High Pulse Width  Slow    FDRE/C              n/a            0.500         5.000       4.500                ar_done_reg/C
+
+
+

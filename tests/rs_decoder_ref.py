@@ -167,6 +167,123 @@ if __name__ == '__main__':
         m = self_check_max_t()
         print(f"OK: {n} trials (0..16 random errors) + {m} trials (always t=16), all decoded exactly")
         sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == '--forney-vectors':
+        # Emit N_BLOCKS full pipelines (real encode+corrupt+syndrome+BM+Chien,
+        # 1..16 errors each) for the Forney RTL testbench: each block's
+        # locator C (degree+1 bytes), its 32 syndromes, its found degrees,
+        # and the expected (position, magnitude) pairs Forney should produce
+        # for each -- which must reconstruct the exact injected errors.
+        import random
+        n_blocks = int(sys.argv[2])
+        rng = random.Random(640016)
+        coef_out, coef_lens = [], []
+        synd_out = []
+        deg_out, deg_counts = [], []
+        mag_out = []  # magnitude per found degree, same order as deg_out
+        for b in range(n_blocks):
+            data = [rng.randint(0, 255) for _ in range(K)]
+            cw = rs_encode(data)
+            nerr = rng.randint(1, NPAR // 2)
+            received = cw[:]
+            for p in rng.sample(range(255), nerr):
+                received[p] ^= rng.randint(1, 255)
+            synd = syndromes(received)
+            C, L = berlekamp_massey(synd)
+            degrees = chien_search(C)
+            errs = forney(C, synd, degrees)
+            assert errs is not None, f"block {b}: Forney failure in vector generation"
+            coef_out += C
+            coef_lens.append(len(C))
+            synd_out += synd
+            deg_counts.append(len(degrees))
+            for j in degrees:
+                deg_out.append(j)
+                mag_out.append(errs[j])
+        for x in coef_out: print(f"{x:02x}")
+        print("--")
+        for x in coef_lens: print(f"{x:02x}")
+        print("--")
+        for x in synd_out: print(f"{x:02x}")
+        print("--")
+        for x in deg_counts: print(f"{x:02x}")
+        print("--")
+        for x in deg_out: print(f"{x:02x}")
+        print("--")
+        for x in mag_out: print(f"{x:02x}")
+        sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == '--chien-vectors':
+        # Emit N_BLOCKS locator polynomials (from REAL encode+corrupt+BM, 1..16
+        # errors each) and their expected root degrees, for the Chien-search
+        # RTL testbench. Coefficient stream per block: degree+1 bytes
+        # (low-degree first, as rs_berlekamp_massey.v emits them); degrees are
+        # emitted in the same increasing-j order Chien search itself produces.
+        import random
+        n_blocks = int(sys.argv[2])
+        rng = random.Random(640016)
+        coef_out = []      # degree+1 bytes per block, one block after another
+        coef_lens = []     # length of each block's coefficient stream
+        degree_counts = [] # number of roots found in each block
+        degrees_out = []   # all found degrees, one block after another
+        for b in range(n_blocks):
+            data = [rng.randint(0, 255) for _ in range(K)]
+            cw = rs_encode(data)
+            nerr = rng.randint(1, NPAR // 2)
+            received = cw[:]
+            for p in rng.sample(range(255), nerr):
+                received[p] ^= rng.randint(1, 255)
+            synd = syndromes(received)
+            C, L = berlekamp_massey(synd)
+            degrees = chien_search(C)
+            coef_out += C
+            coef_lens.append(len(C))
+            degree_counts.append(len(degrees))
+            degrees_out += degrees
+        for b in coef_out:
+            print(f"{b:02x}")
+        print("--")
+        for n in coef_lens:
+            print(f"{n:02x}")
+        print("--")
+        for n in degree_counts:
+            print(f"{n:02x}")
+        print("--")
+        for d in degrees_out:
+            print(f"{d:02x}")
+        sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == '--bm-vectors':
+        # Emit N_BLOCKS syndrome sets (0..16 injected errors each, including
+        # at least one all-zero/no-error block) and their expected
+        # Berlekamp-Massey output (degree + locator coefficients, low-degree
+        # first, padded to NPAR+1 bytes with a separate degree byte) for the
+        # rs_berlekamp_massey.v RTL testbench.
+        import random
+        n_blocks = int(sys.argv[2])
+        rng = random.Random(640016)
+        synd_out = []
+        degree_out = []
+        coef_out = []  # NPAR+1 bytes per block, padded with 0 beyond degree
+        for b in range(n_blocks):
+            data = [rng.randint(0, 255) for _ in range(K)]
+            cw = rs_encode(data)
+            nerr = 0 if b == 0 else rng.randint(0, NPAR // 2)
+            received = cw[:]
+            for p in rng.sample(range(255), nerr):
+                received[p] ^= rng.randint(1, 255)
+            synd = syndromes(received)
+            C, L = berlekamp_massey(synd)
+            synd_out += synd
+            degree_out.append(L)
+            padded = C + [0] * (NPAR + 1 - len(C))
+            coef_out += padded
+        for b in synd_out:
+            print(f"{b:02x}")
+        print("--")
+        for d in degree_out:
+            print(f"{d:02x}")
+        print("--")
+        for b in coef_out:
+            print(f"{b:02x}")
+        sys.exit(0)
     if len(sys.argv) == 3 and sys.argv[1] == '--syndrome-vectors':
         # Emit N_BLOCKS codewords (with 0..16 injected errors each) and their
         # expected syndromes, for the syndrome-calculator RTL testbench.
@@ -188,6 +305,73 @@ if __name__ == '__main__':
         print("--")
         for b in synd_out:
             print(f"{b:02x}")
+        sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == '--decoder-vectors':
+        # Emit N_BLOCKS full encode+corrupt+decode cases for rs_decoder.v's
+        # integration testbench: real received codewords (255 bytes each),
+        # covering 0 errors (clean), 1..16 errors (correctable), and
+        # deliberately >16 errors (uncorrectable) -- plus, for each block,
+        # the expected 223-byte output, a fail flag, and an error count.
+        # Mirrors rs_decoder.v's own all-or-nothing correction semantics
+        # (matching rs_decode()'s behavior): a failed block's expected
+        # output is the ORIGINAL received bytes, uncorrected.
+        import random
+        n_blocks = int(sys.argv[2])
+        rng = random.Random(640016)
+        recv_out, exp_out, fail_out, errcnt_out = [], [], [], []
+        for b in range(n_blocks):
+            data = [rng.randint(0, 255) for _ in range(K)]
+            cw = rs_encode(data)
+            if b % 7 == 0:
+                nerr = 0
+            elif b % 11 == 0:
+                nerr = rng.randint(NPAR // 2 + 1, 24)  # deliberately uncorrectable
+            else:
+                nerr = rng.randint(1, NPAR // 2)
+            received = cw[:]
+            for p in rng.sample(range(255), min(nerr, 255)):
+                received[p] ^= rng.randint(1, 255)
+            recv_out += received
+
+            synd = syndromes(received)
+            fail = False
+            ncorr = 0
+            out = received[:K]
+            if any(s != 0 for s in synd):
+                C, L = berlekamp_massey(synd)
+                if L == 0 or L > NPAR // 2:
+                    fail = True
+                else:
+                    degrees = chien_search(C)
+                    if len(degrees) != L:
+                        fail = True
+                    else:
+                        errs = forney(C, synd, degrees)
+                        if errs is None:
+                            fail = True
+                        else:
+                            corrected = received[:]
+                            for j, e in errs.items():
+                                corrected[254 - j] ^= e
+                            if any(s != 0 for s in syndromes(corrected)):
+                                fail = True
+                            else:
+                                out = corrected[:K]
+                                ncorr = len(errs)
+            exp_out += out
+            fail_out.append(1 if fail else 0)
+            errcnt_out.append(ncorr)
+        for x in recv_out:
+            print(f"{x:02x}")
+        print("--")
+        for x in exp_out:
+            print(f"{x:02x}")
+        print("--")
+        for x in fail_out:
+            print(f"{x:02x}")
+        print("--")
+        for x in errcnt_out:
+            print(f"{x:02x}")
         sys.exit(0)
     print(__doc__)
     sys.exit(1)

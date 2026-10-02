@@ -142,6 +142,20 @@ if(IVERILOG_EXECUTABLE)
              ${Python3_EXECUTABLE})
     add_test(NAME rs_syndrome_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_syndrome_test.sh ${PROJECT_SOURCE_DIR}
              ${Python3_EXECUTABLE})
+    add_test(NAME rs_bm_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_bm_test.sh ${PROJECT_SOURCE_DIR}
+             ${Python3_EXECUTABLE})
+    add_test(NAME rs_chien_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_chien_test.sh ${PROJECT_SOURCE_DIR}
+             ${Python3_EXECUTABLE})
+    add_test(NAME rs_forney_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_forney_test.sh ${PROJECT_SOURCE_DIR}
+             ${Python3_EXECUTABLE})
+    add_test(NAME axi_rs_harness_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/axi_rs_harness_test.sh ${PROJECT_SOURCE_DIR})
+    add_test(NAME axi_rs_harness_hw_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/axi_rs_harness_hw_test.sh ${PROJECT_SOURCE_DIR})
+    add_test(NAME rs_decoder_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/rs_decoder_test.sh ${PROJECT_SOURCE_DIR}
+             ${Python3_EXECUTABLE})
+    add_test(NAME axi_rs_decoder_harness_hw_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/axi_rs_decoder_harness_hw_test.sh
+             ${PROJECT_SOURCE_DIR} ${Python3_EXECUTABLE})
+    add_test(NAME axi_qam16_harness_hw_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/axi_qam16_harness_hw_test.sh ${PROJECT_SOURCE_DIR})
+    add_test(NAME axi_qam64_harness_hw_rtl COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/axi_qam64_harness_hw_test.sh ${PROJECT_SOURCE_DIR})
 endif()
 add_test(NAME modem_characterization COMMAND sdr-modem-characterize 8)
 if(MISSION_CRYPTO_IMPORT EQUAL 0)

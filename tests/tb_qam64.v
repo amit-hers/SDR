@@ -14,7 +14,7 @@ module tb_qam64;
     qam64_demapper demapper(clk,resetn,inject?test_i:mi,inject?test_q:mq,
                            inject?valid:mv,dr,decoded,error,clipped,dv,ready);
     integer i,j,received=0;
-    integer expected[0:63];
+    integer expected_q[$];
     reg [5:0] held;
     reg [31:0] vectors[0:63];
     reg [4095:0] vector_file;
@@ -23,14 +23,22 @@ module tb_qam64;
         input integer b;
         begin gray=b^(b>>1); end
     endfunction
+    // qam64_demapper is now a 2-stage pipeline (pipelined to meet the real
+    // 100 MHz AXI-Lite clock -- see its own header), so its latency is no
+    // longer 1 cycle. Rather than hand-derive and hardcode the new total
+    // mapper+demapper latency here, results are drained through a FIFO
+    // queue in arrival order -- correct for any fixed pipeline depth as
+    // long as throughput stays at one symbol in, one result out, in order.
     task check_axis;
         input integer x;
         input integer b;
         begin
             @(negedge clk); inject=1;valid=1;test_i=x;test_q=1264;
-            @(posedge clk); #1;
-            if (!dv || decoded !== ((gray(b)<<3)|gray(4))) $fatal(1,"boundary %d result %d",x,decoded);
+            while (!dv) @(posedge clk);
+            #1;
+            if (decoded !== ((gray(b)<<3)|gray(4))) $fatal(1,"boundary %d result %d",x,decoded);
             @(negedge clk); valid=0;
+            while (dv) @(posedge clk); // drain before the next injected case
         end
     endtask
     initial begin
@@ -40,26 +48,31 @@ module tb_qam64;
         // All points against an independent Gray/index expectation.
         for(i=0;i<64;i=i+1) begin
             @(negedge clk); data=i;valid=1;
+            expected_q.push_back(i);
             @(posedge clk); #1;
-            expected[i]=i;
             if(have_vectors) begin
                 delta_i=$signed(mi)-$signed(vectors[i][31:16]);
                 delta_q=$signed(mq)-$signed(vectors[i][15:0]);
                 if(delta_i < -1 || delta_i > 1 || delta_q < -1 || delta_q > 1)
                     $fatal(1,"software/RTL mapping mismatch at %d",i);
             end
-            if (i>0) begin
-                if(!dv || decoded!==expected[i-1] || error!==0) $fatal(1,"point %d",i-1);
+            if (dv) begin
+                if(decoded!==expected_q.pop_front() || error!==0) $fatal(1,"point mismatch pushing %0d",i);
                 received=received+1;
             end
         end
         @(negedge clk);valid=0;
-        @(posedge clk);#1;
-        if(!dv || decoded!==63 || error!==0) $fatal(1,"last point");
-        received=received+1;
+        // Drain whatever is still in flight -- however many cycles that
+        // takes for the current pipeline depth.
+        while (expected_q.size() > 0) begin
+            @(posedge clk); #1;
+            if (!dv) $fatal(1,"pipeline stopped draining with %0d results still expected", expected_q.size());
+            if(decoded!==expected_q.pop_front() || error!==0) $fatal(1,"drain mismatch");
+            received=received+1;
+        end
         // Backpressure must hold data/error stable.
         @(negedge clk); ready=0;valid=1;data=17;
-        repeat(3) @(posedge clk);
+        while (!dv) @(posedge clk);
         #1; held=decoded;
         repeat(5) begin
             @(negedge clk); data=data+1;

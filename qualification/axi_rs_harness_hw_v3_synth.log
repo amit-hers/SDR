@@ -1,0 +1,346 @@
+
+****** Vivado v2025.1 (64-bit)
+  **** SW Build 6140274 on Wed May 21 22:58:25 MDT 2025
+  **** IP Build 6138677 on Thu May 22 03:10:11 MDT 2025
+  **** SharedData Build 6139179 on Tue May 20 17:58:58 MDT 2025
+  **** Start of session at: Thu Oct  1 19:04:47 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source axi_rs_harness_hw_v3_ooc_synth.tcl
+# read_verilog [list \
+#     [file join [file dirname [info script]] .. fpga rtl rs_encoder.v] \
+#     [file join [file dirname [info script]] .. fpga rtl rs_syndrome.v] \
+#     [file join [file dirname [info script]] .. fpga rtl rs_chien_search.v] \
+#     [file join [file dirname [info script]] .. fpga rtl rs_forney.v] \
+#     [file join [file dirname [info script]] .. fpga rtl axi_rs_test_harness_hw.v] \
+# ]
+# synth_design -top axi_rs_test_harness_hw -part xc7z020clg400-2 -mode out_of_context
+Command: synth_design -top axi_rs_test_harness_hw -part xc7z020clg400-2 -mode out_of_context
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Synth 8-7079] Multithreading enabled for synth_design using a maximum of 7 processes.
+INFO: [Synth 8-7078] Launching helper process for spawning children vivado processes
+INFO: [Synth 8-7075] Helper process launched with PID 4041497
+---------------------------------------------------------------------------------
+Starting Synthesize : Time (s): cpu = 00:00:03 ; elapsed = 00:00:03 . Memory (MB): peak = 1953.180 ; gain = 418.508 ; free physical = 4791 ; free virtual = 50423
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'axi_rs_test_harness_hw' [/home/amither/Documents/SDR/fpga/rtl/axi_rs_test_harness_hw.v:66]
+INFO: [Synth 8-6157] synthesizing module 'rs_encoder' [/home/amither/Documents/SDR/fpga/rtl/rs_encoder.v:19]
+INFO: [Synth 8-6155] done synthesizing module 'rs_encoder' (0#1) [/home/amither/Documents/SDR/fpga/rtl/rs_encoder.v:19]
+INFO: [Synth 8-6157] synthesizing module 'rs_syndrome' [/home/amither/Documents/SDR/fpga/rtl/rs_syndrome.v:16]
+INFO: [Synth 8-6155] done synthesizing module 'rs_syndrome' (0#1) [/home/amither/Documents/SDR/fpga/rtl/rs_syndrome.v:16]
+INFO: [Synth 8-6157] synthesizing module 'rs_chien_search' [/home/amither/Documents/SDR/fpga/rtl/rs_chien_search.v:22]
+INFO: [Synth 8-6155] done synthesizing module 'rs_chien_search' (0#1) [/home/amither/Documents/SDR/fpga/rtl/rs_chien_search.v:22]
+INFO: [Synth 8-6157] synthesizing module 'rs_forney' [/home/amither/Documents/SDR/fpga/rtl/rs_forney.v:31]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/amither/Documents/SDR/fpga/rtl/rs_forney.v:177]
+INFO: [Synth 8-6155] done synthesizing module 'rs_forney' (0#1) [/home/amither/Documents/SDR/fpga/rtl/rs_forney.v:31]
+INFO: [Synth 8-6155] done synthesizing module 'axi_rs_test_harness_hw' (0#1) [/home/amither/Documents/SDR/fpga/rtl/axi_rs_test_harness_hw.v:66]
+WARNING: [Synth 8-7129] Port s_axi_awprot[2] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[31] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[30] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[29] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[28] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[27] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[26] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[25] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[24] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[23] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[22] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[21] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[20] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[19] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[18] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[17] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[16] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[15] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[14] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[13] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[12] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[11] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[10] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[9] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[8] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[3] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[2] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[2] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+---------------------------------------------------------------------------------
+Finished Synthesize : Time (s): cpu = 00:00:06 ; elapsed = 00:00:06 . Memory (MB): peak = 2132.148 ; gain = 597.477 ; free physical = 4625 ; free virtual = 50258
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Constraint Validation : Time (s): cpu = 00:00:06 ; elapsed = 00:00:07 . Memory (MB): peak = 2146.992 ; gain = 612.320 ; free physical = 4651 ; free virtual = 50285
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Loading Part and Timing Information
+---------------------------------------------------------------------------------
+Loading part: xc7z020clg400-2
+INFO: [Device 21-403] Loading part xc7z020clg400-2
+---------------------------------------------------------------------------------
+Finished Loading Part and Timing Information : Time (s): cpu = 00:00:06 ; elapsed = 00:00:07 . Memory (MB): peak = 2146.992 ; gain = 612.320 ; free physical = 4651 ; free virtual = 50284
+---------------------------------------------------------------------------------
+INFO: [Synth 8-802] inferred FSM for state register 'state_reg' in module 'rs_forney'
+---------------------------------------------------------------------------------------------------
+                   State |                     New Encoding |                Previous Encoding 
+---------------------------------------------------------------------------------------------------
+                 ST_COEF |                           010000 |                              000
+                 ST_SYND |                           001000 |                              001
+                ST_OMEGA |                           100000 |                              010
+                ST_READY |                           000010 |                              011
+                 ST_EVAL |                           000100 |                              100
+               ST_FINISH |                           000001 |                              101
+---------------------------------------------------------------------------------------------------
+INFO: [Synth 8-3354] encoded FSM with state register 'state_reg' using encoding 'one-hot' in module 'rs_forney'
+---------------------------------------------------------------------------------
+Finished RTL Optimization Phase 2 : Time (s): cpu = 00:00:10 ; elapsed = 00:00:09 . Memory (MB): peak = 2163.008 ; gain = 628.336 ; free physical = 4650 ; free virtual = 50286
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start RTL Component Statistics 
+---------------------------------------------------------------------------------
+Detailed RTL Component Info : 
++---Adders : 
+	   2 Input    8 Bit       Adders := 3     
+	   2 Input    6 Bit       Adders := 5     
+	   2 Input    5 Bit       Adders := 2     
++---XORs : 
+	   2 Input      8 Bit         XORs := 714   
+	   4 Input      8 Bit         XORs := 16    
+	   3 Input      8 Bit         XORs := 25    
+	   5 Input      8 Bit         XORs := 19    
+	   6 Input      8 Bit         XORs := 10    
+	   7 Input      8 Bit         XORs := 2     
+	  33 Input      8 Bit         XORs := 1     
++---Registers : 
+	               32 Bit    Registers := 1     
+	                8 Bit    Registers := 209   
+	                6 Bit    Registers := 6     
+	                5 Bit    Registers := 2     
+	                2 Bit    Registers := 3     
+	                1 Bit    Registers := 38    
++---ROMs : 
+	                    ROMs := 3     
++---Muxes : 
+	   2 Input    8 Bit        Muxes := 677   
+	   6 Input    8 Bit        Muxes := 36    
+	   6 Input    6 Bit        Muxes := 5     
+	   2 Input    6 Bit        Muxes := 2     
+	   6 Input    3 Bit        Muxes := 1     
+	   2 Input    1 Bit        Muxes := 186   
+	   6 Input    1 Bit        Muxes := 113   
+	   4 Input    1 Bit        Muxes := 9     
+	   7 Input    1 Bit        Muxes := 2     
+---------------------------------------------------------------------------------
+Finished RTL Component Statistics 
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Part Resource Summary
+---------------------------------------------------------------------------------
+Part Resources:
+DSPs: 220 (col length:60)
+BRAMs: 280 (col length: RAMB18 60 RAMB36 30)
+---------------------------------------------------------------------------------
+Finished Part Resource Summary
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Cross Boundary and Area Optimization
+---------------------------------------------------------------------------------
+WARNING: [Synth 8-7080] Parallel synthesis criteria is not met
+WARNING: [Synth 8-7129] Port s_axi_awprot[2] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[31] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[30] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[29] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[28] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[27] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[26] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[25] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[24] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[23] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[22] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[21] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[20] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[19] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[18] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[17] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[16] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[15] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[14] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[13] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[12] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[11] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[10] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[9] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[8] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[3] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[2] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[2] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[1] in module axi_rs_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[0] in module axi_rs_test_harness_hw is either unconnected or has no load
+---------------------------------------------------------------------------------
+Finished Cross Boundary and Area Optimization : Time (s): cpu = 00:00:49 ; elapsed = 00:00:48 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4196 ; free virtual = 49831
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+
+ROM: Preliminary Mapping Report
++------------+---------------+---------------+----------------+
+|Module Name | RTL Object    | Depth x Width | Implemented As | 
++------------+---------------+---------------+----------------+
+|rs_forney   | x_inv_reg     | 256x8         | Block RAM      | 
+|rs_forney   | r_cp_reg_rep  | 256x8         | Block RAM      | 
+|rs_forney   | req_j_reg_rep | 256x8         | Block RAM      | 
++------------+---------------+---------------+----------------+
+
+---------------------------------------------------------------------------------
+Finished ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Timing Optimization
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Timing Optimization : Time (s): cpu = 00:00:50 ; elapsed = 00:00:49 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4224 ; free virtual = 49859
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Technology Mapping
+---------------------------------------------------------------------------------
+INFO: [Synth 8-7052] The timing for the instance u_forney/x_inv_reg (implemented as a Block RAM) might be sub-optimal as no optional output register could be merged into the ram block. Providing additional output register may help in improving timing.
+INFO: [Synth 8-7052] The timing for the instance u_forney/x_inv_reg (implemented as a Block RAM) might be sub-optimal as no optional output register could be merged into the ram block. Providing additional output register may help in improving timing.
+INFO: [Synth 8-7052] The timing for the instance u_forney/r_cp_reg_rep (implemented as a Block RAM) might be sub-optimal as no optional output register could be merged into the ram block. Providing additional output register may help in improving timing.
+---------------------------------------------------------------------------------
+Finished Technology Mapping : Time (s): cpu = 00:00:52 ; elapsed = 00:00:51 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4217 ; free virtual = 49852
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished IO Insertion : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4222 ; free virtual = 49855
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Instances
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Instances : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4222 ; free virtual = 49855
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Rebuilding User Hierarchy
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Rebuilding User Hierarchy : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4234 ; free virtual = 49868
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Ports
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Ports : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4234 ; free virtual = 49868
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Handling Custom Attributes
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Handling Custom Attributes : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4242 ; free virtual = 49875
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Nets
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Nets : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4242 ; free virtual = 49875
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Writing Synthesis Report
+---------------------------------------------------------------------------------
+
+Report BlackBoxes: 
++-+--------------+----------+
+| |BlackBox name |Instances |
++-+--------------+----------+
++-+--------------+----------+
+
+Report Cell Usage: 
++------+---------+------+
+|      |Cell     |Count |
++------+---------+------+
+|1     |LUT1     |    23|
+|2     |LUT2     |   224|
+|3     |LUT3     |   494|
+|4     |LUT4     |   866|
+|5     |LUT5     |   823|
+|6     |LUT6     |  2029|
+|7     |MUXF7    |   103|
+|8     |MUXF8    |    19|
+|9     |RAMB18E1 |     2|
+|10    |FDRE     |  1757|
+|11    |FDSE     |     9|
++------+---------+------+
+
+Report Instance Areas: 
++------+-----------+----------------+------+
+|      |Instance   |Module          |Cells |
++------+-----------+----------------+------+
+|1     |top        |                |  6349|
+|2     |  u_chien  |rs_chien_search |   940|
+|3     |  u_enc    |rs_encoder      |   745|
+|4     |  u_forney |rs_forney       |  3805|
+|5     |  u_synd   |rs_syndrome     |   776|
++------+-----------+----------------+------+
+---------------------------------------------------------------------------------
+Finished Writing Synthesis Report : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4242 ; free virtual = 49875
+---------------------------------------------------------------------------------
+Synthesis finished with 0 errors, 0 critical warnings and 73 warnings.
+Synthesis Optimization Runtime : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.102 ; gain = 1125.430 ; free physical = 4242 ; free virtual = 49876
+Synthesis Optimization Complete : Time (s): cpu = 00:00:55 ; elapsed = 00:00:54 . Memory (MB): peak = 2660.109 ; gain = 1125.430 ; free physical = 4242 ; free virtual = 49876
+INFO: [Project 1-571] Translating synthesized netlist
+Netlist sorting complete. Time (s): cpu = 00:00:00.02 ; elapsed = 00:00:00.03 . Memory (MB): peak = 2660.109 ; gain = 0.000 ; free physical = 4394 ; free virtual = 50027
+INFO: [Netlist 29-17] Analyzing 124 Unisim elements for replacement
+INFO: [Netlist 29-28] Unisim Transformation completed in 0 CPU seconds
+INFO: [Project 1-570] Preparing netlist for logic optimization
+INFO: [Opt 31-138] Pushed 0 inverter(s) to 0 load pin(s).
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2700.121 ; gain = 0.000 ; free physical = 4399 ; free virtual = 50034
+INFO: [Project 1-111] Unisim Transformation Summary:
+No Unisim elements were transformed.
+
+Synth Design complete | Checksum: ee9efed
+INFO: [Common 17-83] Releasing license: Synthesis
+28 Infos, 73 Warnings, 0 Critical Warnings and 0 Errors encountered.
+synth_design completed successfully
+synth_design: Time (s): cpu = 00:01:00 ; elapsed = 00:00:57 . Memory (MB): peak = 2700.156 ; gain = 1165.484 ; free physical = 4399 ; free virtual = 50034
+INFO: [Common 17-2834] synth_design peak Physical Memory [PSS] (MB): overall = 2329.810; main = 2178.543; forked = 335.273
+INFO: [Common 17-2834] synth_design peak Virtual Memory [VSS] (MB): overall = 3616.305; main = 2700.125; forked = 956.199
+# create_clock -name clk -period 10.000 [get_ports s_axi_aclk]
+# report_utilization -file [file join [file dirname [info script]] axi_rs_harness_hw_v3_utilization.rpt]
+# report_timing_summary -file [file join [file dirname [info script]] axi_rs_harness_hw_v3_timing.rpt]
+INFO: [Timing 38-35] Done setting XDC timing constraints.
+INFO: [Timing 38-91] UpdateTimingParams: Speed grade: -2, Delay Type: min_max.
+INFO: [Timing 38-191] Multithreading enabled for timing update using a maximum of 8 CPUs
+WARNING: [Timing 38-242] The property HD.CLK_SRC of clock port "s_axi_aclk" is not set. In out-of-context mode, this prevents timing estimation for clock delay/skew
+Resolution: Set the HD.CLK_SRC property of the out-of-context port to the location of the clock buffer instance in the top-level design
+# close_design
+INFO: [Common 17-206] Exiting Vivado at Thu Oct  1 19:05:53 2026...

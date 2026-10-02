@@ -1,0 +1,297 @@
+#-----------------------------------------------------------
+# Vivado v2025.1 (64-bit)
+# SW Build 6140274 on Wed May 21 22:58:25 MDT 2025
+# IP Build 6138677 on Thu May 22 03:10:11 MDT 2025
+# SharedData Build 6139179 on Tue May 20 17:58:58 MDT 2025
+# Start of session at: Fri Oct  2 09:01:31 2026
+# Process ID         : 237641
+# Current directory  : /home/amither/Documents/SDR
+# Command line       : vivado -mode batch -source qualification/axi_qam64_harness_hw_ooc_synth.tcl -log qualification/axi_qam64_harness_hw_synth.log -nojournal
+# Log file           : /home/amither/Documents/SDR/qualification/axi_qam64_harness_hw_synth.log
+# Journal file       : 
+# Running On         : amither-Legion-T5-28IMB05
+# Platform           : Ubuntu
+# Operating System   : Ubuntu 24.04.2 LTS
+# Processor Detail   : Intel(R) Core(TM) i9-10900 CPU @ 2.80GHz
+# CPU Frequency      : 4610.759 MHz
+# CPU Physical cores : 10
+# CPU Logical cores  : 20
+# Host memory        : 67146 MB
+# Swap memory        : 8589 MB
+# Total Virtual      : 75736 MB
+# Available Virtual  : 54176 MB
+#-----------------------------------------------------------
+source qualification/axi_qam64_harness_hw_ooc_synth.tcl
+# read_verilog [list \
+#     [file join [file dirname [info script]] .. fpga rtl qam64_mapper.v] \
+#     [file join [file dirname [info script]] .. fpga rtl axi_qam64_test_harness_hw.v] \
+# ]
+# synth_design -top axi_qam64_test_harness_hw -part xc7z020clg400-2 -mode out_of_context
+Command: synth_design -top axi_qam64_test_harness_hw -part xc7z020clg400-2 -mode out_of_context
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Synth 8-7079] Multithreading enabled for synth_design using a maximum of 7 processes.
+INFO: [Synth 8-7078] Launching helper process for spawning children vivado processes
+INFO: [Synth 8-7075] Helper process launched with PID 237692
+---------------------------------------------------------------------------------
+Starting Synthesize : Time (s): cpu = 00:00:03 ; elapsed = 00:00:03 . Memory (MB): peak = 1953.148 ; gain = 418.508 ; free physical = 4883 ; free virtual = 50472
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'axi_qam64_test_harness_hw' [/home/amither/Documents/SDR/fpga/rtl/axi_qam64_test_harness_hw.v:37]
+INFO: [Synth 8-6157] synthesizing module 'qam64_mapper' [/home/amither/Documents/SDR/fpga/rtl/qam64_mapper.v:5]
+INFO: [Synth 8-6155] done synthesizing module 'qam64_mapper' (0#1) [/home/amither/Documents/SDR/fpga/rtl/qam64_mapper.v:5]
+INFO: [Synth 8-6155] done synthesizing module 'axi_qam64_test_harness_hw' (0#1) [/home/amither/Documents/SDR/fpga/rtl/axi_qam64_test_harness_hw.v:37]
+WARNING: [Synth 8-7129] Port s_axi_awprot[2] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[31] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[30] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[29] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[28] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[27] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[26] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[25] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[24] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[23] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[22] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[21] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[20] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[19] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[18] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[17] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[16] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[15] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[14] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[13] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[12] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[11] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[10] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[9] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[8] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[7] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[6] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[3] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[2] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[2] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+---------------------------------------------------------------------------------
+Finished Synthesize : Time (s): cpu = 00:00:04 ; elapsed = 00:00:04 . Memory (MB): peak = 2025.117 ; gain = 490.477 ; free physical = 4793 ; free virtual = 50383
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Constraint Validation : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2042.930 ; gain = 508.289 ; free physical = 4789 ; free virtual = 50379
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Loading Part and Timing Information
+---------------------------------------------------------------------------------
+Loading part: xc7z020clg400-2
+INFO: [Device 21-403] Loading part xc7z020clg400-2
+---------------------------------------------------------------------------------
+Finished Loading Part and Timing Information : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2042.930 ; gain = 508.289 ; free physical = 4791 ; free virtual = 50380
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished RTL Optimization Phase 2 : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2051.836 ; gain = 517.195 ; free physical = 4790 ; free virtual = 50380
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start RTL Component Statistics 
+---------------------------------------------------------------------------------
+Detailed RTL Component Info : 
++---XORs : 
+	   2 Input      1 Bit         XORs := 4     
++---Registers : 
+	               32 Bit    Registers := 1     
+	               15 Bit    Registers := 2     
+	                6 Bit    Registers := 2     
+	                2 Bit    Registers := 2     
+	                1 Bit    Registers := 10    
++---Muxes : 
+	   5 Input   32 Bit        Muxes := 1     
+	   2 Input   32 Bit        Muxes := 1     
+	   8 Input   15 Bit        Muxes := 2     
+	   2 Input    1 Bit        Muxes := 7     
+	   5 Input    1 Bit        Muxes := 1     
+---------------------------------------------------------------------------------
+Finished RTL Component Statistics 
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Part Resource Summary
+---------------------------------------------------------------------------------
+Part Resources:
+DSPs: 220 (col length:60)
+BRAMs: 280 (col length: RAMB18 60 RAMB36 30)
+---------------------------------------------------------------------------------
+Finished Part Resource Summary
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Cross Boundary and Area Optimization
+---------------------------------------------------------------------------------
+WARNING: [Synth 8-7080] Parallel synthesis criteria is not met
+WARNING: [Synth 8-7129] Port s_axi_awprot[2] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_awprot[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[31] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[30] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[29] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[28] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[27] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[26] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[25] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[24] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[23] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[22] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[21] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[20] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[19] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[18] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[17] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[16] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[15] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[14] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[13] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[12] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[11] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[10] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[9] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[8] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[7] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wdata[6] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[3] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[2] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_wstrb[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_araddr[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[2] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[1] in module axi_qam64_test_harness_hw is either unconnected or has no load
+WARNING: [Synth 8-7129] Port s_axi_arprot[0] in module axi_qam64_test_harness_hw is either unconnected or has no load
+---------------------------------------------------------------------------------
+Finished Cross Boundary and Area Optimization : Time (s): cpu = 00:00:07 ; elapsed = 00:00:08 . Memory (MB): peak = 2197.766 ; gain = 663.125 ; free physical = 4647 ; free virtual = 50238
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Timing Optimization
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Timing Optimization : Time (s): cpu = 00:00:07 ; elapsed = 00:00:08 . Memory (MB): peak = 2203.703 ; gain = 669.062 ; free physical = 4639 ; free virtual = 50230
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Technology Mapping
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Technology Mapping : Time (s): cpu = 00:00:08 ; elapsed = 00:00:08 . Memory (MB): peak = 2211.711 ; gain = 677.070 ; free physical = 4631 ; free virtual = 50222
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished IO Insertion : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Instances
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Instances : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Rebuilding User Hierarchy
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Rebuilding User Hierarchy : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Ports
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Ports : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Handling Custom Attributes
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Handling Custom Attributes : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Nets
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Nets : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Writing Synthesis Report
+---------------------------------------------------------------------------------
+
+Report BlackBoxes: 
++-+--------------+----------+
+| |BlackBox name |Instances |
++-+--------------+----------+
++-+--------------+----------+
+
+Report Cell Usage: 
++------+-----+------+
+|      |Cell |Count |
++------+-----+------+
+|1     |LUT1 |     7|
+|2     |LUT2 |     7|
+|3     |LUT3 |    11|
+|4     |LUT4 |     3|
+|5     |LUT5 |     6|
+|6     |LUT6 |    12|
+|7     |FDRE |    50|
++------+-----+------+
+
+Report Instance Areas: 
++------+-----------+-------------+------+
+|      |Instance   |Module       |Cells |
++------+-----------+-------------+------+
+|1     |top        |             |    96|
+|2     |  u_mapper |qam64_mapper |    47|
++------+-----------+-------------+------+
+---------------------------------------------------------------------------------
+Finished Writing Synthesis Report : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+---------------------------------------------------------------------------------
+Synthesis finished with 0 errors, 0 critical warnings and 77 warnings.
+Synthesis Optimization Runtime : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.523 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+Synthesis Optimization Complete : Time (s): cpu = 00:00:10 ; elapsed = 00:00:11 . Memory (MB): peak = 2376.531 ; gain = 841.883 ; free physical = 4530 ; free virtual = 50121
+INFO: [Project 1-571] Translating synthesized netlist
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2389.398 ; gain = 0.000 ; free physical = 4679 ; free virtual = 50271
+INFO: [Project 1-570] Preparing netlist for logic optimization
+INFO: [Opt 31-138] Pushed 0 inverter(s) to 0 load pin(s).
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2502.137 ; gain = 0.000 ; free physical = 4610 ; free virtual = 50201
+INFO: [Project 1-111] Unisim Transformation Summary:
+No Unisim elements were transformed.
+
+Synth Design complete | Checksum: 5d7f2bce
+INFO: [Common 17-83] Releasing license: Synthesis
+14 Infos, 77 Warnings, 0 Critical Warnings and 0 Errors encountered.
+synth_design completed successfully
+synth_design: Time (s): cpu = 00:00:15 ; elapsed = 00:00:13 . Memory (MB): peak = 2503.137 ; gain = 968.496 ; free physical = 4602 ; free virtual = 50193
+INFO: [Common 17-2834] synth_design peak Physical Memory [PSS] (MB): overall = 2000.025; main = 1977.033; forked = 335.170
+INFO: [Common 17-2834] synth_design peak Virtual Memory [VSS] (MB): overall = 3288.918; main = 2503.141; forked = 956.203
+# create_clock -name clk -period 10.000 [get_ports s_axi_aclk]
+# report_utilization -file [file join [file dirname [info script]] axi_qam64_harness_hw_utilization.rpt]
+# report_timing_summary -file [file join [file dirname [info script]] axi_qam64_harness_hw_timing.rpt]
+INFO: [Timing 38-35] Done setting XDC timing constraints.
+INFO: [Timing 38-91] UpdateTimingParams: Speed grade: -2, Delay Type: min_max.
+INFO: [Timing 38-191] Multithreading enabled for timing update using a maximum of 8 CPUs
+WARNING: [Timing 38-242] The property HD.CLK_SRC of clock port "s_axi_aclk" is not set. In out-of-context mode, this prevents timing estimation for clock delay/skew
+Resolution: Set the HD.CLK_SRC property of the out-of-context port to the location of the clock buffer instance in the top-level design
+# close_design
+INFO: [Common 17-206] Exiting Vivado at Fri Oct  2 09:01:52 2026...

@@ -1,0 +1,263 @@
+
+****** Vivado v2025.1 (64-bit)
+  **** SW Build 6140274 on Wed May 21 22:58:25 MDT 2025
+  **** IP Build 6138677 on Thu May 22 03:10:11 MDT 2025
+  **** SharedData Build 6139179 on Tue May 20 17:58:58 MDT 2025
+  **** Start of session at: Thu Oct  1 11:44:31 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source rs_bm_ooc_synth.tcl
+# read_verilog [file join [file dirname [info script]] .. fpga rtl rs_berlekamp_massey.v]
+# synth_design -top rs_berlekamp_massey -part xc7z020clg400-2 -mode out_of_context
+Command: synth_design -top rs_berlekamp_massey -part xc7z020clg400-2 -mode out_of_context
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Synth 8-7079] Multithreading enabled for synth_design using a maximum of 7 processes.
+INFO: [Synth 8-7078] Launching helper process for spawning children vivado processes
+INFO: [Synth 8-7075] Helper process launched with PID 3799855
+---------------------------------------------------------------------------------
+Starting Synthesize : Time (s): cpu = 00:00:03 ; elapsed = 00:00:03 . Memory (MB): peak = 1950.184 ; gain = 415.570 ; free physical = 5799 ; free virtual = 52403
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'rs_berlekamp_massey' [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:20]
+INFO: [Synth 8-6155] done synthesizing module 'rs_berlekamp_massey' (0#1) [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:20]
+WARNING: [Synth 8-6014] Unused sequential element delta_reg was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:145]
+WARNING: [Synth 8-6014] Unused sequential element coef_reg was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:149]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[0] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[1] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[2] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[3] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[4] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[5] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[6] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[7] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[8] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[9] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[10] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[11] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[12] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[13] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[14] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[15] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[16] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[17] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[18] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[19] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[20] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[21] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[22] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[23] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[24] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[25] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[26] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[27] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[28] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[29] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[30] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[31] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-6014] Unused sequential element newC_reg[32] was removed.  [/home/amither/Documents/SDR/fpga/rtl/rs_berlekamp_massey.v:152]
+WARNING: [Synth 8-4767] Trying to implement RAM 'synd_reg' in registers. Block RAM or DRAM implementation is not possible; see log for reasons.
+Reason is one or more of the following :
+	1: RAM has too many ports (16). Maximum supported = 16. 
+	2: No valid read/write found for RAM. 
+RAM "synd_reg" dissolved into registers
+---------------------------------------------------------------------------------
+Finished Synthesize : Time (s): cpu = 00:00:06 ; elapsed = 00:00:06 . Memory (MB): peak = 2152.121 ; gain = 617.508 ; free physical = 5611 ; free virtual = 52216
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Constraint Validation : Time (s): cpu = 00:00:06 ; elapsed = 00:00:07 . Memory (MB): peak = 2163.996 ; gain = 629.383 ; free physical = 5638 ; free virtual = 52243
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Loading Part and Timing Information
+---------------------------------------------------------------------------------
+Loading part: xc7z020clg400-2
+---------------------------------------------------------------------------------
+INFO: [Device 21-403] Loading part xc7z020clg400-2
+Finished Loading Part and Timing Information : Time (s): cpu = 00:00:06 ; elapsed = 00:00:07 . Memory (MB): peak = 2163.996 ; gain = 629.383 ; free physical = 5638 ; free virtual = 52243
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished RTL Optimization Phase 2 : Time (s): cpu = 00:00:10 ; elapsed = 00:00:09 . Memory (MB): peak = 2182.980 ; gain = 648.367 ; free physical = 5638 ; free virtual = 52244
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start RTL Component Statistics 
+---------------------------------------------------------------------------------
+Detailed RTL Component Info : 
++---Adders : 
+	   2 Input    6 Bit       Adders := 3     
+	   3 Input    6 Bit       Adders := 1     
+	   2 Input    5 Bit       Adders := 1     
++---XORs : 
+	   2 Input      8 Bit         XORs := 765   
++---Registers : 
+	                8 Bit    Registers := 100   
+	                6 Bit    Registers := 5     
+	                5 Bit    Registers := 1     
+	                1 Bit    Registers := 5     
++---Muxes : 
+	   2 Input    8 Bit        Muxes := 733   
+	   2 Input    1 Bit        Muxes := 42    
+---------------------------------------------------------------------------------
+Finished RTL Component Statistics 
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Part Resource Summary
+---------------------------------------------------------------------------------
+Part Resources:
+DSPs: 220 (col length:60)
+BRAMs: 280 (col length: RAMB18 60 RAMB36 30)
+---------------------------------------------------------------------------------
+Finished Part Resource Summary
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Cross Boundary and Area Optimization
+---------------------------------------------------------------------------------
+WARNING: [Synth 8-7080] Parallel synthesis criteria is not met
+---------------------------------------------------------------------------------
+Finished Cross Boundary and Area Optimization : Time (s): cpu = 00:01:03 ; elapsed = 00:01:02 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 4987 ; free virtual = 51594
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+
+ROM: Preliminary Mapping Report
++--------------------+------------+---------------+----------------+
+|Module Name         | RTL Object | Depth x Width | Implemented As | 
++--------------------+------------+---------------+----------------+
+|rs_berlekamp_massey | ginv       | 256x8         | LUT            | 
+|rs_berlekamp_massey | p_0_out    | 256x8         | LUT            | 
++--------------------+------------+---------------+----------------+
+
+---------------------------------------------------------------------------------
+Finished ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+No constraint files found.
+---------------------------------------------------------------------------------
+Start Timing Optimization
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Timing Optimization : Time (s): cpu = 00:01:15 ; elapsed = 00:01:14 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5023 ; free virtual = 51631
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Technology Mapping
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Technology Mapping : Time (s): cpu = 00:01:21 ; elapsed = 00:01:20 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5056 ; free virtual = 51670
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished IO Insertion : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51676
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Instances
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Instances : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51676
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Rebuilding User Hierarchy
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Rebuilding User Hierarchy : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51676
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Ports
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Ports : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51676
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Handling Custom Attributes
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Handling Custom Attributes : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51677
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Nets
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Nets : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51677
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Writing Synthesis Report
+---------------------------------------------------------------------------------
+
+Report BlackBoxes: 
++-+--------------+----------+
+| |BlackBox name |Instances |
++-+--------------+----------+
++-+--------------+----------+
+
+Report Cell Usage: 
++------+-------+------+
+|      |Cell   |Count |
++------+-------+------+
+|1     |CARRY4 |     2|
+|2     |LUT1   |    17|
+|3     |LUT2   |   139|
+|4     |LUT3   |   726|
+|5     |LUT4   |   729|
+|6     |LUT5   |   836|
+|7     |LUT6   |  2922|
+|8     |MUXF7  |    54|
+|9     |MUXF8  |    24|
+|10    |FDRE   |   863|
+|11    |FDSE   |     6|
++------+-------+------+
+
+Report Instance Areas: 
++------+---------+-------+------+
+|      |Instance |Module |Cells |
++------+---------+-------+------+
+|1     |top      |       |  6318|
++------+---------+-------+------+
+---------------------------------------------------------------------------------
+Finished Writing Synthesis Report : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51677
+---------------------------------------------------------------------------------
+Synthesis finished with 0 errors, 0 critical warnings and 37 warnings.
+Synthesis Optimization Runtime : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.465 ; gain = 1434.852 ; free physical = 5066 ; free virtual = 51677
+Synthesis Optimization Complete : Time (s): cpu = 00:01:24 ; elapsed = 00:01:23 . Memory (MB): peak = 2969.473 ; gain = 1434.852 ; free physical = 5070 ; free virtual = 51680
+INFO: [Project 1-571] Translating synthesized netlist
+Netlist sorting complete. Time (s): cpu = 00:00:00.03 ; elapsed = 00:00:00.02 . Memory (MB): peak = 2969.473 ; gain = 0.000 ; free physical = 5220 ; free virtual = 51832
+INFO: [Netlist 29-17] Analyzing 80 Unisim elements for replacement
+INFO: [Netlist 29-28] Unisim Transformation completed in 0 CPU seconds
+WARNING: [Netlist 29-101] Netlist 'rs_berlekamp_massey' is not ideal for floorplanning, since the cellview 'rs_berlekamp_massey' contains a large number of primitives.  Please consider enabling hierarchy in synthesis if you want to do floorplanning.
+INFO: [Project 1-570] Preparing netlist for logic optimization
+INFO: [Opt 31-138] Pushed 0 inverter(s) to 0 load pin(s).
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 3009.484 ; gain = 0.000 ; free physical = 5224 ; free virtual = 51834
+INFO: [Project 1-111] Unisim Transformation Summary:
+No Unisim elements were transformed.
+
+Synth Design complete | Checksum: 5484b31c
+INFO: [Common 17-83] Releasing license: Synthesis
+14 Infos, 38 Warnings, 0 Critical Warnings and 0 Errors encountered.
+synth_design completed successfully
+synth_design: Time (s): cpu = 00:01:29 ; elapsed = 00:01:26 . Memory (MB): peak = 3009.520 ; gain = 1474.906 ; free physical = 5223 ; free virtual = 51833
+INFO: [Common 17-2834] synth_design peak Physical Memory [PSS] (MB): overall = 2638.910; main = 2487.323; forked = 335.297
+INFO: [Common 17-2834] synth_design peak Virtual Memory [VSS] (MB): overall = 3925.668; main = 3009.488; forked = 956.199
+# create_clock -name clk -period 5.000 [get_ports clk]
+# report_utilization -file [file join [file dirname [info script]] rs_bm_utilization.rpt]
+# report_timing_summary -file [file join [file dirname [info script]] rs_bm_timing.rpt]
+INFO: [Timing 38-35] Done setting XDC timing constraints.
+INFO: [Timing 38-91] UpdateTimingParams: Speed grade: -2, Delay Type: min_max.
+INFO: [Timing 38-191] Multithreading enabled for timing update using a maximum of 8 CPUs
+WARNING: [Timing 38-242] The property HD.CLK_SRC of clock port "clk" is not set. In out-of-context mode, this prevents timing estimation for clock delay/skew
+Resolution: Set the HD.CLK_SRC property of the out-of-context port to the location of the clock buffer instance in the top-level design
+# close_design
+INFO: [Common 17-206] Exiting Vivado at Thu Oct  1 11:46:06 2026...
