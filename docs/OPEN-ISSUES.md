@@ -299,6 +299,59 @@ by the permission layer.
 
 ---
 
+### 3.11 RESOLVED 2026-10-02: production bridge RTT cut 172ms -> 58ms, permanently flashed
+
+**The dominant cost in the deployed bridge's 160-175ms RTT was RX packetizer
+accumulation at `SDR_PKT_BYTES=8192`** (`fpga/bd/sdr_insert.tcl`'s
+`rx_packetizer`), not RF propagation or CPU decode. Rebuilt the production
+`adi-hdl/projects/libre/` project with `SDR_PKT_BYTES=2048` (OOC WNS +0.232 ns,
+0 failing endpoints) and measured **58.5ms avg RTT, 52ms min, 0% loss** on the
+real two-unit RF link with BOTH units genuinely on the new bitstream
+simultaneously -- confirmed via each unit's own FPGA identity register
+(0x43C50018), not just one side.
+
+**A measurement trap cost real debugging time**: two earlier "both units
+updated" RTT readings (133ms, then 125ms) were actually each only ONE unit on
+2048 and the other silently reverted to 8192 -- both units apparently share a
+USB hub, and an unrelated wedge/replug on one side power-glitched the other,
+confirmed by both units showing IDENTICAL uptimes after the event. Lesson:
+after any physical intervention on one unit, re-verify the OTHER unit's state
+too before trusting a "both sides changed" measurement.
+
+**`--direct-iio-tx` (the bridge's alternate low-latency TX path) was tested and
+rejected as unsafe on this hardware/kernel.** It reproduces a TX-stall/
+receiver-freeze failure (TX stalled ~87% of wall time within seconds of
+starting) requiring a reboot to clear, same failure signature as an earlier
+`--tx-pipe-blocks 1` experiment on the default TX path. An orphaned
+`iio_readdev` child process survived a parent-only `kill -9` of the bridge and
+left the receiver permanently wedged even after a clean-looking restart --
+killing the actual sub-block holder (not just the bridge PID) is required, and
+even that did not recover this specific wedge; only `reboot -f` did.
+
+**Permanently flashed to both units' `qspi-linux` (mtd3) 2026-10-02**, not just
+RAM-loaded. The production golden image (`release/golden/
+pluto-datalink-6.12-golden.frm`) uses a custom-patched 6.12 kernel (the
+Winbond EAR-bank fix) with NO build tree present on this machine -- rebuilding
+via the generic `release/build-release.sh` pipeline would have silently
+regressed to the stock 5.10-era kernel bundle and reintroduced the flash
+corruption bug that kernel was built to fix. Used `release/make-frm.sh`
+instead (`KEEP_MAIA=1`, golden image as the base) to do a SURGICAL swap:
+extracted fdt/kernel/ramdisk from the golden FIT unchanged (verified
+byte-identical MD5 hashes after rebuild) and replaced only the `fpga@1`
+sub-image with the new 2048 bitstream. Wrote via `flashcp` to mtd3 on each
+unit (already on 6.12, so no JTAG needed per the golden image's own README),
+independently re-read and SHA256-verified the full 11.35MB region against the
+source file (not just trusting `flashcp -v`'s own verify pass, given this
+project's flash-verification bug history), then rebooted each unit and
+confirmed the new bitstream loads directly from u-boot at power-on with no
+`fpga_manager` script involved -- `PKT=0x800` and `--pkt 2048` from a cold
+boot, kernel identity unchanged (`6.12.0-g39414bc4038b-dirty #2 ... Sep 15
+2026`), both units' services auto-started correctly. Final end-to-end RTT after
+the permanent flash: 58.5ms avg, 0% loss, matching the RAM-loaded measurement
+exactly.
+
+---
+
 ## 4. Constraints to respect (not bugs)
 
 - **`dd` on `/dev/iio:*` wedges the device.** Raw `read()`/`write()` does not
