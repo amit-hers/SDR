@@ -29,7 +29,8 @@ typedef ap_axiu<8, 0, 0, 0>  BitByte;    // data = one payload byte
 
 void qpsk_demod_top(hls::stream<IQSample>&, hls::stream<BitByte>&,
                     volatile ap_uint<1>&, volatile ap_uint<32>&,
-                    volatile ap_uint<1>&, volatile ap_uint<1>&, volatile ap_uint<32>&);
+                    volatile ap_uint<1>&, volatile ap_uint<1>&, volatile ap_uint<32>&,
+                    volatile ap_uint<32>&, volatile ap_uint<32>&);
 
 namespace {
 
@@ -96,6 +97,7 @@ static void perturb(const std::string& dir, const std::string& name, size_t n_sa
     volatile ap_uint<1>  diff = 0;          // vectors are absolute, not differential
     volatile ap_uint<32> muclamp = 0;
     volatile ap_uint<32> locks = 0;
+    volatile ap_uint<32> gainsum = 0, phaseerrsum = 0;
     const int16_t* s = reinterpret_cast<const int16_t*>(iq.data());
     const size_t n = std::min(n_samp, iq.size() / 4);
     for (size_t k = 0; k < n; ++k) {
@@ -104,7 +106,7 @@ static void perturb(const std::string& dir, const std::string& name, size_t n_sa
         v.data.range(31, 16) = ap_uint<16>((uint16_t)s[k * 2 + 1]);
         v.keep = -1; v.strb = -1; v.last = 0;
         in.write(v);
-        qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp);
+        qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp, gainsum, phaseerrsum);
         while (!out.empty()) out.read();
     }
 }
@@ -130,6 +132,7 @@ int runVector(const std::string& dir, const std::string& name, size_t min_run,
     volatile ap_uint<1>  reset  = 0;
     volatile ap_uint<1>  diff   = 0;        // vectors are absolute, not differential
     volatile ap_uint<32> muclamp = 0;
+    volatile ap_uint<32> gainsum = 0, phaseerrsum = 0;
 
     // Start every vector from the core's power-on state.
     //
@@ -142,7 +145,7 @@ int runVector(const std::string& dir, const std::string& name, size_t min_run,
     // One call with reset high is enough; it is level sensitive and clears
     // every stage in a single pass.
     reset = 1;
-    qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp);
+    qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp, gainsum, phaseerrsum);
     reset = 0;
     while (!out.empty()) out.read();
 
@@ -156,7 +159,7 @@ int runVector(const std::string& dir, const std::string& name, size_t min_run,
         v.last = (n + 1 == nsamp) ? 1 : 0;
         in.write(v);
         // The core consumes at most one sample per call and may emit none.
-        qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp);
+        qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp, gainsum, phaseerrsum);
         while (!out.empty()) got.push_back((uint8_t)out.read().data);
     }
 
@@ -219,7 +222,8 @@ static int runHold(const std::string& dir, const std::string& name,
     hls::stream<IQSample> in("hin"); hls::stream<BitByte> out("hout");
     volatile ap_uint<1>  enable = 1, reset = 1, diff = 0;
     volatile ap_uint<32> locks = 0, muclamp = 0;
-    qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp);
+    volatile ap_uint<32> gainsum = 0, phaseerrsum = 0;
+    qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp, gainsum, phaseerrsum);
     reset = 0; while (!out.empty()) out.read();
     const int16_t* s = reinterpret_cast<const int16_t*>(iq.data());
     std::vector<uint8_t> got;
@@ -230,7 +234,7 @@ static int runHold(const std::string& dir, const std::string& name,
             v.data.range(31, 16) = ap_uint<16>((uint16_t)s[n * 2 + 1]);
             v.keep = -1; v.strb = -1; v.last = 0;
             in.write(v);
-            qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp);
+            qpsk_demod_top(in, out, enable, locks, reset, diff, muclamp, gainsum, phaseerrsum);
             while (!out.empty()) got.push_back((uint8_t)out.read().data);
         }
     const std::vector<uint8_t> g = toSymbols(got), w = toSymbols(want);

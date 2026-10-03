@@ -121,6 +121,14 @@ add_executable(health_probe_test health_probe_test.cpp)
 target_include_directories(health_probe_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME health_probe COMMAND health_probe_test)
 
+# The negotiated-MCS wire format and state machine: capability gating,
+# wire round-trips, and -- the test that matters most -- a two-node
+# simulation proving the TX/RX coupling bug (BridgeMode.hpp) is structurally
+# impossible, not just avoided by convention.
+add_executable(mcs_negotiation_test mcs_negotiation_test.cpp)
+target_include_directories(mcs_negotiation_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME mcs_negotiation COMMAND mcs_negotiation_test)
+
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 execute_process(COMMAND ${Python3_EXECUTABLE} -c "import cryptography"
                 RESULT_VARIABLE MISSION_CRYPTO_IMPORT OUTPUT_QUIET ERROR_QUIET)

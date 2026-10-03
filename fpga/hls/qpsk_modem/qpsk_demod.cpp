@@ -153,6 +153,19 @@ static const trig_t NCO_SIN[NCO_SIZE] = {
 };
 
 
+/* Set by agc/costas_loop every sample; read by the top function into the
+ * agc_gain_sum / phase_err_sum diagnostic registers. File-scope flags, same
+ * bridging pattern as g_mu_clamped above timing_recovery -- added to root-
+ * cause a periodic multi-second total-decode stall seen under sustained real
+ * traffic (video) that lock_count/mu_clamped alone could not localize: both
+ * keep incrementing normally throughout the stall (the core never stops
+ * emitting bytes), so neither can distinguish "decoding real data" from
+ * "emitting self-consistent garbage" once a loop has desynced. These two
+ * values -- AGC gain and Costas phase-error magnitude -- are exactly the
+ * internal state that would show which loop (if either) came unglued. */
+static acc_t g_last_gain      = acc_t(1.0f);
+static acc_t g_last_phase_err = acc_t(0.0f);
+
 static void agc(fixp_t& i, fixp_t& q, bool rst)
 {
 #pragma HLS INLINE
@@ -166,7 +179,7 @@ static void agc(fixp_t& i, fixp_t& q, bool rst)
      * the first sample. Reset means power-on state, which is what makes
      * "reset then run" and "fresh core" the same thing -- the property the
      * testbench now checks. */
-    if (rst) { gain = acc_t(1.0f); env = acc_t(0.5f); i = 0; q = 0; return; }
+    if (rst) { gain = acc_t(1.0f); env = acc_t(0.5f); i = 0; q = 0; g_last_gain = gain; return; }
 
     /* Measure the INPUT envelope, then set the gain from it.
      *
@@ -226,6 +239,7 @@ static void agc(fixp_t& i, fixp_t& q, bool rst)
     if (oq < -LIM) oq = -LIM;
     i = (fixp_t)oi;
     q = (fixp_t)oq;
+    g_last_gain = gain;
 }
 
 /* ── QPSK symbol decision → 2 bits ─────────────────────────────────
@@ -301,6 +315,7 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
         phase = 0; freq = 0; err_z = 0;
         cos_p = trig_t(1.0f); sin_p = trig_t(0.0f);
         i = 0; q = 0;
+        g_last_phase_err = acc_t(0.0f);
         return;
     }
     /* Loop gains, both exact powers of two -- deliberately, and it is a timing
@@ -361,6 +376,7 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
     /* Error for the NEXT symbol: e = sgn(I)*Q - sgn(Q)*I, as selects. */
     err_z = ((ir >= acc_t(0)) ? qr : (acc_t)(-qr))
           - ((qr >= acc_t(0)) ? ir : (acc_t)(-ir));
+    g_last_phase_err = (err_z >= acc_t(0)) ? err_z : (acc_t)(-err_z);
 
     /* Saturate into fixp_t. A rotation can raise the magnitude of either
      * component to sqrt(2) times the input, which leaves [-1,1) and wraps --
@@ -581,8 +597,24 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
  * Resources:  ~800 LUTs, ~400 FFs, 2 DSP48 slices (Zynq-7010 estimate)
  * ════════════════════════════════════════════════════════════════════ */
 /* ── AXI4-Lite demod control ─────────────────────────────────────────
- *   0x10  demod_enabled  RW  1 = demodulate, 0 = suppress output
- *   0x18  lock_count     RO  symbol lock events since reset
+ *   0x10  demod_enabled   RW  1 = demodulate, 0 = suppress output
+ *   0x18  lock_count      RO  symbol lock events since reset
+ *   0x38  agc_gain_sum    RO  sum of AGC gain*1000 over all symbols since reset
+ *   0x40  phase_err_sum   RO  sum of |Costas phase error|*1000, same basis
+ *
+ * agc_gain_sum and phase_err_sum exist to root-cause a stall mode where
+ * lock_count and mu_clamped BOTH keep advancing normally -- the core never
+ * stops emitting bytes -- while software sees zero decoded frames for many
+ * seconds. Neither existing register can tell "decoding real data" apart from
+ * "emitting self-consistent garbage" once a loop has desynced; these two can,
+ * because software reads them as monotonic accumulators (matching the
+ * existing lock_count/mu_clamped convention) and divides
+ * delta(sum)/delta(lock_count) over any polling interval to get that
+ * interval's AVERAGE gain or phase error, without needing to catch the exact
+ * instant of a transient. A healthy interval should show stable gain near 1x
+ * and a small phase error; gain pinned at the 4.0 or 0.05 clamp, or a phase
+ * error far above baseline, localizes the stall to the AGC or the Costas loop
+ * respectively, rather than leaving it as an unexplained "frames stopped".
  */
 void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
                     hls::stream<BitByte>&  m_axis_bits,
@@ -590,7 +622,9 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
                     volatile ap_uint<32>&  lock_count,
                     volatile ap_uint<1>&   soft_reset,
                     volatile ap_uint<1>&   diff_mode,
-                    volatile ap_uint<32>&  mu_clamped)
+                    volatile ap_uint<32>&  mu_clamped,
+                    volatile ap_uint<32>&  agc_gain_sum,
+                    volatile ap_uint<32>&  phase_err_sum)
 {
 #pragma HLS INTERFACE axis       port=s_axis_iq
 #pragma HLS INTERFACE axis       port=m_axis_bits
@@ -607,6 +641,8 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
  * until frames failed. A healthy loop clamps rarely; a pinned one clamps on
  * essentially every symbol, so the ratio against lock_count is the tell. */
 #pragma HLS INTERFACE s_axilite  port=mu_clamped     offset=0x30 bundle=ctrl
+#pragma HLS INTERFACE s_axilite  port=agc_gain_sum   offset=0x38 bundle=ctrl
+#pragma HLS INTERFACE s_axilite  port=phase_err_sum  offset=0x40 bundle=ctrl
 #pragma HLS INTERFACE s_axilite  port=return         bundle=ctrl
 /* II=2, not 1.
  *
@@ -633,6 +669,8 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 
     static ap_uint<32> locks = 0;
     static ap_uint<32> muclamp = 0;
+    static ap_uint<32> gainsum = 0;
+    static ap_uint<32> phaseerrsum = 0;
     /* Declared here, not at the packing code below, so the reset path can
      * reach them. The width rationale for both still lives with the packing. */
     static ap_uint<8>  bit_acc = 0;
@@ -703,6 +741,12 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
         locks    = 0;
         muclamp  = 0;
         mu_clamped = 0;
+        gainsum  = 0;
+        phaseerrsum = 0;
+        agc_gain_sum  = 0;
+        phase_err_sum = 0;
+        g_last_gain      = acc_t(1.0f);
+        g_last_phase_err = acc_t(0.0f);
         bit_acc  = 0;
         sym_cnt  = 0;
         prev_phase = 0;
@@ -764,6 +808,18 @@ void qpsk_demod_top(hls::stream<IQSample>& s_axis_iq,
 
     /* QPSK symbol decision */
     ap_uint<2> sym = qpsk_decision(ti, tq);
+
+    /* Accumulate once per SYMBOL (not per raw sample -- agc() runs at the
+     * input rate, 4x faster than symbols here), so delta(sum)/delta(lock_count)
+     * gives a clean per-symbol average over any polling interval. Scaled by
+     * 1000 (milli-units): gain's useful range is roughly [0.05, 4.0] per the
+     * AGC clamps, and |phase_err| is a difference of two ~1-magnitude
+     * products, so both stay far inside ap_uint<32> even accumulated over a
+     * long uptime between software reads. */
+    gainsum      += (ap_uint<32>)(int)(g_last_gain      * acc_t(1000.0f));
+    phaseerrsum  += (ap_uint<32>)(int)(g_last_phase_err * acc_t(1000.0f));
+    agc_gain_sum  = gainsum;
+    phase_err_sum = phaseerrsum;
     if (diff_en) {
         /* Gray -> binary, then difference in PHASE. For two bits the Gray
          * decode is the same operation as the encode, g ^ (g>>1). Differencing
