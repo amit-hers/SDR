@@ -312,7 +312,19 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
      * phase 0, so the pair has to be reset consistently with the accumulator
      * or the first rotation after reset uses a stale angle. */
     if (rst) {
-        phase = 0; freq = 0; err_z = 0;
+        phase = 0;
+        // Debug-only: seed freq near its ap_fixed<32,4> wrap boundary (+-8,
+        // AP_WRAP by default, no AP_SAT) instead of 0, to turn the ~9.6-minute
+        // real-time drift-to-wrap failure (see docs/OPEN-ISSUES.md 3.12) into
+        // a reproducible sub-second csim run. Compiled out entirely unless
+        // SDR_DEBUG_FREQ_INIT is defined -- zero effect on production,
+        // same convention as the existing SDR_BYPASS_* hooks in this file.
+#ifdef SDR_DEBUG_FREQ_INIT
+        freq = phase_t(SDR_DEBUG_FREQ_INIT);
+#else
+        freq = 0;
+#endif
+        err_z = 0;
         cos_p = trig_t(1.0f); sin_p = trig_t(0.0f);
         i = 0; q = 0;
         g_last_phase_err = acc_t(0.0f);
@@ -349,6 +361,36 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
 
     /* 2nd order loop filter, driven one symbol behind. */
     freq  = freq  + (phase_t)(Ki * err_z);
+    /* FREQ_LIMIT: freq is the loop's frequency-offset INTEGRATOR, and unlike
+     * phase (wrapped every cycle, just above) it had no bound at all -- only
+     * soft_reset ever touched it. phase_t is ap_fixed<32,4>, AP_WRAP by
+     * default (no AP_SAT specified), so an unbounded drift does not
+     * saturate, it silently wraps -- and simulation showed decode fails
+     * completely (best_run collapses from ~250 to ~2, chance level) once
+     * |freq| exceeds roughly 0.01, a tiny fraction of the representable
+     * +-8 range. An average per-symbol error bias as small as ~1e-8 --
+     * well within ordinary quantization/implementation asymmetry, not an
+     * exotic fault -- drifts freq past that threshold in ~990 million
+     * symbols at this loop's Ki=2^-10, which is exactly the real-hardware
+     * failure interval measured in docs/OPEN-ISSUES.md 3.12 (~9.6 minutes
+     * of continuous traffic, deterministically at the same lock_count every
+     * time). The clamp below is 5x that measured failure threshold: ample
+     * margin above anything this loop legitimately needs to track (the
+     * vectors above test up to 200 Hz CFO and pass comfortably inside it),
+     * while making the drift-to-failure this file's own soft_reset already
+     * proves fixes impossible to reach again.
+     *
+     * DIRECTION CHECK, recorded because it was gotten wrong once already
+     * while writing this fix: the measured SAFE zone is |freq| <= ~0.009
+     * (best_run stays ~236-244, matching the unperturbed baseline); decode
+     * collapses to chance level (best_run ~2) at |freq| = 0.01. The clamp
+     * must sit BELOW the break point, not some multiple above it -- a first
+     * attempt at this fix used 0.05 as "5x margin" and it was 5x on the
+     * WRONG side, inside the already-broken region. 0.005 is comfortably
+     * under the measured 0.009 safe ceiling. */
+    const phase_t FREQ_LIMIT = phase_t(0.005f);
+    if (freq >  FREQ_LIMIT) freq =  FREQ_LIMIT;
+    if (freq < -FREQ_LIMIT) freq = -FREQ_LIMIT;
     phase = phase + (phase_t)(Kp * err_z) + freq;
 
     /* Wrap to [-pi, pi]. Without this the accumulator walks off regardless of
@@ -494,7 +536,17 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
 
     if (rst) {
         for (int k = 0; k < 5; k++) { hi[k] = 0; hq[k] = 0; }
-        nco = 0; mu = 0; wctl = 0; integ = 0;
+        nco = 0; mu = 0; wctl = 0;
+        // Debug-only: same rationale as costas_loop's SDR_DEBUG_FREQ_INIT --
+        // integ is the OTHER unbounded ap_fixed<32,4> integrator in this core
+        // (wctl, its derived output, is clamped; integ itself is not), so it
+        // is an equally plausible candidate for the same drift-to-wrap bug.
+        // Compiled out unless SDR_DEBUG_INTEG_INIT is defined.
+#ifdef SDR_DEBUG_INTEG_INIT
+        integ = acc_t(SDR_DEBUG_INTEG_INIT);
+#else
+        integ = 0;
+#endif
         im_i = 0; im_q = 0; ip_i = 0; ip_q = 0;
         since = 0;
         i_out = 0; q_out = 0;
@@ -569,6 +621,20 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
      * phase correction. Both stay powers of two -- see costas_loop for why
      * that matters to timing closure. */
     integ = integ + Ki * err;
+    /* INTEG_LIMIT: integ is acc_t = ap_fixed<32,4>, the same type and the
+     * same unbounded-integrator problem as costas_loop's freq (see
+     * FREQ_LIMIT there for the full rationale and the measured numbers).
+     * Only wctl, integ's own derived OUTPUT, was clamped below -- integ
+     * itself kept accumulating underneath that clamp with nothing to stop
+     * it. Simulation showed the same collapse (best_run ~250 -> ~2) once
+     * |integ| exceeds roughly 0.01, the same order of magnitude as freq's
+     * threshold despite this loop's different Ki (2^-9 here). Clamped to
+     * the same value as FREQ_LIMIT, comfortably under the measured break
+     * point rather than above it -- see FREQ_LIMIT's comment for the
+     * direction mistake made and caught while first writing this fix. */
+    const acc_t INTEG_LIMIT = acc_t(0.005f);
+    if (integ >  INTEG_LIMIT) integ =  INTEG_LIMIT;
+    if (integ < -INTEG_LIMIT) integ = -INTEG_LIMIT;
     wctl  = Kp * err + integ;
 
     /* Bound the correction so a transient cannot invert or stall the strobe:
