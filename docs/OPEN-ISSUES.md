@@ -350,6 +350,54 @@ boot, kernel identity unchanged (`6.12.0-g39414bc4038b-dirty #2 ... Sep 15
 the permanent flash: 58.5ms avg, 0% loss, matching the RAM-loaded measurement
 exactly.
 
+### 3.12 OPEN: RX decode stall fires at an exact lock_count, not an RF event
+
+Under sustained real traffic (a video stream well under the link's rated
+capacity), the receiver periodically stops decoding ANY frame for 10+ seconds
+at a time (`sdr_bridge`'s own `RECOVERY` mechanism eventually detects and
+clears it). Earlier register-level telemetry (1-second resolution, read over
+SSH via repeated `devmem` calls) showed the demod's AGC and Costas carrier
+loop staying completely healthy through every stall -- no clamping, no drift
+-- which argued against the obvious RF-side explanations.
+
+**Built `fpga/tools/rx_telemetry.c`**, a proper on-target sampler (opens
+`/dev/mem` once, mmaps the demod register window, plain memory reads in a
+tight loop -- no per-sample fork/exec) achieving a clean ~145Hz with only
+6.7-8.1ms jitter, a RAM ring buffer, and an automatic freeze-and-dump
+triggered by `/tmp/bridge_stats.json`'s `recoveries` field incrementing.
+
+**Result: two independent captures, taken at different wall-clock times and
+starting from different absolute `lock_count` values (200M vs 236M), both
+failed at EXACTLY `lock_count` = 247,578,335 since the last reset** -- not
+approximately, bit-for-bit identical, with the full 25-sample delta sequence
+leading into each reset also identical. A real RF fade or interference event
+cannot reproduce at an exact count across two asynchronous cycles; this is
+the signature of a fixed-width counter or timer overflowing somewhere in the
+pipeline after a fixed amount of processing (~9.6 minutes continuous at the
+observed rate) -- which is also why no earlier, shorter synthetic test ever
+caught this.
+
+247578335 is not a clean power of two or power-of-two-minus-one (bit length
+28; `2^28 - 1 = 268435455`, off by ~20.8M), so the specific overflowing
+counter is NOT YET IDENTIFIED -- only that one exists, and precisely where
+(by count, not time or RF condition) it fires. Next step: search for a
+counter sized to roll over at ~247.6M events, or a clean divisor/multiple of
+it in a different clock domain (raw IQ sample clock, the 35MHz modem clock's
+own cycle count, a DMA re-arm counter, an AXI transaction sequence counter),
+not further AGC/RF theorizing.
+
+**A separate bug, found in the same capture and NOT to be trusted**: two new
+AXI-Lite diagnostic registers added to the demod core this session
+(`agc_gain_sum`, `phase_err_sum`) read back as physically impossible --
+computed average gain exceeded the hardware's own 4.0 clamp by roughly 100x,
+and the raw `gainsum` register value was observed DECREASING sample-to-sample,
+which an add-only accumulator should never do. Likely an HLS scheduling/
+readback quirk specific to how those two outputs are wired, not real AGC/
+Costas behavior. Needs its own fix before being used again.
+
+Raw captures preserved at `qualification/rx_telemetry_0.log` and
+`rx_telemetry_1.log`.
+
 ---
 
 ## 4. Constraints to respect (not bugs)
