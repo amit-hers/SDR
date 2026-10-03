@@ -350,7 +350,71 @@ boot, kernel identity unchanged (`6.12.0-g39414bc4038b-dirty #2 ... Sep 15
 the permanent flash: 58.5ms avg, 0% loss, matching the RAM-loaded measurement
 exactly.
 
-### 3.12 OPEN: RX decode stall fires at an exact lock_count, not an RF event
+### 3.12 ROOT CAUSE FOUND AND FIXED (partial hardware validation, not yet in permanent flash)
+
+**Root cause**: `freq` (Costas carrier loop integrator) and `integ` (Gardner
+timing loop integrator) in `fpga/hls/qpsk_modem/qpsk_demod.cpp` are both
+`ap_fixed<32,4>` with no explicit bound -- unlike their siblings `phase`,
+`mu`, and `wctl`, which all already clamp. Vitis HLS's default `AP_WRAP`
+overflow mode means an unbounded drift silently wraps rather than
+saturating. Simulation established the real tracking tolerance at only
+~0.009 (far inside the type's +-8 representable range): seeding either
+variable at 0.01+ causes immediate, total decode failure (best_run collapses
+from ~250 to ~2, chance level) -- reproducing the ~9.6-minute hardware bug in
+under a second of `csim`. An average per-symbol error bias as small as
+~1e-8 -- ordinary quantization noise -- drifts past that threshold in
+~990 million symbols, matching the exact, reproducible `lock_count` failure
+below.
+
+**Fix (v1, combinational)**: a 2-line clamp on each integrator (0.005,
+comfortably under the measured break point), same pattern already used for
+`mu`/`wctl`. Verified byte-for-byte identical to the pre-fix baseline across
+all 9 `csim` cases; every previously-fatal seed value now recovers
+immediately. Full project regression suite: 45/45 passing. Real, disclosed
+cost, found only after checking the modem clock domain specifically in the
+Vivado **Intra Clock Table** (the single reported "overall Design Timing
+Summary" WNS is dominated by an unrelated, pre-existing `clk_fpga_0` AXI
+bottleneck and looks similar build-to-build regardless of this fix --
+checking only that number would have missed a real regression): the added
+comparison in the Costas/timing loops' single-cycle recurrence dropped the
+**35MHz modem clock domain's own WNS from +3.066ns to +0.273ns** (full
+routed Vivado implementation, not just the HLS OOC estimate) -- a 91% margin
+loss, still a clean pass with 0 failing endpoints but meaningfully thinner.
+
+**Fix (v2, pipelined -- the version now carried forward)**: reordered the
+Costas loop so `phase` reads `freq` from the *previous* cycle and `freq`'s
+own clamped update happens after, matching this file's existing "driven one
+symbol behind" idiom (already used for `err_z` and the registered
+`cos_p`/`sin_p` pair) -- a one-line statement reorder, no new variables,
+zero added logic. The identical reorder applied to the Gardner timing loop's
+`integ`/`wctl` was tried and **reverted**: it regressed the `shift25`
+quarter-sample-offset vector (best_run 242 -> 162, required 235), isolated
+by testing each loop's reorder independently. The Costas-only version is
+byte-for-byte identical to the unclamped baseline across every `csim`
+vector, including `shift25`/`shift50`. Routed result: modem clock domain WNS
+**+0.633ns** (WHS +0.056ns, 0 failing / 36789 endpoints) -- more than double
+v1's margin for the cost of +104 LUTs/+3 FFs and no functional change.
+Resource vs the pre-fix baseline: 27433 LUTs (+184), 32432 FFs (-179).
+Overall design-level WNS (the unrelated `clk_fpga_0` domain) is +0.216ns, 0
+failing, all constraints met, consistent across all three builds.
+
+**Hardware validation: PARTIAL, genuinely positive, not yet complete.** v1
+(the combinational clamp, +0.273ns margin) was deployed RAM-only to Unit B
+and soak-tested with continuous real video traffic (an auto-reconnecting
+RTSP client, since the test clip itself is only ~7.5 minutes and loops).
+Result: **0 `RECOVERY` events over a continuous, verified-active 12-minute
+run** -- exceeding the single previously-measured failure interval (~9.6
+min) but short of the full 2x margin (~19.2 min) originally planned; the
+test was stopped early by request rather than run to completion. v2 (the
+pipelined version above) has not yet been deployed to hardware -- both units
+were disconnected before it was built. Since v2 is functionally identical
+and has more timing margin than the already-soak-tested v1, it is the
+version to flash and validate next once the units are reconnected. **Not
+yet in the permanent flash** -- both units are back on the unmodified
+production bitstream. A longer rerun (ideally 30+ minutes) on v2 is the
+natural next step before this fix goes anywhere near the permanent image.
+
+Original investigation (how the exact failure count was found), preserved below:
 
 Under sustained real traffic (a video stream well under the link's rated
 capacity), the receiver periodically stops decoding ANY frame for 10+ seconds
@@ -378,13 +442,10 @@ observed rate) -- which is also why no earlier, shorter synthetic test ever
 caught this.
 
 247578335 is not a clean power of two or power-of-two-minus-one (bit length
-28; `2^28 - 1 = 268435455`, off by ~20.8M), so the specific overflowing
-counter is NOT YET IDENTIFIED -- only that one exists, and precisely where
-(by count, not time or RF condition) it fires. Next step: search for a
-counter sized to roll over at ~247.6M events, or a clean divisor/multiple of
-it in a different clock domain (raw IQ sample clock, the 35MHz modem clock's
-own cycle count, a DMA re-arm counter, an AXI transaction sequence counter),
-not further AGC/RF theorizing.
+28; `2^28 - 1 = 268435455`, off by ~20.8M) -- it is not a counter wrapping at
+all. **Since resolved**: it is the Costas/timing loop integrators drifting
+past a tolerance roughly 1600x smaller than their representable range; see
+the root-cause writeup above this section.
 
 **A separate bug, found in the same capture and NOT to be trusted**: two new
 AXI-Lite diagnostic registers added to the demod core this session

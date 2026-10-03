@@ -359,8 +359,17 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
     acc_t ir =  (acc_t)i * (acc_t)cos_p + (acc_t)q * (acc_t)sin_p;
     acc_t qr = -(acc_t)i * (acc_t)sin_p + (acc_t)q * (acc_t)cos_p;
 
-    /* 2nd order loop filter, driven one symbol behind. */
-    freq  = freq  + (phase_t)(Ki * err_z);
+    /* 2nd order loop filter, driven one symbol behind -- and now the FREQ
+     * CLAMP is too, which is what actually restores timing margin (see
+     * below). phase reads freq AS IT STOOD AT THE END OF THE PREVIOUS CALL,
+     * i.e. already incremented and clamped for a symbol that has already
+     * gone by; freq's own update for THIS symbol happens afterward, to be
+     * read next time. This is the exact same "driven one symbol behind"
+     * idiom this loop already uses for err_z and the registered trig pair
+     * (cos_p/sin_p) -- just applied to the clamp as well, instead of only
+     * to the multiply. */
+    phase = phase + (phase_t)(Kp * err_z) + freq;
+
     /* FREQ_LIMIT: freq is the loop's frequency-offset INTEGRATOR, and unlike
      * phase (wrapped every cycle, just above) it had no bound at all -- only
      * soft_reset ever touched it. phase_t is ap_fixed<32,4>, AP_WRAP by
@@ -387,11 +396,25 @@ static void costas_loop(fixp_t& i, fixp_t& q, bool rst)
      * must sit BELOW the break point, not some multiple above it -- a first
      * attempt at this fix used 0.05 as "5x margin" and it was 5x on the
      * WRONG side, inside the already-broken region. 0.005 is comfortably
-     * under the measured 0.009 safe ceiling. */
+     * under the measured 0.009 safe ceiling.
+     *
+     * PIPELINING NOTE, found measuring the first (combinational) version of
+     * this fix on real hardware: compare-then-consume in the SAME cycle put
+     * the clamp directly on the modem clock's own critical path (confirmed
+     * via Vivado's routed timing report: the worst path in the entire
+     * modem_clk domain became exactly this comparison, 55 logic levels,
+     * landing in phase's update register) and dropped that domain's WNS
+     * from +3.066ns to +0.273ns -- a real pass, but a 91% margin loss, too
+     * thin for production. Moving phase's read of freq to BEFORE this
+     * update (above) breaks that same-cycle chain, the same fix already
+     * used elsewhere in this project (the Berlekamp-Massey delta-tree
+     * split, the 64-QAM demapper pipelining) for the identical class of
+     * problem: isolate the deep computation into its own stage fed by a
+     * register, not raw combinational inputs. */
+    freq  = freq  + (phase_t)(Ki * err_z);
     const phase_t FREQ_LIMIT = phase_t(0.005f);
     if (freq >  FREQ_LIMIT) freq =  FREQ_LIMIT;
     if (freq < -FREQ_LIMIT) freq = -FREQ_LIMIT;
-    phase = phase + (phase_t)(Kp * err_z) + freq;
 
     /* Wrap to [-pi, pi]. Without this the accumulator walks off regardless of
      * how many integer bits it has, and the ROM index loses meaning. */
@@ -622,16 +645,21 @@ static bool timing_recovery(fixp_t i, fixp_t q, fixp_t& i_out, fixp_t& q_out,
      * that matters to timing closure. */
     integ = integ + Ki * err;
     /* INTEG_LIMIT: integ is acc_t = ap_fixed<32,4>, the same type and the
-     * same unbounded-integrator problem as costas_loop's freq (see
-     * FREQ_LIMIT there for the full rationale and the measured numbers).
-     * Only wctl, integ's own derived OUTPUT, was clamped below -- integ
-     * itself kept accumulating underneath that clamp with nothing to stop
-     * it. Simulation showed the same collapse (best_run ~250 -> ~2) once
+     * same unbounded-integrator problem as costas_loop's freq. Only wctl,
+     * integ's own derived OUTPUT, was clamped below -- integ itself kept
+     * accumulating underneath that clamp with nothing to stop it.
+     * Simulation showed the same collapse (best_run ~250 -> ~2) once
      * |integ| exceeds roughly 0.01, the same order of magnitude as freq's
      * threshold despite this loop's different Ki (2^-9 here). Clamped to
      * the same value as FREQ_LIMIT, comfortably under the measured break
-     * point rather than above it -- see FREQ_LIMIT's comment for the
-     * direction mistake made and caught while first writing this fix. */
+     * point rather than above it.
+     *
+     * NOT pipelined (unlike costas_loop's freq/phase): deferring wctl's
+     * read of integ by one symbol regressed the shift25 vector (quarter-
+     * sample timing offset), best_run 242 -> 162 -- this loop's Gardner
+     * timing recovery is evidently more delay-sensitive than the carrier
+     * loop is. Left same-cycle; see TASK 2 writeup for the resulting
+     * modem_clk timing tradeoff this choice implies. */
     const acc_t INTEG_LIMIT = acc_t(0.005f);
     if (integ >  INTEG_LIMIT) integ =  INTEG_LIMIT;
     if (integ < -INTEG_LIMIT) integ = -INTEG_LIMIT;
